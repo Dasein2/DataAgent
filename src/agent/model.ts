@@ -8,7 +8,7 @@ import { DEFAULT_MODEL_API, findModelApi } from "./model-apis.js";
 import { readPiConfig } from "./pi-config.js";
 
 /** Where the credential for the active model came from. Never includes the secret itself. */
-export type ModelKeySource = "env" | "channel" | "none";
+export type ModelKeySource = "console" | "env" | "channel" | "none";
 
 export interface ModelHandle {
   runtime: ModelRuntime;
@@ -99,10 +99,13 @@ export function modelsFileFor(
 }
 
 /**
- * Builds the pi model runtime once. Custom endpoints are described in models.json;
- * the API key is only ever held in memory (setRuntimeApiKey), never written to disk.
+ * Builds the pi model runtime once. Custom endpoints are described in models.json; the API key is
+ * passed straight to `setRuntimeApiKey` and never enters the generated file.
+ *
+ * `consoleKey` is the key the operator saved in the console for this provider; it wins over `.env`
+ * and over the provider's own pi credential.
  */
-export async function createModelHandle(app: AppConfig): Promise<ModelHandle> {
+export async function createModelHandle(app: AppConfig, consoleKey?: string): Promise<ModelHandle> {
   const dir = join(app.dataDir, "pi");
   await mkdir(dir, { recursive: true });
   const modelsPath = join(dir, "models.json");
@@ -149,8 +152,14 @@ export async function createModelHandle(app: AppConfig): Promise<ModelHandle> {
 
   // An explicit key wins over the one from the operator's models.json; neither is written anywhere.
   const channelKey = pi.apiKeys[app.model.provider];
-  const apiKey = app.model.apiKey ?? channelKey;
-  const keySource: ModelKeySource = app.model.apiKey ? "env" : channelKey ? "channel" : "none";
+  const apiKey = consoleKey ?? app.model.apiKey ?? channelKey;
+  const keySource: ModelKeySource = consoleKey
+    ? "console"
+    : app.model.apiKey
+      ? "env"
+      : channelKey
+        ? "channel"
+        : "none";
   if (apiKey) {
     await runtime.setRuntimeApiKey(app.model.provider, apiKey);
   }

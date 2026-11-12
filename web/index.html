@@ -303,15 +303,16 @@
         </div>
         <div class="grid-2">
           <div><label title="由模型元数据决定，本服务只发送文本">输入模态</label><input id="mInput" disabled /></div>
-          <div><label>API key（仅本进程生效，不写磁盘）</label><input id="mApiKey" type="password" autocomplete="new-password" /></div>
+          <div><label title="按 provider 保存，换渠道不会带过去">API key（保存在服务端，留空表示不修改）</label><input id="mApiKey" type="password" autocomplete="new-password" /></div>
         </div>
+        <div class="hint" id="mApiKeyHint"></div>
         <div class="buttons">
           <button class="ghost" id="btnModelReload">重新读取</button>
           <button id="btnModelSave">保存模型配置</button>
           <button class="ghost" id="btnModelReset">恢复为 .env</button>
           <button class="ghost" id="btnModelTest">测试模型</button>
         </div>
-        <div class="hint">保存写到服务端的 <code>data/model-settings.json</code>，<b>不会修改 .env</b>；只提交你改过的字段，其余继续跟随 .env 与 pi 的模型目录。点「恢复为 .env」可全部清除。仅影响<b>新建</b>的会话。API key 只在本进程有效，想持久化请写进 .env 的 DATA_AGENT_MODEL_API_KEY。</div>
+        <div class="hint">保存写到服务端的 <code>data/model-settings.json</code>，<b>不会修改 .env</b>；只提交你改过的字段，其余继续跟随 .env 与 pi 的模型目录。API key 单独存在 <code>data/model-key.json</code>，按 provider 归属，换渠道不会带过去；点「恢复为 .env」会把覆盖和保存的 key 一起清掉。仅影响<b>新建</b>的会话。</div>
         <div id="modelStatus" class="status info">未读取</div>
       </div>
     </div>
@@ -767,6 +768,30 @@ function escapeHtml(text) {
 }
 
 // Absolute paths are long and mostly repetition; the full value stays in the title attribute.
+// The console can persist a key per provider; how it is protected depends on the server's config, so
+// the summary says which of the two modes is in effect instead of implying the stronger one.
+function keyStore(view) {
+  return view.api_key_store || {};
+}
+
+function keySourceText(view) {
+  const protection = keyStore(view).protection === "aes-256-gcm" ? "已加密" : "0600 明文";
+  return {
+    console: "控制台保存 · " + protection,
+    env: "来自 .env",
+    channel: "来自 pi models.json（只读导入）",
+    "pi-auth": "来自 pi auth.json",
+  }[view.api_key_source] || "none";
+}
+
+function keyStoreText(view) {
+  const store = keyStore(view);
+  if (!store.providers || store.providers.length === 0) return "尚无保存的 key";
+  const protection = store.protection === "aes-256-gcm" ? "已加密" : "0600 明文";
+  const broken = store.status === "invalid" ? "；有 key 无法解密，请重新保存" : "";
+  return store.providers.length + " 个 provider（" + store.providers.join(", ") + "）· " + protection + broken;
+}
+
 function shortPath(path) {
   const parts = path.split(/[\\/]/);
   return parts.length <= 2 ? path : "…/" + parts.slice(-2).join("/");
@@ -1128,8 +1153,16 @@ function renderModel(view) {
   $("mInput").value = (view.input || []).join(" + ") || "—";
   $("mApiKey").value = "";
   $("mApiKey").placeholder = view.has_api_key
-    ? "已配置（来源 " + view.api_key_source + "），留空表示不修改"
-    : "未配置；填入后仅本次运行有效";
+    ? "已配置（" + keySourceText(view) + "），留空表示不修改"
+    : "未配置；填入后会保存在服务端";
+  const store = keyStore(view);
+  // Without DATA_AGENT_PROFILE_SECRET_KEY the key is a plain 0600 file, which is not the same claim
+  // as "encrypted" — say it where the operator types the key.
+  $("mApiKeyHint").textContent = view.api_key_source === "console"
+    ? "已保存；" + (store.protection === "aes-256-gcm"
+      ? "用 DATA_AGENT_PROFILE_SECRET_KEY 加密存放。"
+      : "服务端未设置 DATA_AGENT_PROFILE_SECRET_KEY，以 0600 明文存放（与 .env 同级风险）。")
+    : "填了就会保存到 data/model-key.json；留空则不保存。";
   // Snapshot the rendered form: save() diffs against this, so only fields the operator touched are
   // sent. Diffing against `.env` instead would pin values that come from pi's built-in catalogue.
   state.modelForm = {
@@ -1153,17 +1186,13 @@ function renderModel(view) {
       (view.reasoning ? "，reasoning 开启" : "，reasoning 关闭") + overridden("thinkingLevel") + overridden("reasoning") + "</span>" +
     '<span class="k">窗口 / 输出</span><span>' + view.context_window + " / " + view.max_tokens + overridden("contextWindow") + overridden("maxTokens") + "</span>" +
     '<span class="k">输入</span><span>' + escapeHtml((view.input || []).join(" + ") || "—") + "</span>" +
-    '<span class="k">api key</span><span>' + escapeHtml({
-      console: "本进程内存（不落盘）",
-      env: "来自 .env",
-      channel: "来自 pi models.json（只读导入）",
-      "pi-auth": "来自 pi auth.json",
-    }[view.api_key_source] || "none") + "</span>" +
+    '<span class="k">api key</span><span>' + escapeHtml(keySourceText(view)) + "</span>" +
     '<span class="k">auth 文件</span><span title="' + escapeHtml(view.auth_path || "") + '">' + escapeHtml(view.auth_path ? shortPath(view.auth_path) : "—") + "</span>" +
     '<span class="k">凭证就绪</span><span style="color:' + (view.ready ? "var(--ok)" : "var(--err)") + '">' +
       (view.ready ? "yes" : "no — 任务会失败") + "</span>" +
     '<span class="k">覆盖文件</span><span title="' + escapeHtml(view.settings_path || "") + '">' + escapeHtml(view.settings_status) +
-      (view.settings_status === "ok" ? " · model-settings.json" : " · 尚未创建（当前与 .env 一致）") + "</span>";
+      (view.settings_status === "ok" ? " · model-settings.json" : " · 尚未创建（当前与 .env 一致）") + "</span>" +
+    '<span class="k">key 文件</span><span title="' + escapeHtml(keyStore(view).path || "") + '">' + escapeHtml(keyStoreText(view)) + "</span>";
   $("btnModelSave").disabled = !view.editable;
   $("btnModelReset").disabled = !view.editable;
   $("modelBadge").textContent = "model: " + view.provider + "/" + view.model_id;

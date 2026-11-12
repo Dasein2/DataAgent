@@ -191,9 +191,14 @@ level, reasoning, context/max tokens, credential source, readiness) and can over
 Overrides are stored in `model-settings.json` and layered over the environment: `null` in a patch drops
 that override back to the environment value, and **恢复为 .env** clears the file. Two deliberate limits:
 
-- **The API key is never persisted.** It is accepted write-only and held in process memory, so it
-disappears on restart — set `DATA_AGENT_MODEL_API_KEY` to make it durable. The API only reports
-`has_api_key` and the source (`env`, `console`, `none`).
+- **A key typed in the console is stored per provider** in `model-key.json`, so a restart is not a
+reconfiguration. It is accepted write-only and never returned: the API reports only `has_api_key`,
+`api_key_source` (`console`, `env`, `channel`, `pi-auth`, `none`) and `api_key_store` (path,
+`protection`, providers). Encryption uses the same `DATA_AGENT_PROFILE_SECRET_KEY` as saved
+connection passwords; without it the file is plain text with mode 0600 — the same exposure as
+`.env` — and `protection` says `file-mode-0600` instead of implying otherwise. A key is scoped to
+the provider it was typed for, so switching channels never forwards one gateway's credential to
+another endpoint, and **恢复为 .env** deletes the saved keys along with the overrides.
 - **Editing is refused in production by default** (`MODEL_EDIT_DISABLED`, 403), because pointing
 `baseUrl` elsewhere redirects every database answer to another endpoint. Set
 `DATA_AGENT_ALLOW_MODEL_EDIT=1` to allow it deliberately.
@@ -218,6 +223,8 @@ into this service. It reads, and never writes, `~/.pi/agent/models.json`, `setti
 - `POST /v1/model/select {provider, modelId}` switches to one of them. Only those two fields are
   persisted: base url, protocol, limits and any console key belong to the channel they were typed
   for. Endpoint metadata keeps coming from the pi config, so editing that file stays effective.
+- A key saved from the console beats `.env` and the channel's own credential for the same provider,
+  and is picked up again when you switch back to that channel.
 
 Keys from the pi config are read into memory only; the generated `models.json` this service writes
 for its own runtime is built with `apiKey`/`oauth` stripped (a `${VAR}` reference survives, since it

@@ -14,6 +14,7 @@ import { AnalysisSession, type TaskRecord } from "./runtime.js";
 import { HistoryStore, connectionKey } from "./history.js";
 import { ProfileStore } from "../db/profiles-store.js";
 import { DEFAULT_MODEL_API, SELECTABLE_MODEL_APIS, findModelApi } from "./model-apis.js";
+import { ModelKeyStore, type KeyStoreState } from "./model-key-store.js";
 import {
   ModelSettingsStore,
   THINKING_LEVELS,
@@ -51,10 +52,13 @@ export interface ModelView {
   headers: Record<string, string>;
   has_api_key: boolean;
   /**
-   * `console` is process-local: it disappears when the service restarts. `channel` is a key read from
-   * the operator's pi models.json, `pi-auth` one that pi resolves from its auth store.
+   * `console` is a key saved from the console (in `model-key.json`, scoped to this provider), `env`
+   * one from the environment, `channel` one read from the operator's pi models.json, and `pi-auth`
+   * one pi resolves from its own auth store.
    */
   api_key_source: "console" | "env" | "channel" | "pi-auth" | "none";
+  /** Where a console-saved key lives, and whether it is encrypted there. */
+  api_key_store: KeyStoreState;
   auth_path: string | null;
   /** False when no credential resolves, so every task would fail. */
   ready: boolean;
@@ -113,8 +117,8 @@ export class AnalysisService {
   private readonly envModel: ModelConfig;
   /** Swapped by `updateModel()`; sessions created afterwards use the new handle. */
   private model: ModelHandle;
-  /** Console-supplied credential: memory only, never written to disk. */
-  private consoleApiKey?: string;
+  /** Keys typed in the console, one per provider, persisted next to the other service data. */
+  private readonly modelKeys: ModelKeyStore;
   private sweeper?: ReturnType<typeof setInterval>;
   private closed = false;
 
@@ -123,10 +127,12 @@ export class AnalysisService {
     model: ModelHandle,
     readonly results: ResultStore,
     modelSettings: ModelSettingsStore,
+    modelKeys: ModelKeyStore,
     envModel: ModelConfig,
   ) {
     this.model = model;
     this.modelSettings = modelSettings;
+    this.modelKeys = modelKeys;
     this.envModel = envModel;
     this.history = new HistoryStore(join(app.dataDir, "history"));
     this.broker = new EventBroker(5_000, this.history);
@@ -136,11 +142,16 @@ export class AnalysisService {
   static async create(app: AppConfig): Promise<AnalysisService> {
     // Console overrides are persisted, so they must be applied before the runtime is built once.
     const modelSettings = new ModelSettingsStore(join(app.dataDir, "model-settings.json"));
+    const modelKeys = new ModelKeyStore(join(app.dataDir, "model-key.json"), app.profileSecretKey);
     const envModel: ModelConfig = { ...app.model };
     const persisted = modelSettings.get();
     if (Object.keys(persisted).length > 0) app.model = effectiveModel(envModel, persisted);
-    const model = await createModelHandle(app);
-    const service = new AnalysisService(app, model, new ResultStore(`${app.dataDir}/results`), modelSettings, envModel);
+    // `.env`'s key belongs to `.env`'s provider, and a saved key belongs to the provider it was typed
+    // for: either one may only be applied where it was issued.
+    if (app.model.provider !== envModel.provider) app.model.apiKey = undefined;
+    const savedKey = modelKeys.get(app.model.provider);
+    const model = await createModelHandle(app, savedKey);
+    const service = new AnalysisService(app, model, new ResultStore(`${app.dataDir}/results`), modelSettings, modelKeys, envModel);
     service.sweeper = setInterval(() => void service.sweepExpired(), 30_000);
     service.sweeper.unref?.();
     return service;
@@ -165,15 +176,16 @@ export class AnalysisService {
     // the catalogue decides the limits, and echoing our defaults here would be a lie.
     const actual = this.model.model;
     const authStatus = this.model.runtime.getProviderAuthStatus(actual.provider);
-    const keySource: ModelView["api_key_source"] = this.consoleApiKey
-      ? "console"
-      : this.model.keySource === "env"
-        ? "env"
-        : this.model.keySource === "channel"
-          ? "channel"
-          : authStatus.configured
-            ? "pi-auth"
-            : "none";
+    const keySource: ModelView["api_key_source"] =
+      this.model.keySource === "console"
+        ? "console"
+        : this.model.keySource === "env"
+          ? "env"
+          : this.model.keySource === "channel"
+            ? "channel"
+            : authStatus.configured
+              ? "pi-auth"
+              : "none";
     const overrideSources: Record<string, "console" | "env"> = {};
     for (const field of [
       "provider",
@@ -202,6 +214,7 @@ export class AnalysisService {
       headers: redact(configured.headers ?? {}),
       has_api_key: authStatus.configured,
       api_key_source: keySource,
+      api_key_store: this.modelKeys.state(),
       auth_path: configured.authPath ?? null,
       ready: this.model.hasAuth,
       editable: this.app.allowModelEdit,
@@ -296,8 +309,8 @@ export class AnalysisService {
   async updateModel(patch: ModelPatch): Promise<ModelView> {
     this.assertModelEditable();
     const overrides = mergeOverrides(this.modelSettings.get(), patch);
-    const apiKey = patch.apiKey === undefined ? this.consoleApiKey : (patch.apiKey ?? undefined);
-    return this.commit(overrides, apiKey, (candidate) => this.inheritKnownLimits(candidate, patch, overrides));
+    // `undefined` keeps whatever key is already saved, `null` deletes it, a string replaces it.
+    return this.commit(overrides, patch.apiKey, (candidate) => this.inheritKnownLimits(candidate, patch, overrides));
   }
 
   /**
@@ -323,9 +336,8 @@ export class AnalysisService {
     const overrides = this.modelSettings.get();
     const next: ModelOverrides = { provider, modelId };
     if (overrides.thinkingLevel !== undefined) next.thinkingLevel = overrides.thinkingLevel;
-    // A console key belongs to the provider it was typed for.
-    const apiKey = provider === this.model.model.provider ? this.consoleApiKey : undefined;
-    return this.commit(next, apiKey);
+    // Only the target provider's own saved key is picked up; another channel's credential stays put.
+    return this.commit(next);
   }
 
   /**
@@ -334,23 +346,28 @@ export class AnalysisService {
    */
   private async commit(
     overrides: ModelOverrides,
-    apiKey: string | undefined,
+    requestedKey?: string | null,
     adjust?: (candidate: ModelConfig) => void,
   ): Promise<ModelView> {
-    const candidate = effectiveModel(this.envModel, overrides, apiKey);
+    // Which credential applies is decided per provider, before the runtime is built.
+    const provider = overrides.provider ?? this.envModel.provider;
+    const consoleKey = typeof requestedKey === "string" ? requestedKey : requestedKey === null ? undefined : this.modelKeys.get(provider);
+    const candidate = effectiveModel(this.envModel, overrides, consoleKey);
     adjust?.(candidate);
     // A credential belongs to the provider it was issued for. Without this, switching to another
     // channel would forward the `.env` key — issued for the env provider — to that gateway.
-    if (candidate.apiKey && candidate.apiKey !== apiKey && candidate.provider !== this.envModel.provider) {
+    if (!consoleKey && candidate.apiKey && candidate.provider !== this.envModel.provider) {
       candidate.apiKey = undefined;
     }
     this.assertSane(candidate);
-    const handle = await createModelHandle({ ...this.app, model: candidate });
+    const handle = await createModelHandle({ ...this.app, model: candidate }, consoleKey);
     // An empty override set must leave no file behind: otherwise a no-op save would pin every field
     // and `.env` would silently stop taking effect.
     if (Object.keys(overrides).length === 0) this.modelSettings.clear();
     else this.modelSettings.save(overrides);
-    this.consoleApiKey = apiKey;
+    // Persist the key only after the runtime accepted the configuration it belongs to.
+    if (typeof requestedKey === "string") this.modelKeys.save(candidate.provider, requestedKey);
+    else if (requestedKey === null) this.modelKeys.clear(candidate.provider);
     // The console key must not enter the shared config: it is process-local, and leaving it there
     // would turn it into the "environment" baseline for anything that reads AppConfig again.
     this.app.model = {
@@ -382,7 +399,9 @@ export class AnalysisService {
   /** Drops every console override and rebuilds from the environment configuration. */
   async resetModel(): Promise<ModelView> {
     this.assertModelEditable();
-    return this.commit({}, undefined);
+    // "Back to .env" means the console leaves no trace, saved keys included.
+    this.modelKeys.clear();
+    return this.commit({}, null);
   }
 
   private assertModelEditable(): void {

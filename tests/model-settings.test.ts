@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
@@ -171,16 +172,35 @@ it("exposes model settings over HTTP, refuses edits when disabled, and validates
     assert.equal(persisted.includes("console-secret"), false);
     assert.equal(JSON.parse(persisted).overrides.thinkingLevel, "high");
 
-    // A restart keeps the persisted overrides but not the console API key, which is memory-only.
+    // The key lives in its own file, scoped to the provider it was typed for.
+    const keyState = saved.body.api_key_store;
+    assert.equal(keyState.path.endsWith("model-key.json"), true);
+    assert.deepEqual(keyState.providers, ["openai"]);
+    assert.equal(keyState.status, "ok");
+    // testConfig sets no DATA_AGENT_PROFILE_SECRET_KEY, so the store reports the weaker protection.
+    assert.equal(keyState.protection, "file-mode-0600");
+    const keyFile = join(config.dataDir, "model-key.json");
+    // POSIX modes only; Windows reports a mode the filesystem does not enforce.
+    if (process.platform !== "win32") assert.equal(((await stat(keyFile)).mode & 0o777).toString(8), "600");
+
+    // A restart keeps the key: retyping it after every deploy is what this store is for.
     const restarted = await AnalysisService.create(config);
     try {
       const view = restarted.modelView();
       assert.equal(view.thinking_level, "high");
       assert.equal(view.override_sources.thinkingLevel, "console");
-      assert.equal(view.api_key_source, "none");
+      assert.equal(view.api_key_source, "console");
+      assert.equal(view.has_api_key, true);
     } finally {
       await restarted.shutdown();
     }
+
+    // `apiKey: null` deletes the stored key instead of leaving a stale one behind.
+    const dropped = await call("PUT", "/v1/model", { apiKey: null });
+    assert.equal(dropped.status, 200);
+    assert.equal(dropped.body.api_key_source, "none");
+    assert.deepEqual(dropped.body.api_key_store.providers, []);
+    assert.equal(existsSync(keyFile), false);
 
     const invalid = await call("PUT", "/v1/model", { thinkingLevel: "turbo" });
     assert.equal(invalid.status, 400);
@@ -400,6 +420,79 @@ it("never forwards the env api key to another provider's endpoint", async () => 
     const back = await call("POST", "/v1/model/select", { provider: "openai", modelId: "gpt-5.2" });
     assert.equal(back.status, 200);
     assert.equal(back.body.api_key_source, "env");
+  } finally {
+    if (server) await new Promise((resolve) => server!.close(resolve));
+    await service?.shutdown();
+    await cleanup(config);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it("saves a console key per provider and never lends it to another channel", async () => {
+  const config = await testConfig();
+  config.allowModelEdit = true;
+  const dir = await mkdtemp(join(tmpdir(), "data-agent-key-scope-"));
+  const modelsPath = join(dir, "models.json");
+  const settingsPath = join(dir, "settings.json");
+  await writeFile(
+    modelsPath,
+    JSON.stringify({
+      providers: {
+        "my-gw": { api: "openai-completions", baseUrl: "https://gw.example.com/v1", models: [{ id: "alpha" }] },
+      },
+    }),
+  );
+  await writeFile(settingsPath, JSON.stringify({ enabledModels: ["my-gw/*"] }));
+  config.piModelsPath = modelsPath;
+  config.piSettingsPath = settingsPath;
+  let service: AnalysisService | undefined;
+  let server: Server | undefined;
+  try {
+    service = await AnalysisService.create(config);
+    const app = await createHttpApp(service);
+    server = app.listen(0);
+    await new Promise((resolve) => server!.once("listening", resolve));
+    const port = (server.address() as { port: number }).port;
+    const call = async (method: string, path: string, body?: unknown) => {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method,
+        headers: { authorization: "Bearer test-token", ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: response.status, body: (await response.json()) as any };
+    };
+
+    // The gateway itself has no credential, so a key is required before a task could run.
+    assert.equal((await call("POST", "/v1/model/select", { provider: "my-gw", modelId: "alpha" })).body.api_key_source, "none");
+    const saved = await call("PUT", "/v1/model", { apiKey: "gw-console-key" });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.api_key_source, "console");
+    assert.deepEqual(saved.body.api_key_store.providers, ["my-gw"]);
+    assert.equal(JSON.stringify(saved.body).includes("gw-console-key"), false);
+    // The key is not part of the persisted overrides; the settings file stays identical.
+    assert.equal((await readFile(join(config.dataDir, "model-settings.json"), "utf8")).includes("gw-console-key"), false);
+
+    // Switching away must not carry the gateway's key to the env provider...
+    const other = await call("POST", "/v1/model/select", { provider: "openai", modelId: "gpt-5.2" });
+    assert.equal(other.status, 200);
+    assert.equal(other.body.api_key_source, "none");
+    // ...and coming back picks the saved key up again instead of asking for it a second time.
+    const back = await call("POST", "/v1/model/select", { provider: "my-gw", modelId: "alpha" });
+    assert.equal(back.body.api_key_source, "console");
+
+    // A restart keeps it: the store is on disk, the settings file only names the channel.
+    if (server) await new Promise((resolve) => server!.close(resolve));
+    server = undefined;
+    await service.shutdown();
+    service = await AnalysisService.create(config);
+    try {
+      const view = service.modelView();
+      assert.equal(view.provider, "my-gw");
+      assert.equal(view.api_key_source, "console");
+      assert.equal(view.api_key_store.protection, "file-mode-0600");
+    } finally {
+      await service.shutdown();
+    }
   } finally {
     if (server) await new Promise((resolve) => server!.close(resolve));
     await service?.shutdown();
