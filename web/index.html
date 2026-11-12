@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Data Agent Console</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d1117; --panel: #161b22; --panel-2: #1c2230; --border: #2a3140;
+    --text: #e6edf3; --muted: #8b949e; --accent: #3b82f6; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .badge { font: 11px var(--mono); padding: 2px 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+  main { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  section.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  section.panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+  input, select, textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font: inherit; }
+  input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row-3 { display: grid; grid-template-columns: 1.4fr .8fr .8fr; gap: 8px; }
+  button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 12px; font: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .buttons { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  details { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+  summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  .status { font: 12px var(--mono); margin-top: 10px; white-space: pre-wrap; word-break: break-word; }
+  .status.ok { color: var(--ok); } .status.err { color: var(--err); } .status.info { color: var(--muted); }
+  #chat { display: flex; flex-direction: column; min-height: 70vh; }
+  #messages { flex: 1; overflow: auto; padding-right: 4px; max-height: 62vh; }
+  .msg { margin: 0 0 14px; }
+  .msg .who { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+  .msg.user .body { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; white-space: pre-wrap; }
+  .msg.assistant .body { white-space: normal; }
+  .msg.assistant .body p { margin: 0 0 8px; }
+  .msg.assistant .body p:last-child { margin-bottom: 0; }
+  .msg.assistant .body h3, .msg.assistant .body h4, .msg.assistant .body h5 { margin: 12px 0 6px; font-size: 13px; }
+  .msg.assistant .body ul, .msg.assistant .body ol { margin: 6px 0 8px; padding-left: 20px; }
+  .msg.assistant .body li { margin: 2px 0; }
+  .msg.assistant .body table { margin: 8px 0; }
+  .msg.assistant .body hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+  .msg.assistant .body code, .msg.assistant .body pre { font-family: var(--mono); font-size: 12.5px; }
+  .msg.assistant .body pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 9px; overflow: auto; }
+  .tool { font: 12px var(--mono); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; margin: 4px 0; background: var(--bg); }
+  .tool .head { display: flex; gap: 8px; align-items: center; }
+  .tool .name { color: var(--accent); }
+  .tool .meta { color: var(--muted); }
+  .tool pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+  .tool.error { border-color: var(--err); }
+  .pill { font: 11px var(--mono); padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .pill.running { color: var(--warn); border-color: var(--warn); }
+  .pill.succeeded { color: var(--ok); border-color: var(--ok); }
+  .pill.failed, .pill.cancelled { color: var(--err); border-color: var(--err); }
+  #composer { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
+  #taskbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font: 12px var(--mono); color: var(--muted); }
+  #drawer { position: fixed; right: 0; top: 0; bottom: 0; width: min(720px, 92vw); background: var(--panel); border-left: 1px solid var(--border); transform: translateX(105%); transition: transform .18s ease; z-index: 20; display: flex; flex-direction: column; }
+  #drawer.open { transform: none; }
+  #drawer header { position: static; }
+  #drawer .content { overflow: auto; padding: 12px; flex: 1; }
+  table { border-collapse: collapse; font: 12px var(--mono); width: 100%; }
+  th, td { border-bottom: 1px solid var(--border); padding: 4px 6px; text-align: left; vertical-align: top; }
+  th { color: var(--muted); position: sticky; top: 0; background: var(--panel); }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 8px; font: 12px var(--mono); }
+  .kv .k { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Data Agent Console</h1>
+  <span class="badge" id="modelBadge">model: —</span>
+  <span class="badge" id="connBadge">no session</span>
+  <span style="flex:1"></span>
+  <button class="ghost" id="btnHealth">check service</button>
+</header>
+
+<main>
+  <div style="display:flex; flex-direction:column; gap:16px">
+    <section class="panel">
+      <h2>连接</h2>
+      <label>API token</label>
+      <input id="token" type="password" placeholder="DATA_AGENT_API_TOKEN (留空表示服务未启用鉴权)" autocomplete="off" />
+      <div class="row">
+        <div>
+          <label>引擎</label>
+          <select id="engine">
+            <option value="postgres" data-port="5432">PostgreSQL</option>
+            <option value="mysql" data-port="3306">MySQL</option>
+            <option value="doris" data-port="9030">Apache Doris</option>
+            <option value="starrocks" data-port="9030">StarRocks</option>
+          </select>
+        </div>
+        <div>
+          <label>环境</label>
+          <select id="environment">
+            <option value="production">production（只允许建视图）</option>
+            <option value="non_production">non_production（可建表）</option>
+          </select>
+        </div>
+      </div>
+      <div class="row-3">
+        <div><label>主机</label><input id="host" placeholder="127.0.0.1" /></div>
+        <div><label>端口</label><input id="port" value="5432" /></div>
+        <div><label>库名</label><input id="database" placeholder="app" /></div>
+      </div>
+      <div class="row">
+        <div><label>只读账号</label><input id="user" placeholder="ro_analyst" autocomplete="off" /></div>
+        <div><label>密码</label><input id="password" type="password" autocomplete="new-password" /></div>
+      </div>
+      <label>工作区（可选，已预建）</label>
+      <input id="workspace" placeholder="analysis_ws" />
+      <label>TLS</label>
+      <select id="sslMode">
+        <option value="">不使用</option>
+        <option value="require">require</option>
+        <option value="verify-ca">verify-ca</option>
+        <option value="verify-full">verify-full</option>
+      </select>
+      <div id="sslExtra" style="display:none">
+        <label>CA 证书 PEM</label>
+        <textarea id="sslCa" rows="3" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+        <label>证书校验名（默认=主机名）</label>
+        <input id="sslServerName" />
+      </div>
+
+      <details>
+        <summary>SSH 跳板机</summary>
+        <div class="row-3">
+          <div><label>跳板机</label><input id="sshHost" placeholder="bastion.example.com" /></div>
+          <div><label>端口</label><input id="sshPort" value="22" /></div>
+          <div><label>用户</label><input id="sshUser" /></div>
+        </div>
+        <label>认证方式</label>
+        <select id="sshAuth">
+          <option value="password">密码</option>
+          <option value="privateKey">私钥</option>
+        </select>
+        <div id="sshPasswordWrap"><label>SSH 密码</label><input id="sshPassword" type="password" autocomplete="new-password" /></div>
+        <div id="sshKeyWrap" style="display:none">
+          <label>私钥 PEM</label><textarea id="sshKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+          <label>私钥口令（可选）</label><input id="sshPassphrase" type="password" autocomplete="new-password" />
+        </div>
+        <label>主机密钥指纹（SHA256，生产必填）</label>
+        <input id="sshFingerprint" placeholder="SHA256:..." />
+      </details>
+
+      <div class="buttons">
+        <button id="btnTest">测试连接</button>
+        <button class="primary" id="btnSession">建立会话</button>
+        <button class="ghost" id="btnClose" disabled>关闭会话</button>
+      </div>
+      <div id="connStatus" class="status info">尚未连接</div>
+    </section>
+
+    <section class="panel">
+      <h2>会话</h2>
+      <div id="sessionInfo" class="kv"><span class="k">—</span><span></span></div>
+      <div class="buttons"><button class="ghost" id="btnRefresh" disabled>刷新</button></div>
+    </section>
+  </div>
+
+  <section class="panel" id="chat">
+    <h2>分析对话</h2>
+    <div id="messages">
+      <div class="msg assistant"><div class="body" style="color:var(--muted)">建立会话后，用自然语言描述分析目标。Agent 会自行探索 catalog、写 SQL、取数，并可以创建分析视图。</div></div>
+    </div>
+    <div id="composer">
+      <div id="taskbar"><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span></div>
+      <textarea id="goal" rows="3" placeholder="例如：按月统计 2025 年订单 GMV，对比 2024 同期，并指出退款率异常月份"></textarea>
+      <div class="buttons">
+        <button class="primary" id="btnSend" disabled>发送任务</button>
+        <button id="btnCancel" disabled>取消</button>
+        <button id="btnSteer" disabled>插入指令</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="drawer">
+  <header>
+    <h1 id="drawerTitle">result</h1>
+    <span style="flex:1"></span>
+    <button class="ghost" id="btnDrawerClose">关闭</button>
+  </header>
+  <div class="content" id="drawerBody"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = {
+  token: sessionStorage.getItem("data-agent-token") || "",
+  sessionId: null,
+  taskId: null,
+  streamAbort: null,
+  assistantEl: null,
+  // Text of the segment currently being streamed; reset whenever a tool card splits the transcript.
+  segmentText: "",
+  lastSegmentText: "",
+};
+$("token").value = state.token;
+void loadEngines();
+
+function api(path, options = {}) {
+  const headers = Object.assign({}, options.headers || {});
+  if (state.token) headers["authorization"] = "Bearer " + state.token;
+  if (options.body !== undefined) headers["content-type"] = "application/json";
+  return fetch(path, Object.assign({}, options, { headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) }))
+    .then(async (res) => {
+      const text = await res.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+      if (!res.ok) throw new Error((data && data.error && (data.error.code + ": " + data.error.message)) || ("HTTP " + res.status));
+      return data;
+    });
+}
+
+function setStatus(id, text, kind) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = "status " + (kind || "info");
+}
+
+function defaultPort() {
+  const option = $("engine").selectedOptions[0];
+  return (option && option.dataset.port) || "5432";
+}
+
+// Engine list comes from GET /v1/engines; the static options above are only a fallback for the
+// unauthenticated first paint.
+async function loadEngines() {
+  try {
+    const data = await api("/v1/engines");
+    const select = $("engine");
+    const current = select.value;
+    select.innerHTML = (data.engines || [])
+      .map((engine) => '<option value="' + escapeHtml(engine.id) + '" data-port="' + Number(engine.defaultPort) + '">' + escapeHtml(engine.label) + "</option>")
+      .join("");
+    if (current) select.value = current;
+  } catch {
+    /* keep the static fallback list */
+  }
+}
+
+function connectionPayload() {
+  const engine = $("engine").value;
+  const sslMode = $("sslMode").value;
+  const conn = {
+    engine,
+    host: $("host").value.trim(),
+    port: Number($("port").value || defaultPort()),
+    database: $("database").value.trim(),
+    user: $("user").value.trim(),
+    password: $("password").value,
+    environment: $("environment").value,
+  };
+  const ws = $("workspace").value.trim();
+  if (ws) conn.workspace = { name: ws };
+  if (sslMode) {
+    conn.ssl = { mode: sslMode };
+    const ca = $("sslCa").value.trim();
+    if (ca) conn.ssl.ca = ca;
+    const sn = $("sslServerName").value.trim();
+    if (sn) conn.ssl.serverName = sn;
+  }
+  const sshHost = $("sshHost").value.trim();
+  if (sshHost) {
+    const hop = {
+      host: sshHost,
+      port: Number($("sshPort").value || 22),
+      username: $("sshUser").value.trim(),
+    };
+    if ($("sshAuth").value === "password") {
+      hop.auth = { method: "password", password: $("sshPassword").value };
+    } else {
+      hop.auth = { method: "privateKey", privateKey: $("sshKey").value };
+      const pass = $("sshPassphrase").value;
+      if (pass) hop.auth.passphrase = pass;
+    }
+    const fp = $("sshFingerprint").value.trim();
+    if (fp) hop.hostFingerprint = fp;
+    conn.ssh = { hops: [hop] };
+  }
+  return conn;
+}
+
+function saveToken() {
+  state.token = $("token").value;
+  sessionStorage.setItem("data-agent-token", state.token);
+  void loadEngines();
+}
+
+$("sslMode").addEventListener("change", () => {
+  $("sslExtra").style.display = $("sslMode").value ? "block" : "none";
+});
+$("sshAuth").addEventListener("change", () => {
+  const key = $("sshAuth").value === "privateKey";
+  $("sshKeyWrap").style.display = key ? "block" : "none";
+  $("sshPasswordWrap").style.display = key ? "none" : "block";
+});
+$("engine").addEventListener("change", () => {
+  $("port").value = defaultPort();
+});
+
+$("btnHealth").onclick = async () => {
+  try {
+    const health = await api("/healthz");
+    $("modelBadge").textContent = "model: " + health.model;
+    setStatus("connStatus", "service ok · " + health.model, "ok");
+  } catch (error) {
+    setStatus("connStatus", String(error.message || error), "err");
+  }
+};
+
+$("btnTest").onclick = async () => {
+  saveToken();
+  $("btnTest").disabled = true;
+  setStatus("connStatus", "测试中…", "info");
+  try {
+    const result = await api("/v1/connections/test", { method: "POST", body: { connection: connectionPayload() } });
+    const caps = result.capabilities || {};
+    setStatus("connStatus", [
+      "ok · " + result.engine + " · " + result.latencyMs + "ms",
+      "source=" + caps.sourceAccess + " proof=" + caps.readOnlyProof + " workspace=" + (caps.workspaceName || "none") + " (" + caps.workspaceAccess + ")",
+      caps.workspaceNote ? "note=" + caps.workspaceNote : "",
+      (caps.notes || []).length ? "notes=" + caps.notes.join(" | ") : "",
+      "scopes=" + (result.scopes || []).slice(0, 8).join(", "),
+    ].filter(Boolean).join("\n"), "ok");
+  } catch (error) {
+    setStatus("connStatus", String(error.message || error), "err");
+  } finally {
+    $("btnTest").disabled = false;
+  }
+};
+
+$("btnSession").onclick = async () => {
+  saveToken();
+  $("btnSession").disabled = true;
+  setStatus("connStatus", "建立会话…", "info");
+  try {
+    const data = await api("/v1/sessions", { method: "POST", body: { connection: connectionPayload() } });
+    state.sessionId = data.session.session_id;
+    applySession(data.session);
+    setStatus("connStatus", "会话已建立 · " + state.sessionId, "ok");
+    $("btnSend").disabled = false;
+    $("btnCancel").disabled = true;
+    $("btnClose").disabled = false;
+    $("btnRefresh").disabled = false;
+    $("connBadge").textContent = data.session.engine + " · " + data.session.database;
+  } catch (error) {
+    setStatus("connStatus", String(error.message || error), "err");
+  } finally {
+    $("btnSession").disabled = false;
+  }
+};
+
+function applySession(session) {
+  const caps = session.capabilities || {};
+  const rows = [
+    ["session", session.session_id],
+    ["engine", session.engine + "/" + (caps.engineLabel || "—")],
+    ["database", session.database],
+    ["environment", session.environment],
+    ["source", caps.sourceAccess + " (" + (caps.readOnlyProof || "unknown") + ")"],
+    ["version", caps.serverVersion || "unknown"],
+    ["workspace", (caps.workspaceName || "none") + " / " + (caps.workspaceAccess || "")],
+    ["queries", (session.queries ? session.queries.used : 0) + " / " + (session.queries ? session.queries.limit : "—")],
+    ["datasets", String(session.datasets ?? 0)],
+    ["expires", session.expires_at || "—"],
+  ];
+  $("sessionInfo").innerHTML = rows
+    .map(([k, v]) => '<span class="k">' + k + '</span><span>' + escapeHtml(String(v ?? "")) + '</span>')
+    .join("");
+  if (caps.workspaceNote) {
+    $("sessionInfo").innerHTML += '<span class="k">note</span><span>' + escapeHtml(caps.workspaceNote) + "</span>";
+  }
+  for (const note of caps.notes || []) {
+    $("sessionInfo").innerHTML += '<span class="k">warning</span><span>' + escapeHtml(note) + "</span>";
+  }
+}
+
+$("btnRefresh").onclick = async () => {
+  if (!state.sessionId) return;
+  try {
+    const data = await api("/v1/sessions/" + state.sessionId);
+    applySession(data.session);
+  } catch (error) {
+    setStatus("connStatus", String(error.message || error), "err");
+  }
+};
+
+$("btnClose").onclick = async () => {
+  if (!state.sessionId) return;
+  const id = state.sessionId;
+  state.sessionId = null;
+  $("btnSend").disabled = true;
+  $("btnClose").disabled = true;
+  $("btnRefresh").disabled = true;
+  $("connBadge").textContent = "no session";
+  try { await api("/v1/sessions/" + id, { method: "DELETE" }); } catch (error) { console.warn(error); }
+  setStatus("connStatus", "会话已关闭", "info");
+};
+
+function escapeHtml(text) {
+  return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function addMessage(who) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + who;
+  wrap.innerHTML = '<div class="who">' + (who === "user" ? "you" : "agent") + '</div><div class="body"></div>';
+  $("messages").appendChild(wrap);
+  $("messages").scrollTop = $("messages").scrollHeight;
+  return wrap.querySelector(".body");
+}
+
+function renderInline(text) {
+  return escapeHtml(text)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+}
+
+/** Minimal but practical markdown: fences, headings, tables, lists, bold/inline code, rules. */
+function renderMarkdown(text) {
+  const parts = [];
+  const fence = /```(\w*)\n([\s\S]*?)```/g;
+  let last = 0;
+  let match;
+  while ((match = fence.exec(text))) {
+    parts.push(renderBlocks(text.slice(last, match.index)));
+    parts.push("<pre><code>" + escapeHtml(match[2]) + "</code></pre>");
+    last = match.index + match[0].length;
+  }
+  parts.push(renderBlocks(text.slice(last)));
+  return parts.join("");
+}
+
+function renderBlocks(source) {
+  const lines = source.split("\n");
+  const out = [];
+  let list = null;
+  const closeList = () => {
+    if (list) { out.push("</" + list + ">"); list = null; }
+  };
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) { closeList(); continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) { closeList(); out.push("<hr>"); continue; }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed);
+    if (heading) {
+      closeList();
+      const level = Math.min(6, heading[1].length + 2);
+      out.push("<h" + level + ">" + renderInline(heading[2]) + "</h" + level + ">");
+      continue;
+    }
+    // Tables: a header row, a separator row, then body rows.
+    if (trimmed.startsWith("|") && /^\|?[\s:-]*-[\s:|-]*$/.test((lines[i + 1] || "").trim())) {
+      closeList();
+      const cells = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => renderInline(cell.trim()));
+      const head = cells(trimmed);
+      const body = [];
+      i += 2;
+      while (i < lines.length && lines[i].trim().startsWith("|")) { body.push(cells(lines[i])); i += 1; }
+      i -= 1;
+      out.push(
+        "<table><thead><tr>" + head.map((cell) => "<th>" + cell + "</th>").join("") + "</tr></thead><tbody>" +
+          body.map((row) => "<tr>" + row.map((cell) => "<td>" + cell + "</td>").join("") + "</tr>").join("") +
+          "</tbody></table>",
+      );
+      continue;
+    }
+    const bullet = /^[-*+]\s+(.*)$/.exec(trimmed);
+    const numbered = /^\d+[.)]\s+(.*)$/.exec(trimmed);
+    if (bullet || numbered) {
+      const tag = bullet ? "ul" : "ol";
+      if (list !== tag) { closeList(); out.push("<" + tag + ">"); list = tag; }
+      out.push("<li>" + renderInline((bullet || numbered)[1]) + "</li>");
+      continue;
+    }
+    closeList();
+    out.push("<p>" + renderInline(trimmed) + "</p>");
+  }
+  closeList();
+  return out.join("");
+}
+
+$("btnSend").onclick = async () => {
+  const goal = $("goal").value.trim();
+  if (!goal || !state.sessionId) return;
+  $("goal").value = "";
+  addMessage("user").textContent = goal;
+  state.assistantEl = null;
+  state.textNode = null;
+  state.segmentText = "";
+  state.lastSegmentText = "";
+  $("btnSend").disabled = true;
+  $("btnCancel").disabled = false;
+  try {
+    const data = await api("/v1/sessions/" + state.sessionId + "/tasks", { method: "POST", body: { goal } });
+    state.taskId = data.task.id;
+    $("taskId").textContent = data.task.id;
+    $("taskPill").className = "pill running";
+    $("taskPill").textContent = "running";
+    streamTask(data.task.id);
+  } catch (error) {
+    $("btnSend").disabled = false;
+    $("btnCancel").disabled = true;
+    addMessage("assistant").textContent = "任务创建失败: " + (error.message || error);
+  }
+};
+
+function streamTask(taskId) {
+  if (state.streamAbort) state.streamAbort.abort();
+  const controller = new AbortController();
+  state.streamAbort = controller;
+  (async () => {
+    const res = await fetch("/v1/tasks/" + taskId + "/events", {
+      headers: state.token ? { authorization: "Bearer " + state.token } : {},
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) {
+      $("taskPill").className = "pill failed";
+      $("taskPill").textContent = "stream error";
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index;
+      while ((index = buffer.indexOf("\n\n")) >= 0) {
+        const chunk = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
+        if (!dataLine) continue;
+        try { handleEvent(JSON.parse(dataLine.slice(6))); } catch (error) { console.warn("bad event", error); }
+      }
+    }
+  })().catch((error) => {
+    if (error.name !== "AbortError") console.warn(error);
+  });
+}
+
+function handleEvent(event) {
+  const data = event.data || {};
+  switch (event.type) {
+    case "task_started":
+      $("taskPill").className = "pill running";
+      $("taskPill").textContent = "running";
+      break;
+    case "turn_started":
+      $("turnInfo").textContent = "turn " + data.turn;
+      break;
+    case "message_delta":
+      ensureAssistant();
+      state.textNode.textContent += data.text;
+      state.segmentText += data.text;
+      $("messages").scrollTop = $("messages").scrollHeight;
+      break;
+    case "reasoning_delta":
+      break;
+    case "tool_started": {
+      ensureAssistant();
+      const body = state.assistantEl;
+      // Tool cards are appended after the current text node; start a fresh text segment so later
+      // assistant output (including the final report) renders below the card instead of above it.
+      closeSegment();
+      const el = document.createElement("div");
+      el.className = "tool";
+      el.dataset.call = data.call_id;
+      const args = data.args || {};
+      const detail = args.sql || args.name || args.search || args.result_id || "";
+      el.innerHTML = '<div class="head"><span class="name">' + escapeHtml(data.tool) + '</span><span class="meta">running…</span></div>' +
+        (detail ? "<pre>" + escapeHtml(String(detail)).slice(0, 1200) + "</pre>" : "");
+      body.appendChild(el);
+      break;
+    }
+    case "tool_finished": {
+      const el = document.querySelector('.tool[data-call="' + data.call_id + '"]');
+      if (el) {
+        el.classList.toggle("error", Boolean(data.is_error));
+        const meta = el.querySelector(".meta");
+        if (meta) meta.textContent = (data.is_error ? "error" : "ok") + (data.duration_ms != null ? " · " + data.duration_ms + "ms" : "");
+        if (data.summary) {
+          const pre = document.createElement("pre");
+          pre.textContent = String(data.summary).slice(0, 800);
+          el.appendChild(pre);
+        }
+        const resultId = data.details && data.details.result_id;
+        if (resultId) {
+          const btn = document.createElement("button");
+          btn.className = "ghost";
+          btn.style.marginTop = "6px";
+          btn.textContent = "查看结果 " + resultId;
+          btn.onclick = () => openResult(resultId);
+          el.appendChild(btn);
+        }
+      }
+      break;
+    }
+    case "task_finished": {
+      closeSegment();
+      const finalAnswer = typeof data.answer === "string" ? data.answer.trim() : "";
+      if (finalAnswer && finalAnswer !== state.lastSegmentText.trim()) {
+        ensureAssistant();
+        const node = document.createElement("div");
+        node.className = "text final";
+        node.innerHTML = renderMarkdown(finalAnswer);
+        state.assistantEl.appendChild(node);
+      }
+      $("messages").scrollTop = $("messages").scrollHeight;
+      const status = data.status || "finished";
+      $("taskPill").className = "pill " + status;
+      $("taskPill").textContent = status;
+      $("btnSend").disabled = false;
+      $("btnCancel").disabled = true;
+      if (data.error) {
+        ensureAssistant();
+        const body = state.assistantEl;
+        const note = document.createElement("div");
+        note.className = "tool error";
+        note.textContent = data.error.code + ": " + data.error.message;
+        body.appendChild(note);
+      }
+      $("btnRefresh").click();
+      break;
+    }
+    case "retry": {
+      ensureAssistant();
+      const body = state.assistantEl;
+      const note = document.createElement("div");
+      note.className = "tool";
+      note.textContent = "retry #" + data.attempt + ": " + data.error;
+      body.appendChild(note);
+      break;
+    }
+    case "notice": {
+      ensureAssistant();
+      const body = state.assistantEl;
+      const note = document.createElement("div");
+      note.className = "tool";
+      note.textContent = data.code + (data.max_turns ? " (max " + data.max_turns + " turns)" : "") + (data.text ? ": " + data.text : "");
+      body.appendChild(note);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/** Turn the in-progress text node into markdown and start a new segment after the next card. */
+function closeSegment() {
+  if (state.textNode && state.segmentText.trim()) {
+    state.textNode.innerHTML = renderMarkdown(state.segmentText);
+    state.lastSegmentText = state.segmentText;
+  }
+  state.textNode = null;
+  state.segmentText = "";
+}
+
+function ensureAssistant() {
+  if (!state.assistantEl) state.assistantEl = addMessage("assistant");
+  if (!state.textNode) {
+    state.textNode = document.createElement("div");
+    state.textNode.className = "text";
+    state.assistantEl.appendChild(state.textNode);
+    state.segmentText = "";
+  }
+  return state.textNode;
+}
+
+async function openResult(resultId) {
+  $("drawerTitle").textContent = "result " + resultId;
+  $("drawerBody").innerHTML = '<div class="hint">loading…</div>';
+  $("drawer").classList.add("open");
+  try {
+    const page = await api("/v1/results/" + resultId + "?limit=200");
+    const head = '<div class="kv">' +
+      '<span class="k">rows</span><span>' + page.rows.length + " / " + page.rowCount + '</span>' +
+      '<span class="k">next_offset</span><span>' + (page.nextOffset == null ? "null" : page.nextOffset) + '</span>' +
+      '<span class="k">truncated</span><span>' + page.truncated + '</span>' +
+      '<span class="k">sql</span><span>' + escapeHtml((page.sql || "").slice(0, 600)) + '</span>' +
+      '</div>';
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    thead.innerHTML = "<tr>" + page.columns.map((c) => "<th>" + escapeHtml(c.name) + "<br><span style='color:var(--muted)'>" + escapeHtml(c.type) + "</span></th>").join("") + "</tr>";
+    table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    for (const row of page.rows) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = row.map((cell) => "<td>" + escapeHtml(cellToString(cell)) + "</td>").join("");
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    $("drawerBody").innerHTML = head;
+    $("drawerBody").appendChild(table);
+  } catch (error) {
+    $("drawerBody").innerHTML = '<div class="status err">' + escapeHtml(String(error.message || error)) + "</div>";
+  }
+}
+
+function cellToString(cell) {
+  if (cell === null || cell === undefined) return "NULL";
+  if (typeof cell === "object") {
+    if (cell.__type === "text" && cell.preview !== undefined) return String(cell.preview) + "…(" + cell.chars + " chars)";
+    return JSON.stringify(cell);
+  }
+  return String(cell);
+}
+
+$("btnDrawerClose").onclick = () => $("drawer").classList.remove("open");
+
+$("btnCancel").onclick = async () => {
+  if (!state.taskId) return;
+  try { await api("/v1/tasks/" + state.taskId + "/cancel", { method: "POST" }); } catch (error) { console.warn(error); }
+};
+
+$("btnSteer").onclick = async () => {
+  if (!state.taskId) return;
+  const text = prompt("追加给当前任务的指令：");
+  if (!text) return;
+  try { await api("/v1/tasks/" + state.taskId + "/steer", { method: "POST", body: { text } }); } catch (error) { alert(error.message); }
+};
+
+$("goal").addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") $("btnSend").click();
+});
+
+api("/healthz").then((health) => { $("modelBadge").textContent = "model: " + health.model; }).catch(() => {});
+</script>
+</body>
+</html>

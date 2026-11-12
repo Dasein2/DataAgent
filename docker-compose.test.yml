@@ -1,0 +1,34 @@
+# Local conformance environment for data-agent.
+#   docker compose -f docker-compose.test.yml up -d
+#   export DATA_AGENT_TEST_PG=postgres://ro_analyst:ro@127.0.0.1:55432/analytics
+#   export DATA_AGENT_TEST_MYSQL=mysql://ro_analyst:ro@127.0.0.1:53306/analytics
+#   npm run test:integration
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "55433:5432"
+    volumes:
+      - ./scripts/seed/postgres.sql:/docker-entrypoint-initdb.d/10-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "53306:3306"
+    volumes:
+      - ./scripts/seed/mysql.sql:/docker-entrypoint-initdb.d/10-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 3s
+      timeout: 3s
+      retries: 30

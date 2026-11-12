@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+data-*/
+.env
+.env.*
+!.env.example
+*.log
+.tmp/
+tests/.env.test
+tests/.env.test.tmp
+
+# local secrets / provisioned credentials
+.secrets/

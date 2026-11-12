@@ -1,0 +1,30 @@
+# Production-ish deployment of the analysis service.
+#   cp .env.example .env.prod   # set DATA_AGENT_API_TOKEN + DATA_AGENT_MODEL_*
+#   docker compose up -d --build
+services:
+  data-agent:
+    build: .
+    env_file: [.env.prod]
+    environment:
+      DATA_AGENT_DATA_DIR: /data
+      DATA_AGENT_HOST: 0.0.0.0
+      DATA_AGENT_PORT: "8787"
+    ports:
+      - "8787:8787"
+    volumes:
+      - data-agent-data:/data
+    user: node
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  data-agent-data:
