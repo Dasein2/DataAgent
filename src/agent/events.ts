@@ -32,10 +32,22 @@ export class EventBroker {
   private readonly logs = new Map<string, TaskEvent[]>();
   private readonly listeners = new Set<{ taskId: string; fn: Listener }>();
 
-  constructor(private readonly maxEventsPerTask = 5_000) {}
+  constructor(private readonly maxEventsPerTask = 5_000, private readonly history?: {
+    appendEvent(event: TaskEvent): void;
+    listEvents(taskId: string): TaskEvent[];
+  }) {}
+
+  private log(taskId: string): TaskEvent[] {
+    let log = this.logs.get(taskId);
+    if (!log) {
+      log = this.history?.listEvents(taskId).slice(-this.maxEventsPerTask) ?? [];
+      this.logs.set(taskId, log);
+    }
+    return log;
+  }
 
   publish(taskId: string, type: TaskEventType, data: Record<string, unknown> = {}): TaskEvent {
-    const log = this.logs.get(taskId) ?? [];
+    const log = this.log(taskId);
     const seq = (log.at(-1)?.seq ?? 0) + 1;
     const event: TaskEvent = {
       seq,
@@ -45,6 +57,7 @@ export class EventBroker {
       at: new Date().toISOString(),
       data,
     };
+    this.history?.appendEvent(event);
     log.push(event);
     if (log.length > this.maxEventsPerTask) log.splice(0, log.length - this.maxEventsPerTask);
     this.logs.set(taskId, log);
@@ -60,7 +73,7 @@ export class EventBroker {
   }
 
   list(taskId: string, afterSeq = 0): TaskEvent[] {
-    return (this.logs.get(taskId) ?? []).filter((event) => event.seq > afterSeq);
+    return this.log(taskId).filter((event) => event.seq > afterSeq);
   }
 
   subscribe(taskId: string, fn: Listener): () => void {

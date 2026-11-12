@@ -6,6 +6,7 @@ import { ConnectionConfig } from "../db/types.js";
 import { ENGINE_IDS, describeEngine, getProfile } from "../db/engines/profiles.js";
 import { AppError, isAppError } from "../errors.js";
 import { AnalysisService, callerKey } from "../agent/service.js";
+import { SaveProfileRequest } from "../db/profiles-store.js";
 
 interface RequestIdentity {
   ownerKey: string;
@@ -98,6 +99,39 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
 
   app.use("/v1", authMiddleware(config.apiToken));
 
+  const requestConnection = (req: Request): ConnectionConfig => {
+    if (typeof req.body?.profile === "string") {
+      const stored = service.profiles.reveal(ownerOf(req), req.body.profile);
+      // Only credential overrides are accepted; changing the target requires saving a new profile.
+      const overrides = req.body?.credentials ?? {};
+      if (typeof overrides.password === "string" && overrides.password) stored.password = overrides.password;
+      const ssh = stored.ssh as { hops: Array<{ auth: Record<string, unknown> }> } | undefined;
+      if (ssh && Array.isArray(overrides.ssh)) {
+        for (let index = 0; index < ssh.hops.length; index++) {
+          const auth = overrides.ssh[index];
+          if (!auth || typeof auth !== "object") continue;
+          for (const field of ["password", "privateKey", "passphrase"]) {
+            if (typeof auth[field] === "string" && auth[field]) ssh.hops[index]!.auth[field] = auth[field];
+          }
+        }
+      }
+      return parseConnection(stored);
+    }
+    return parseConnection(req.body?.connection ?? req.body);
+  };
+
+  app.get("/v1/connections/profiles", (req, res) => {
+    res.json({ profiles: service.profiles.list(ownerOf(req)), secret_storage_enabled: service.profiles.secretStorageEnabled });
+  });
+  app.put("/v1/connections/profiles/:name", (req, res) => {
+    const body = SaveProfileRequest.parse({ connection: requestConnection(req), rememberSecret: req.body?.rememberSecret });
+    res.json({ profile: service.profiles.save(ownerOf(req), req.params.name, body.connection, body.rememberSecret) });
+  });
+  app.delete("/v1/connections/profiles/:name", (req, res) => {
+    service.profiles.remove(ownerOf(req), req.params.name);
+    res.status(204).end();
+  });
+
   // Let consoles and integrators pull the engine list instead of hard-coding a dropdown. The same
   // descriptors drive session capabilities, so the two can never disagree.
   app.get("/v1/engines", (_req, res) => {
@@ -141,12 +175,12 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   });
 
   app.post("/v1/connections/test", async (req, res) => {
-    const connection = parseConnection(req.body?.connection ?? req.body);
+    const connection = requestConnection(req);
     res.json(await service.testConnection(connection));
   });
 
   app.post("/v1/sessions", async (req, res) => {
-    const connection = parseConnection(req.body?.connection ?? req.body);
+    const connection = requestConnection(req);
     const session = await service.createSession(connection, ownerOf(req));
     res.status(201).json({ session: session.snapshot() });
   });
@@ -156,8 +190,16 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   });
 
   app.get("/v1/sessions/:id", (req, res) => {
-    const session = service.getSession(req.params.id, ownerOf(req));
+    res.json({ session: service.sessionSnapshot(req.params.id, ownerOf(req)) });
+  });
+
+  app.post("/v1/sessions/:id/reconnect", async (req, res) => {
+    const session = await service.createSession(requestConnection(req), ownerOf(req), req.params.id);
     res.json({ session: session.snapshot() });
+  });
+
+  app.get("/v1/sessions/:id/tasks", (req, res) => {
+    res.json({ tasks: service.history.listTasks(req.params.id, ownerOf(req)) });
   });
 
   app.delete("/v1/sessions/:id", async (req, res) => {
@@ -165,12 +207,8 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.status(204).end();
   });
 
-  app.get("/v1/sessions/:id/results", (req, res) => {
-    const session = service.getSession(req.params.id, ownerOf(req));
-    void session.db.listResults().then(
-      (results) => res.json({ results }),
-      (error) => res.status(500).json({ error: { code: "INTERNAL_ERROR", message: String(error) } }),
-    );
+  app.get("/v1/sessions/:id/results", async (req, res) => {
+    res.json({ results: await service.listResults(req.params.id, ownerOf(req)) });
   });
 
   app.post("/v1/sessions/:id/tasks", (req, res) => {
@@ -187,18 +225,20 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   });
 
   app.get("/v1/tasks/:id", (req, res) => {
-    const { task, session } = service.findTask(req.params.id, ownerOf(req));
-    res.json({ task, session_id: session.id });
+    const { task } = service.findTask(req.params.id, ownerOf(req));
+    res.json({ task, session_id: task.session_id });
   });
 
   app.post("/v1/tasks/:id/cancel", async (req, res) => {
     const { session, task } = service.findTask(req.params.id, ownerOf(req));
+    if (!session) throw new AppError("NO_ACTIVE_TASK", "Historical tasks cannot be cancelled");
     const cancelled = await session.cancelTask(task.id);
     res.json({ cancelled, task: session.getTask(task.id) });
   });
 
   app.post("/v1/tasks/:id/steer", async (req, res) => {
     const { session } = service.findTask(req.params.id, ownerOf(req));
+    if (!session) throw new AppError("NO_ACTIVE_TASK", "Historical tasks cannot be steered");
     const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
     if (!text) throw new AppError("INVALID_INPUT", "text is required");
     await session.steer(text);
@@ -209,7 +249,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     const taskId = req.params.id;
     const owner = ownerOf(req);
     // Resolve before flushing headers so an unknown task returns a real 404.
-    const { session } = service.findTask(taskId, owner);
+    service.findTask(taskId, owner);
     const after = parseSseCursor(req);
     const unsubscribeRef: { fn?: () => void } = {};
     const close = () => {
@@ -231,7 +271,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     };
 
     try {
-      unsubscribeRef.fn = session.watch(taskId, write, after);
+      unsubscribeRef.fn = service.watchTask(taskId, owner, write, after);
     } catch (error) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: (error as AppError).code ?? "ERROR", message: (error as Error).message })}\n\n`);
       res.end();
@@ -262,6 +302,12 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
 
   // Lightweight console (same API, no build step).
   const webRoot = new URL("../../web/", import.meta.url);
+  app.get("/task-stream.js", (_req, res) => {
+    void readFile(new URL("task-stream.js", webRoot), "utf8").then(
+      (code) => res.type("application/javascript").send(code),
+      () => res.status(404).end(),
+    );
+  });
   app.get("/", (_req, res) => {
     void readFile(new URL("index.html", webRoot), "utf8").then(
       (html) => res.type("html").send(html),

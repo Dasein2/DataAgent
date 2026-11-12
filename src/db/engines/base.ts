@@ -105,6 +105,8 @@ export interface ReadOnlyStatus {
 }
 
 export interface Engine {
+  /** Set when the pinned connection cannot be reused; callers must open a new session. */
+  readonly unavailableReason?: string;
   readonly kind: EngineKind;
   /** Declared capabilities of this engine; behaviour is driven by this table, not by the id. */
   readonly profile: EngineProfile;

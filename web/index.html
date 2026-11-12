@@ -60,6 +60,7 @@
   .pill { font: 11px var(--mono); padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
   .pill.running { color: var(--warn); border-color: var(--warn); }
   .pill.succeeded { color: var(--ok); border-color: var(--ok); }
+  .pill.incomplete { color: var(--warn); border-color: var(--warn); }
   .pill.failed, .pill.cancelled { color: var(--err); border-color: var(--err); }
   #composer { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
   #taskbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font: 12px var(--mono); color: var(--muted); }
@@ -90,14 +91,29 @@
       <h2>连接</h2>
       <label>API token</label>
       <input id="token" type="password" placeholder="DATA_AGENT_API_TOKEN (留空表示服务未启用鉴权)" autocomplete="off" />
+      <label>已保存连接</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="profileSelect" style="flex:1">
+          <option value="">— 未选择，手动填写 —</option>
+        </select>
+        <button class="ghost" id="btnProfileSave" style="white-space:nowrap">保存</button>
+        <button class="ghost" id="btnProfileDelete" style="white-space:nowrap">删除</button>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px">
+        <input id="profileRememberPassword" type="checkbox" style="width:auto;margin:0" />
+        连同密码一起保存
+      </label>
+      <div class="hint">
+        连接配置保存在服务端，清除浏览器数据后仍可读取。密码 / SSH 私钥仅在服务端配置加密密钥并勾选保存时加密存储。
+      </div>
       <div class="row">
         <div>
           <label>引擎</label>
           <select id="engine">
-            <option value="postgres" data-port="5432">PostgreSQL</option>
-            <option value="mysql" data-port="3306">MySQL</option>
-            <option value="doris" data-port="9030">Apache Doris</option>
-            <option value="starrocks" data-port="9030">StarRocks</option>
+            <option value="postgres" data-port="5432" data-proof="transaction">PostgreSQL</option>
+            <option value="mysql" data-port="3306" data-proof="transaction">MySQL</option>
+            <option value="doris" data-port="9030" data-proof="grants">Apache Doris</option>
+            <option value="starrocks" data-port="9030" data-proof="grants">StarRocks</option>
           </select>
         </div>
         <div>
@@ -119,6 +135,16 @@
       </div>
       <label>工作区（可选，已预建）</label>
       <input id="workspace" placeholder="analysis_ws" />
+      <div id="weakReadOnlyWrap" style="display:none">
+        <label style="display:flex;align-items:center;gap:6px;margin-top:10px">
+          <input id="allowWeakReadOnly" type="checkbox" style="width:auto;margin:0" />
+          接受弱只读（allowWeakReadOnly）
+        </label>
+        <div class="hint">
+          <span id="weakReadOnlyEngines">此引擎</span>没有只读事务，只能靠 `SHOW GRANTS` 证明账号只读。
+          勾选后不再要求该证明，仅由 SQL guard 拦截写入；仅在信任该账号且可接受风险时使用。
+        </div>
+      </div>
       <label>TLS</label>
       <select id="sslMode">
         <option value="">不使用</option>
@@ -176,6 +202,7 @@
     </div>
     <div id="composer">
       <div id="taskbar"><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span></div>
+      <div class="buttons"><select id="historySelect"><option value="">历史会话</option></select><button id="btnHistory">读取历史</button><button id="btnReconnect">恢复分析</button></div>
       <textarea id="goal" rows="3" placeholder="例如：按月统计 2025 年订单 GMV，对比 2024 同期，并指出退款率异常月份"></textarea>
       <div class="buttons">
         <button class="primary" id="btnSend" disabled>发送任务</button>
@@ -195,20 +222,25 @@
   <div class="content" id="drawerBody"></div>
 </div>
 
-<script>
+<script type="module">
+import { followTask } from "/task-stream.js";
 const $ = (id) => document.getElementById(id);
 const state = {
   token: sessionStorage.getItem("data-agent-token") || "",
   sessionId: null,
   taskId: null,
   streamAbort: null,
+  profiles: [],
+  selectedProfile: null,
+  sessionReady: false,
   assistantEl: null,
   // Text of the segment currently being streamed; reset whenever a tool card splits the transcript.
   segmentText: "",
   lastSegmentText: "",
 };
 $("token").value = state.token;
-void loadEngines();
+void initProfiles();
+void loadHistory();
 
 function api(path, options = {}) {
   const headers = Object.assign({}, options.headers || {});
@@ -235,7 +267,7 @@ function defaultPort() {
   return (option && option.dataset.port) || "5432";
 }
 
-// Engine list comes from GET /v1/engines; the static options above are only a fallback for the
+// The engine list comes from GET /v1/engines; the static options above are only a fallback for the
 // unauthenticated first paint.
 async function loadEngines() {
   try {
@@ -243,12 +275,25 @@ async function loadEngines() {
     const select = $("engine");
     const current = select.value;
     select.innerHTML = (data.engines || [])
-      .map((engine) => '<option value="' + escapeHtml(engine.id) + '" data-port="' + Number(engine.defaultPort) + '">' + escapeHtml(engine.label) + "</option>")
+      .map((engine) => '<option value="' + escapeHtml(engine.id) + '" data-port="' + Number(engine.defaultPort) +
+        '" data-proof="' + escapeHtml(engine.readOnlyProof || "transaction") + '">' + escapeHtml(engine.label) + "</option>")
       .join("");
     if (current) select.value = current;
   } catch {
     /* keep the static fallback list */
   }
+  syncWeakReadOnly();
+}
+
+// allowWeakReadOnly only has meaning where the profile proves read-only from grants; PostgreSQL and
+// MySQL are pinned to a read-only transaction instead, so the control stays hidden there.
+function syncWeakReadOnly() {
+  const option = $("engine").selectedOptions[0];
+  const proof = (option && option.dataset.proof) || "transaction";
+  const relevant = proof === "grants";
+  $("weakReadOnlyWrap").style.display = relevant ? "block" : "none";
+  if (!relevant) $("allowWeakReadOnly").checked = false;
+  $("weakReadOnlyEngines").textContent = (option && option.textContent) || "此引擎";
 }
 
 function connectionPayload() {
@@ -265,6 +310,7 @@ function connectionPayload() {
   };
   const ws = $("workspace").value.trim();
   if (ws) conn.workspace = { name: ws };
+  if ($("allowWeakReadOnly").checked) conn.allowWeakReadOnly = true;
   if (sslMode) {
     conn.ssl = { mode: sslMode };
     const ca = $("sslCa").value.trim();
@@ -299,6 +345,178 @@ function saveToken() {
   void loadEngines();
 }
 
+// ── saved connection profiles ────────────────────────────────────────────────
+// Server profiles are authoritative. Legacy browser profiles can be migrated with Save.
+const PROFILE_KEY = "data-agent-connections-v1";
+const PROFILE_LAST = "data-agent-connection-last";
+
+function legacyProfiles() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROFILE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((entry) => entry && typeof entry.name === "string").map((entry) => ({ ...entry, localOnly: true })) : [];
+  } catch {
+    return [];
+  }
+}
+
+function readProfiles() {
+  const names = new Set(state.profiles.map((entry) => entry.name));
+  return state.profiles.concat(legacyProfiles().filter((entry) => !names.has(entry.name)));
+}
+
+async function refreshProfiles() {
+  const data = await api("/v1/connections/profiles");
+  state.profiles = (data.profiles || []).map((entry) => ({ ...entry.config, name: entry.name, hasSecret: entry.hasSecret }));
+  $("profileRememberPassword").disabled = !data.secret_storage_enabled;
+  if (!data.secret_storage_enabled) $("profileRememberPassword").checked = false;
+}
+
+function connectionRequest() {
+  const connection = connectionPayload();
+  if (!state.selectedProfile) return { connection };
+  return { profile: state.selectedProfile, credentials: {
+    password: connection.password,
+    ssh: ((connection.ssh && connection.ssh.hops) || []).map((hop) => hop.auth),
+  } };
+}
+
+function renderProfiles(selected) {
+  const list = readProfiles().sort((a, b) => a.name.localeCompare(b.name));
+  const select = $("profileSelect");
+  select.innerHTML = '<option value="">— 未选择，手动填写 —</option>' +
+    list
+      .map((profile) => {
+        const suffix = (profile.localOnly ? " · 浏览器旧配置" : " · 服务端") + (profile.host ? " · " + profile.host + (profile.database ? "/" + profile.database : "") : "");
+        return '<option value="' + escapeHtml(profile.name) + '">' + escapeHtml(profile.name + suffix) + "</option>";
+      })
+      .join("");
+  const target = selected !== undefined ? selected : localStorage.getItem(PROFILE_LAST) || "";
+  select.value = target;
+  // A name that no longer exists (deleted in another tab) leaves the select value empty.
+  if (select.value !== target) select.value = "";
+}
+
+function applyProfile(profile) {
+  if (!profile) return;
+  state.selectedProfile = profile.localOnly ? null : profile.name;
+  $("profileRememberPassword").checked = !$("profileRememberPassword").disabled && Boolean(profile.hasSecret);
+  const engines = [...$("engine").options].map((option) => option.value);
+  $("engine").value = engines.includes(profile.engine) ? profile.engine : engines[0];
+  syncWeakReadOnly();
+  $("host").value = profile.host || "";
+  $("port").value = profile.port || defaultPort();
+  $("database").value = profile.database || "";
+  $("user").value = profile.user || "";
+  $("password").value = profile.password || "";
+  $("environment").value = profile.environment === "non_production" ? "non_production" : "production";
+  $("workspace").value = (profile.workspace && profile.workspace.name) || "";
+  const weak = $("weakReadOnlyWrap").style.display !== "none";
+  $("allowWeakReadOnly").checked = weak && Boolean(profile.allowWeakReadOnly);
+
+  const ssl = profile.ssl || {};
+  $("sslMode").value = ssl.mode || "";
+  $("sslCa").value = ssl.ca || "";
+  $("sslServerName").value = ssl.serverName || "";
+  $("sslExtra").style.display = ssl.mode ? "block" : "none";
+
+  const hop = (profile.ssh && profile.ssh.hops && profile.ssh.hops[0]) || null;
+  $("sshHost").value = hop ? hop.host || "" : "";
+  $("sshPort").value = hop && hop.port ? hop.port : 22;
+  $("sshUser").value = hop ? hop.username || "" : "";
+  $("sshFingerprint").value = hop && hop.hostFingerprint ? hop.hostFingerprint : "";
+  const auth = (hop && hop.auth) || null;
+  const method = auth && auth.method === "privateKey" ? "privateKey" : "password";
+  $("sshAuth").value = method;
+  $("sshPassword").value = (auth && auth.password) || "";
+  $("sshKey").value = (auth && auth.privateKey) || "";
+  $("sshPassphrase").value = (auth && auth.passphrase) || "";
+  $("sshKeyWrap").style.display = method === "privateKey" ? "block" : "none";
+  $("sshPasswordWrap").style.display = method === "privateKey" ? "none" : "block";
+}
+
+function missingSecrets(profile) {
+  const missing = [];
+  if (!profile.hasSecret && !profile.password) missing.push("数据库密码");
+  const hop = (profile.ssh && profile.ssh.hops && profile.ssh.hops[0]) || null;
+  if (!profile.hasSecret && hop && hop.auth && !hop.auth.password && !hop.auth.privateKey) {
+    missing.push(hop.auth.method === "privateKey" ? "SSH 私钥" : "SSH 密码");
+  }
+  return missing;
+}
+
+async function initProfiles() {
+  await loadEngines();
+  try { await refreshProfiles(); } catch (error) { setStatus("connStatus", error.message, "err"); }
+  renderProfiles();
+  const last = localStorage.getItem(PROFILE_LAST);
+  const profile = last ? readProfiles().find((entry) => entry.name === last) : null;
+  if (!profile) return;
+  applyProfile(profile);
+  $("profileSelect").value = profile.name;
+  const missing = missingSecrets(profile);
+  setStatus(
+    "connStatus",
+    "已载入连接「" + profile.name + "」" +
+      (missing.length ? "；请补填：" + missing.join("、") : "（含已保存的凭据）"),
+    missing.length ? "info" : "ok",
+  );
+}
+
+$("btnProfileSave").onclick = async () => {
+  try {
+    saveToken();
+    const connection = connectionPayload();
+    let name = $("profileSelect").value;
+    if (!name) name = (window.prompt("保存名称（字母、数字、点、下划线或连字符）", (connection.engine + "-" + connection.host + "-" + connection.database).replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 60)) || "").trim();
+    if (!name) return;
+    const saved = await api("/v1/connections/profiles/" + encodeURIComponent(name), { method: "PUT", body: { ...connectionRequest(), rememberSecret: $("profileRememberPassword").checked } });
+    await refreshProfiles();
+    // Remove a legacy plaintext copy only after its explicit server migration succeeded.
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(legacyProfiles().filter((item) => item.name !== name).map(({localOnly, ...item}) => item)));
+    localStorage.setItem(PROFILE_LAST, name);
+    renderProfiles(name);
+    state.selectedProfile = name;
+    setStatus("connStatus", "已保存到服务端「" + name + "」" + (saved.profile.hasSecret ? "（凭据已加密）" : "（未保存凭据）"), "ok");
+  } catch (error) { setStatus("connStatus", error.message, "err"); }
+};
+$("btnProfileDelete").onclick = async () => {
+  const name = $("profileSelect").value;
+  if (!name || !window.confirm("删除已保存的连接「" + name + "」？")) return;
+  try {
+    const entry = readProfiles().find((item) => item.name === name);
+    if (entry && !entry.localOnly) await api("/v1/connections/profiles/" + encodeURIComponent(name), { method: "DELETE" });
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(legacyProfiles().filter((item) => item.name !== name).map(({localOnly, ...item}) => item)));
+    localStorage.removeItem(PROFILE_LAST);
+    state.selectedProfile = null;
+    await refreshProfiles();
+    renderProfiles("");
+    setStatus("connStatus", "已删除连接「" + name + "」", "ok");
+  } catch (error) { setStatus("connStatus", error.message, "err"); }
+};
+for (const id of ["engine", "host", "port", "database", "user", "environment", "workspace", "allowWeakReadOnly", "sslMode", "sslCa", "sslServerName", "sshHost", "sshPort", "sshUser", "sshFingerprint", "sshAuth"]) {
+  $(id).addEventListener("input", () => { state.selectedProfile = null; });
+  $(id).addEventListener("change", () => { state.selectedProfile = null; });
+}
+$("profileSelect").addEventListener("change", () => {
+  const name = $("profileSelect").value;
+  if (!name) {
+    state.selectedProfile = null;
+    localStorage.removeItem(PROFILE_LAST);
+    setStatus("connStatus", "未选择已保存连接，可手动填写后保存", "info");
+    return;
+  }
+  const profile = readProfiles().find((entry) => entry.name === name);
+  if (!profile) return;
+  applyProfile(profile);
+  localStorage.setItem(PROFILE_LAST, name);
+  const missing = missingSecrets(profile);
+  setStatus(
+    "connStatus",
+    "已载入连接「" + name + "」" + (missing.length ? "；请补填：" + missing.join("、") : "（含已保存的凭据）"),
+    missing.length ? "info" : "ok",
+  );
+});
+
 $("sslMode").addEventListener("change", () => {
   $("sslExtra").style.display = $("sslMode").value ? "block" : "none";
 });
@@ -309,6 +527,7 @@ $("sshAuth").addEventListener("change", () => {
 });
 $("engine").addEventListener("change", () => {
   $("port").value = defaultPort();
+  syncWeakReadOnly();
 });
 
 $("btnHealth").onclick = async () => {
@@ -326,7 +545,7 @@ $("btnTest").onclick = async () => {
   $("btnTest").disabled = true;
   setStatus("connStatus", "测试中…", "info");
   try {
-    const result = await api("/v1/connections/test", { method: "POST", body: { connection: connectionPayload() } });
+    const result = await api("/v1/connections/test", { method: "POST", body: connectionRequest() });
     const caps = result.capabilities || {};
     setStatus("connStatus", [
       "ok · " + result.engine + " · " + result.latencyMs + "ms",
@@ -347,7 +566,9 @@ $("btnSession").onclick = async () => {
   $("btnSession").disabled = true;
   setStatus("connStatus", "建立会话…", "info");
   try {
-    const data = await api("/v1/sessions", { method: "POST", body: { connection: connectionPayload() } });
+    const data = await api("/v1/sessions", { method: "POST", body: connectionRequest() });
+    state.streamAbort?.abort();
+    state.taskId = null;
     state.sessionId = data.session.session_id;
     applySession(data.session);
     setStatus("connStatus", "会话已建立 · " + state.sessionId, "ok");
@@ -356,6 +577,7 @@ $("btnSession").onclick = async () => {
     $("btnClose").disabled = false;
     $("btnRefresh").disabled = false;
     $("connBadge").textContent = data.session.engine + " · " + data.session.database;
+    void loadHistory();
   } catch (error) {
     setStatus("connStatus", String(error.message || error), "err");
   } finally {
@@ -364,9 +586,13 @@ $("btnSession").onclick = async () => {
 };
 
 function applySession(session) {
+  state.sessionReady = session.status === "ready";
+  $("connBadge").textContent = session.engine + " · " + session.database + " · " + session.status;
+  $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId);
   const caps = session.capabilities || {};
   const rows = [
     ["session", session.session_id],
+    ["status", session.status],
     ["engine", session.engine + "/" + (caps.engineLabel || "—")],
     ["database", session.database],
     ["environment", session.environment],
@@ -380,6 +606,7 @@ function applySession(session) {
   $("sessionInfo").innerHTML = rows
     .map(([k, v]) => '<span class="k">' + k + '</span><span>' + escapeHtml(String(v ?? "")) + '</span>')
     .join("");
+  if (session.unavailable_reason) setStatus("connStatus", session.unavailable_reason, "err");
   if (caps.workspaceNote) {
     $("sessionInfo").innerHTML += '<span class="k">note</span><span>' + escapeHtml(caps.workspaceNote) + "</span>";
   }
@@ -401,13 +628,18 @@ $("btnRefresh").onclick = async () => {
 $("btnClose").onclick = async () => {
   if (!state.sessionId) return;
   const id = state.sessionId;
+  state.streamAbort?.abort();
+  state.taskId = null;
+  state.sessionReady = false;
   state.sessionId = null;
   $("btnSend").disabled = true;
   $("btnClose").disabled = true;
   $("btnRefresh").disabled = true;
+  $("btnCancel").disabled = true;
   $("connBadge").textContent = "no session";
   try { await api("/v1/sessions/" + id, { method: "DELETE" }); } catch (error) { console.warn(error); }
   setStatus("connStatus", "会话已关闭", "info");
+  void loadHistory();
 };
 
 function escapeHtml(text) {
@@ -521,40 +753,28 @@ $("btnSend").onclick = async () => {
 };
 
 function streamTask(taskId) {
-  if (state.streamAbort) state.streamAbort.abort();
+  state.streamAbort?.abort();
   const controller = new AbortController();
   state.streamAbort = controller;
-  (async () => {
-    const res = await fetch("/v1/tasks/" + taskId + "/events", {
-      headers: state.token ? { authorization: "Bearer " + state.token } : {},
-      signal: controller.signal,
-    });
-    if (!res.ok || !res.body) {
-      $("taskPill").className = "pill failed";
-      $("taskPill").textContent = "stream error";
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let index;
-      while ((index = buffer.indexOf("\n\n")) >= 0) {
-        const chunk = buffer.slice(0, index);
-        buffer = buffer.slice(index + 2);
-        const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
-        if (!dataLine) continue;
-        try { handleEvent(JSON.parse(dataLine.slice(6))); } catch (error) { console.warn("bad event", error); }
-      }
-    }
-  })().catch((error) => {
-    if (error.name !== "AbortError") console.warn(error);
+  void followTask({
+    taskId, signal: controller.signal,
+    headers: state.token ? { authorization: "Bearer " + state.token } : {},
+    onEvent: (event) => { if (state.streamAbort === controller) handleEvent(event); },
+    onCursor: (cursor) => sessionStorage.setItem("data-agent-task-cursor:" + taskId, String(cursor)),
+    onConnection: (status) => {
+      if (state.streamAbort !== controller) return;
+      $("taskPill").textContent = status === "reconnecting" ? "连接中断，正在恢复…" : "running";
+    },
+  }).catch((error) => {
+    if (controller.signal.aborted || state.streamAbort !== controller) return;
+    $("taskPill").className = "pill failed";
+    $("taskPill").textContent = "进度连接失败，请刷新会话";
+    state.taskId = null;
+    $("btnSend").disabled = !state.sessionReady;
+    $("btnCancel").disabled = true;
+    setStatus("connStatus", error.message, "err");
   });
 }
-
 function handleEvent(event) {
   const data = event.data || {};
   switch (event.type) {
@@ -613,6 +833,7 @@ function handleEvent(event) {
       break;
     }
     case "task_finished": {
+      state.taskId = null;
       closeSegment();
       const finalAnswer = typeof data.answer === "string" ? data.answer.trim() : "";
       if (finalAnswer && finalAnswer !== state.lastSegmentText.trim()) {
@@ -626,7 +847,7 @@ function handleEvent(event) {
       const status = data.status || "finished";
       $("taskPill").className = "pill " + status;
       $("taskPill").textContent = status;
-      $("btnSend").disabled = false;
+      $("btnSend").disabled = !state.sessionReady;
       $("btnCancel").disabled = true;
       if (data.error) {
         ensureAssistant();
@@ -741,6 +962,84 @@ $("goal").addEventListener("keydown", (event) => {
 });
 
 api("/healthz").then((health) => { $("modelBadge").textContent = "model: " + health.model; }).catch(() => {});
+
+$("token").addEventListener("change", () => { saveToken(); void initProfiles(); void loadHistory(); });
+
+async function loadHistory() {
+  try {
+    const selected = $("historySelect").value || state.sessionId;
+    const { sessions } = await api("/v1/sessions");
+    $("historySelect").innerHTML = '<option value="">历史会话</option>' + sessions.slice().reverse().map((item) =>
+      '<option value="' + escapeHtml(item.session_id) + '">' + escapeHtml(item.database + " · " + item.status + " · " + item.session_id) + '</option>').join("");
+    if (selected) $("historySelect").value = selected;
+  } catch (error) { console.warn(error); }
+}
+
+$("btnHistory").onclick = async () => {
+  const id = $("historySelect").value;
+  if (!id) return;
+  try {
+    state.streamAbort?.abort();
+    const [{ session }, { tasks }, { results }] = await Promise.all([
+      api("/v1/sessions/" + id), api("/v1/sessions/" + id + "/tasks"), api("/v1/sessions/" + id + "/results"),
+    ]);
+    state.sessionId = id;
+    state.taskId = null;
+    state.assistantEl = null;
+    state.textNode = null;
+    state.segmentText = "";
+    state.lastSegmentText = "";
+    $("messages").replaceChildren();
+    for (const task of tasks) {
+      if (task.id === session.current_task_id) continue;
+      addMessage("user").textContent = task.goal;
+      if (task.answer) addMessage("assistant").innerHTML = renderMarkdown(task.answer);
+      if (task.error) addMessage("assistant").textContent = task.error.code + ": " + task.error.message;
+    }
+    if (results.length) {
+      const body = addMessage("assistant");
+      for (const result of results) {
+        const button = document.createElement("button");
+        button.textContent = (result.error ? "查询失败 · " : "") + (result.label || result.id);
+        button.onclick = () => openResult(result.id);
+        body.appendChild(button);
+      }
+    }
+    applySession(session);
+    $("btnRefresh").disabled = false;
+    $("btnClose").disabled = !["ready", "unavailable"].includes(session.status);
+    $("btnCancel").disabled = true;
+    $("taskPill").textContent = session.status;
+    if (session.current_task_id) {
+      const current = tasks.find((task) => task.id === session.current_task_id);
+      if (current) addMessage("user").textContent = current.goal;
+      state.taskId = session.current_task_id;
+      $("btnSend").disabled = true;
+      $("btnCancel").disabled = false;
+      state.assistantEl = null;
+      state.segmentText = "";
+      state.lastSegmentText = "";
+      streamTask(state.taskId);
+    }
+    setStatus("connStatus", state.sessionReady ? "已读取会话" : "历史已读取；继续分析请填写原连接或选择已保存配置，再点击恢复分析", "info");
+  } catch (error) { setStatus("connStatus", error.message, "err"); }
+};
+
+$("btnReconnect").onclick = async () => {
+  const id = $("historySelect").value || state.sessionId;
+  if (!id) return;
+  try {
+    const { session } = await api("/v1/sessions/" + id + "/reconnect", { method: "POST", body: connectionRequest() });
+    state.streamAbort?.abort();
+    state.sessionId = id;
+    state.taskId = null;
+    applySession(session);
+    $("btnRefresh").disabled = false;
+    $("btnClose").disabled = false;
+    setStatus("connStatus", "连接已恢复，可继续原会话分析", "ok");
+    void loadHistory();
+  } catch (error) { setStatus("connStatus", error.message, "err"); }
+};
 </script>
 </body>
 </html>

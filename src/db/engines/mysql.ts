@@ -11,7 +11,7 @@ import type {
   ProfileResult,
 } from "../types.js";
 import { SshTunnel } from "../ssh-tunnel.js";
-import { analyzeGrants, summarizeWrites } from "../grants.js";
+import { analyzeGrantRows, summarizeWrites } from "../grants.js";
 import {
   cellText,
   quoteBacktick,
@@ -46,6 +46,8 @@ export class MysqlEngine implements Engine {
   private serverVersion = "";
   private readonly notes: string[] = [];
   private grantsChecked = false;
+  unavailableReason?: string;
+  private cancelling?: Promise<boolean>;
   /** MySQL-only DDL fragments; Doris/StarRocks reject them. */
   protected readonly viewSecurity: string = " SQL SECURITY INVOKER";
   protected readonly tableMarkerComment: boolean = true;
@@ -151,16 +153,13 @@ export class MysqlEngine implements Engine {
 
   private async verifyGrants(): Promise<void> {
     if (this.grantsChecked) return;
-    let analysis: ReturnType<typeof analyzeGrants> | undefined;
+    let analysis: ReturnType<typeof analyzeGrantRows> | undefined;
     let failure: string | undefined;
     try {
-      const { rows } = await this.buffered("SHOW GRANTS", 15_000);
-      // MySQL returns one GRANT line per row; Doris 2.x may return a columnar row. Joining the cells
-      // keeps both shapes readable, and anything unrecognisable stays unproven (fail closed).
-      const lines = rows
-        .map((row) => row.map((cell) => String(cell ?? "")).join(" ").trim())
-        .filter((line) => line.length > 0);
-      analysis = analyzeGrants(lines);
+      const { fields, rows } = await this.buffered("SHOW GRANTS", 15_000);
+      // MySQL returns one GRANT line per row; Doris/StarRocks return one columnar row. The dispatcher
+      // handles both shapes; anything unrecognisable stays unproven (fail closed).
+      analysis = analyzeGrantRows(fields, rows);
     } catch (error) {
       failure = (error as Error).message;
     }
@@ -178,7 +177,9 @@ export class MysqlEngine implements Engine {
     const reason = failure
       ? `SHOW GRANTS failed: ${failure}`
       : !analysis || analysis.parsed === 0
-        ? "SHOW GRANTS returned no recognizable GRANT lines"
+        ? this.profile.label === "Apache Doris" || this.profile.id === "starrocks"
+          ? "SHOW GRANTS returned a shape with no recognisable privilege columns"
+          : "SHOW GRANTS returned no recognizable GRANT lines"
         : `the account holds writable privileges: ${summarizeWrites(analysis)}`;
     if (!this.config.allowWeakReadOnly) {
       throw new AppError(
@@ -222,6 +223,7 @@ export class MysqlEngine implements Engine {
   }
 
   private assertOpen(): Connection {
+    if (this.unavailableReason) throw new AppError("SESSION_UNAVAILABLE", this.unavailableReason);
     if (!this.connection || this.closed) throw new Error("MySQL connection is not open");
     return this.connection;
   }
@@ -272,16 +274,18 @@ export class MysqlEngine implements Engine {
     });
 
     let abortTimer: NodeJS.Timeout | undefined;
+    let cancellation: Promise<boolean> | undefined;
     const onAbort = () => {
       if (aborted) return;
       aborted = true;
       // KILL QUERY makes the stream emit an error (or end), which settles the async iteration.
-      void this.cancel();
+      cancellation = this.cancel();
       // Safety net: if the server never reports the interruption, tear the connection down.
       abortTimer = setTimeout(() => stream.destroy(new Error("Query aborted")), 8_000);
       abortTimer.unref?.();
     };
     limits.signal?.addEventListener("abort", onAbort, { once: true });
+    if (limits.signal?.aborted) onAbort();
 
     try {
       for await (const rawRow of stream as AsyncIterable<unknown[]>) {
@@ -302,13 +306,15 @@ export class MysqlEngine implements Engine {
       }
     } catch (error) {
       // An interruption we requested is reported to the caller through the session's cancel state.
-      if (!truncated && !aborted) throw error;
+      if (truncated === "none" && !aborted) throw error;
     } finally {
       if (abortTimer) clearTimeout(abortTimer);
       limits.signal?.removeEventListener("abort", onAbort);
+      // KILL acknowledgement must finish before resetting or reusing the pinned connection.
+      await cancellation;
     }
 
-    if (truncated !== "none" || aborted) {
+    if ((truncated !== "none" || aborted) && !this.unavailableReason) {
       await this.endReadOnly();
       await this.beginReadOnly();
     }
@@ -616,6 +622,17 @@ export class MysqlEngine implements Engine {
   }
 
   async cancel(): Promise<boolean> {
+    if (this.cancelling) return this.cancelling;
+    const pending = this.cancelConnection();
+    this.cancelling = pending;
+    try {
+      return await pending;
+    } finally {
+      this.cancelling = undefined;
+    }
+  }
+
+  private async cancelConnection(): Promise<boolean> {
     const connection = this.connection;
     if (!connection || this.profile.cancel === "none") return false;
     const threadId = connection.threadId;
@@ -631,6 +648,12 @@ export class MysqlEngine implements Engine {
       await new Promise<void>((resolve, reject) => {
         control!.query(statement, (error) => (error ? reject(error) : resolve()));
       });
+      if (this.profile.cancel === "connection-id") {
+        this.unavailableReason = `${this.profile.label} cancellation closed the database connection. Open a new analysis session to continue.`;
+        this.connection = undefined;
+        this.inReadOnly = false;
+        connection.destroy();
+      }
       return true;
     } catch {
       return false;

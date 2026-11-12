@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import type { AppConfig } from "../config.js";
 import type { ConnectionConfig, SessionCapabilities } from "../db/types.js";
 import { AppError } from "../errors.js";
@@ -7,6 +8,8 @@ import { ResultStore, type ResultPage } from "../results/store.js";
 import { EventBroker, type TaskEvent } from "./events.js";
 import { createModelHandle, type ModelHandle } from "./model.js";
 import { AnalysisSession, type TaskRecord } from "./runtime.js";
+import { HistoryStore, connectionKey } from "./history.js";
+import { ProfileStore } from "../db/profiles-store.js";
 
 export interface ConnectionTestResult {
   ok: boolean;
@@ -31,7 +34,9 @@ export function callerKey(token: string, headerIdentity?: string): string {
  */
 export class AnalysisService {
   private readonly sessions = new Map<string, AnalysisSession>();
-  private readonly broker = new EventBroker();
+  private readonly broker: EventBroker;
+  readonly history: HistoryStore;
+  readonly profiles: ProfileStore;
   private sweeper?: ReturnType<typeof setInterval>;
   private closed = false;
 
@@ -39,7 +44,11 @@ export class AnalysisService {
     private readonly app: AppConfig,
     private readonly model: ModelHandle,
     readonly results: ResultStore,
-  ) {}
+  ) {
+    this.history = new HistoryStore(join(app.dataDir, "history"));
+    this.broker = new EventBroker(5_000, this.history);
+    this.profiles = new ProfileStore(join(app.dataDir, "connections.json"), app.profileSecretKey);
+  }
 
   static async create(app: AppConfig): Promise<AnalysisService> {
     const model = await createModelHandle(app);
@@ -82,8 +91,17 @@ export class AnalysisService {
 
   // ---------------------------------------------------------------- sessions
 
-  async createSession(config: ConnectionConfig, ownerKey: string): Promise<AnalysisSession> {
+  async createSession(config: ConnectionConfig, ownerKey: string, sessionId?: string): Promise<AnalysisSession> {
     if (this.closed) throw new AppError("INTERNAL_ERROR", "Service is shutting down");
+    if (sessionId) {
+      const previous = this.history.getSession(sessionId, ownerKey);
+      if (previous.connectionKey !== connectionKey(config)) {
+        throw new AppError("INVALID_INPUT", "Reconnect must use the same database, account, environment and workspace as the original session");
+      }
+      const active = this.sessions.get(sessionId);
+      if (active?.isBusy) throw new AppError("INVALID_INPUT", "Cancel the running task before reconnecting");
+      if (active) await this.closeSession(sessionId, ownerKey);
+    }
     await this.sweepExpired();
     if (this.sessions.size >= this.app.maxSessions) {
       throw new AppError(
@@ -98,8 +116,11 @@ export class AnalysisService {
       model: this.model,
       broker: this.broker,
       ownerKey,
+      history: this.history,
+      sessionId,
     });
     this.sessions.set(session.id, session);
+    this.history.saveSession(ownerKey, session.snapshot(), connectionKey(config));
     return session;
   }
 
@@ -113,9 +134,22 @@ export class AnalysisService {
   }
 
   listSessions(ownerKey: string) {
-    return [...this.sessions.values()]
-      .filter((session) => session.ownerKey === ownerKey)
-      .map((session) => session.snapshot());
+    const snapshots = new Map(this.history.listSessions(ownerKey).map((snapshot) => [snapshot.session_id, snapshot]));
+    for (const session of this.sessions.values()) {
+      if (session.ownerKey === ownerKey) snapshots.set(session.id, session.snapshot());
+    }
+    return [...snapshots.values()];
+  }
+
+  sessionSnapshot(sessionId: string, ownerKey: string) {
+    const session = this.sessions.get(sessionId);
+    if (session) return this.getSession(sessionId, ownerKey).snapshot();
+    return this.history.getSession(sessionId, ownerKey).snapshot;
+  }
+
+  async listResults(sessionId: string, ownerKey: string) {
+    this.sessionSnapshot(sessionId, ownerKey);
+    return this.results.listBySession(sessionId);
   }
 
   async closeSession(sessionId: string, ownerKey: string): Promise<void> {
@@ -126,18 +160,19 @@ export class AnalysisService {
 
   // ------------------------------------------------------------------- tasks
 
-  findTask(taskId: string, ownerKey: string): { session: AnalysisSession; task: TaskRecord } {
+  findTask(taskId: string, ownerKey: string): { session?: AnalysisSession; task: TaskRecord } {
     for (const session of this.sessions.values()) {
       if (session.ownerKey !== ownerKey) continue;
       const task = session.listTasks().find((candidate) => candidate.id === taskId);
       if (task) return { session, task };
     }
-    throw new AppError("TASK_NOT_FOUND", `Task ${taskId} not found`);
+    return { task: this.history.getTask(taskId, ownerKey) };
   }
 
   watchTask(taskId: string, ownerKey: string, fn: (event: TaskEvent) => void, afterSeq = 0): () => void {
-    const { session } = this.findTask(taskId, ownerKey);
-    return session.watch(taskId, fn, afterSeq);
+    this.findTask(taskId, ownerKey);
+    for (const event of this.broker.list(taskId, afterSeq)) fn(event);
+    return this.broker.subscribe(taskId, fn);
   }
 
   // ----------------------------------------------------------------- results
@@ -145,11 +180,11 @@ export class AnalysisService {
   async readResult(resultId: string, ownerKey: string, offset: number, limit: number): Promise<ResultPage> {
     const meta = await this.results.get(resultId);
     if (!meta) throw new AppError("RESULT_NOT_FOUND", `Result ${resultId} not found`);
-    const session = this.sessions.get(meta.sessionId);
-    if (!session || session.ownerKey !== ownerKey) {
-      throw new AppError("NOT_FOUND", `Result ${resultId} not found`);
-    }
-    return session.db.readResult(resultId, offset, limit);
+    this.history.getSession(meta.sessionId, ownerKey);
+    if (meta.error) throw new AppError("RESULT_FAILED", `Query did not complete successfully: ${meta.error}`);
+    const page = await this.results.read(resultId, offset, limit, this.app.budgets.cellChars);
+    if (!page) throw new AppError("RESULT_NOT_FOUND", `Result ${resultId} not found`);
+    return page;
   }
 
   // --------------------------------------------------------------- lifecycle

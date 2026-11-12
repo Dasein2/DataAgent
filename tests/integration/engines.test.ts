@@ -186,6 +186,8 @@ for (const [label, engine, dsn] of suites) {
         const outcome = await running;
         assert.ok(outcome instanceof Error, "the query must fail after cancellation");
         assert.ok(Date.now() - started < 25_000, "cancellation must interrupt the query promptly");
+        const next = await session.query("SELECT 42 AS answer");
+        assert.equal(Number(next.preview[0]?.[0]), 42, "statement cancellation must leave the session usable");
       });
     });
 

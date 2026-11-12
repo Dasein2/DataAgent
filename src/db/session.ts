@@ -18,6 +18,7 @@ import type {
 } from "./types.js";
 
 export interface DatasetRecord {
+  ownerSessionId?: string;
   name: string;
   kind: "view" | "table";
   sql: string;
@@ -40,7 +41,8 @@ export interface SessionSnapshot {
   created_at: string;
   last_used_at: string;
   expires_at: string;
-  status: "ready" | "closed";
+  status: "ready" | "closed" | "unavailable";
+  unavailable_reason?: string;
 }
 
 interface AuditEvent {
@@ -111,6 +113,9 @@ export class DbSession {
       await this.engine.connect();
     } catch (error) {
       await this.engine.close().catch(() => undefined);
+      // Policy refusals (READONLY_UNVERIFIED, CONNECTION_TARGET_BLOCKED) must keep their code so a
+      // client can branch on it instead of parsing a wrapped CONNECTION_FAILED message.
+      if (error instanceof AppError) throw error;
       throw new AppError("CONNECTION_FAILED", `Database connection failed: ${(error as Error).message}`);
     }
 
@@ -204,7 +209,8 @@ export class DbSession {
       created_at: this.createdAt.toISOString(),
       last_used_at: this.lastUsedAt.toISOString(),
       expires_at: this.expiresAt.toISOString(),
-      status: this.closed ? "closed" : "ready",
+      status: this.closed ? "closed" : this.engine.unavailableReason ? "unavailable" : "ready",
+      unavailable_reason: this.engine.unavailableReason,
     };
   }
 
@@ -215,7 +221,12 @@ export class DbSession {
   /** Serialises every database operation for this pinned connection. */
   private run<T>(operation: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new AppError("SESSION_CLOSED", "Session is closed"));
-    const next = this.tail.then(operation, operation);
+    const guarded = () => {
+      if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+      if (this.engine.unavailableReason) throw new AppError("SESSION_UNAVAILABLE", this.engine.unavailableReason);
+      return operation();
+    };
+    const next = this.tail.then(guarded, guarded);
     this.tail = next.then(
       () => undefined,
       () => undefined,
@@ -269,8 +280,9 @@ export class DbSession {
       const state = { controller, cancelled: false };
       this.activeQuery = state;
       let timedOut = false;
-      const onOuterAbort = () => controller.abort();
+      const onOuterAbort = () => { state.cancelled = true; controller.abort(); };
       options.signal?.addEventListener("abort", onOuterAbort, { once: true });
+      if (options.signal?.aborted) onOuterAbort();
       const timer = setTimeout(() => {
         timedOut = true;
         controller.abort();
@@ -297,6 +309,7 @@ export class DbSession {
         if (state.cancelled) {
           throw new AppError("QUERY_CANCELLED", "Query cancelled by caller");
         }
+        if (timedOut) throw new AppError("QUERY_TIMEOUT", `Query exceeded ${timeoutMs} ms and was cancelled`);
         const meta = await writer.finish(stats.truncated, stats.durationMs);
         await this.audit({
           action: "query_execute",
@@ -425,6 +438,7 @@ export class DbSession {
     const meta = await this.results.get(resultId);
     if (!meta) throw new AppError("RESULT_NOT_FOUND", `Result ${resultId} was not found`);
     if (meta.sessionId !== this.id) throw new AppError("FORBIDDEN", "Result belongs to another session");
+    if (meta.error) throw new AppError("RESULT_FAILED", `Query did not complete successfully: ${meta.error}`);
     const page = await this.results.read(resultId, offset, limit, this.app.budgets.cellChars);
     if (!page) throw new AppError("RESULT_NOT_FOUND", `Result ${resultId} was not found`);
     return page;
@@ -466,8 +480,13 @@ export class DbSession {
       if (existing?.status === "ready") {
         throw new AppError("DATASET_ALREADY_EXISTS", `Dataset ${name} already exists; drop it or pick another name`);
       }
+      const live = await this.engine.listDatasets(this.capabilities.workspaceName);
+      if (live.some((dataset) => dataset.name === name)) {
+        throw new AppError("DATASET_ALREADY_EXISTS", `Workspace object ${name} already exists; choose another name`);
+      }
 
       const record: DatasetRecord = {
+        ownerSessionId: this.id,
         name,
         kind,
         sql: selectSql,
@@ -492,10 +511,8 @@ export class DbSession {
         record.status = "failed";
         record.error = (error as Error).message;
         await this.saveRegistry();
-        // MySQL-family DDL is not transactional: remove a half-created object when possible.
-        if (!this.engine.profile.transactionalDdl) {
-          await this.engine.dropDataset(this.capabilities.workspaceName, name, kind).catch(() => undefined);
-        }
+        // Never delete on an uncertain CREATE outcome: the conflicting object may belong to
+        // another session. Failed records do not grant deletion rights.
         await this.audit({
           action: "dataset_create",
           outcome: "error",
@@ -518,18 +535,6 @@ export class DbSession {
         output.push({ ...record, exists: liveNames.has(record.name) });
         liveNames.delete(record.name);
       }
-      for (const dataset of live) {
-        if (!DATASET_NAME.test(dataset.name)) continue;
-        output.push({
-          name: dataset.name,
-          kind: dataset.kind,
-          sql: "(created outside this session)",
-          createdAt: dataset.createdAt ?? new Date().toISOString(),
-          status: "ready",
-          rows: null,
-          exists: true,
-        });
-      }
       return output.sort((a, b) => a.name.localeCompare(b.name));
     });
   }
@@ -541,11 +546,14 @@ export class DbSession {
         ? await this.engine.listDatasets(this.capabilities.workspaceName).catch(() => [])
         : [];
       const object = live.find((dataset) => dataset.name === name);
-      if (!record && !object) throw new AppError("NOT_FOUND", `Dataset ${name} was not found`);
+      if (!record || record.ownerSessionId !== this.id || record.status !== "ready") {
+        throw new AppError("FORBIDDEN", `Dataset ${name} is not an owned, successfully created dataset of this session`);
+      }
+      if (!object) throw new AppError("NOT_FOUND", `Dataset ${name} was not found`);
       if (!DATASET_NAME.test(name)) {
         throw new AppError("DATASET_NAME_INVALID", "Only service-created ds_* datasets can be dropped");
       }
-      const kind = record?.kind ?? object?.kind ?? "view";
+      const kind = record.kind;
       await this.engine.dropDataset(this.capabilities.workspaceName!, name, kind);
       this.datasets.delete(name);
       await this.saveRegistry();
@@ -597,6 +605,7 @@ export class DbSession {
       const raw = await readFile(this.registryFile, "utf8");
       const records = JSON.parse(raw) as DatasetRecord[];
       for (const record of records) {
+        if (record.ownerSessionId !== this.id) continue;
         if (record.status === "building") {
           record.status = "failed";
           record.error = "creation interrupted";

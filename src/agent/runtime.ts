@@ -17,6 +17,7 @@ import { buildSystemPrompt } from "./prompts.js";
 import { createDatabaseTools, type ToolRuntime } from "./tools.js";
 import { EventBroker, type TaskEvent } from "./events.js";
 import type { ModelHandle } from "./model.js";
+import type { HistoryStore } from "./history.js";
 
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "incomplete";
 
@@ -47,6 +48,14 @@ export interface TaskRecord {
 
 interface QueueItem {
   record: TaskRecord;
+  maxTurns: number;
+}
+
+interface FinalAssistantMessage {
+  stopReason?: string;
+  errorMessage?: string;
+  text: string;
+  hasTools: boolean;
 }
 
 const TASK_ID = () => `task_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
@@ -64,6 +73,7 @@ export class AnalysisSession {
     private readonly broker: EventBroker,
     private readonly app: AppConfig,
     private readonly sessionRef: { current?: TaskRecord },
+    private readonly history?: HistoryStore,
   ) {}
 
   readonly createdAt = new Date();
@@ -77,6 +87,10 @@ export class AnalysisSession {
   private abortRequested = false;
   private timedOut = false;
   private turns = 0;
+  private maxTurns = 0;
+  private turnBudgetExceeded = false;
+  private settledAborted = false;
+  private finalMessage?: FinalAssistantMessage;
 
   static async create(options: {
     config: ConnectionConfig;
@@ -85,9 +99,11 @@ export class AnalysisSession {
     model: ModelHandle;
     broker: EventBroker;
     ownerKey: string;
+    history?: HistoryStore;
+    sessionId?: string;
   }): Promise<AnalysisSession> {
     const { app, config, broker } = options;
-    const db = await DbSession.open({ config, app, results: options.results });
+    const db = await DbSession.open({ config, app, results: options.results, sessionId: options.sessionId });
     const cwd = join(app.dataDir, "workspaces", db.id);
     await mkdir(cwd, { recursive: true });
 
@@ -121,8 +137,8 @@ export class AnalysisSession {
         agentDir: join(app.dataDir, "pi", "agent"),
         model: options.model.model,
         modelRuntime: options.model.runtime,
-        thinkingLevel: "medium",
-        sessionManager: SessionManager.inMemory(),
+        thinkingLevel: app.model.thinkingLevel,
+        sessionManager: SessionManager.continueRecent(cwd, join(app.dataDir, "conversations", db.id)),
         settingsManager,
         resourceLoader,
         noTools: "builtin",
@@ -134,7 +150,10 @@ export class AnalysisSession {
       throw error;
     }
 
-    const analysis = new AnalysisSession(db.id, options.ownerKey, db, session, broker, app, sessionRef);
+    const analysis = new AnalysisSession(db.id, options.ownerKey, db, session, broker, app, sessionRef, options.history);
+    if (options.sessionId) {
+      for (const task of options.history?.listTasks(db.id, options.ownerKey) ?? []) analysis.tasks.set(task.id, task);
+    }
     analysis.agent.subscribe((event) => {
       analysis.mapEvent(event);
     });
@@ -194,6 +213,10 @@ export class AnalysisSession {
 
   submit(goal: string, options: { maxTurns?: number } = {}): TaskRecord {
     if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+    const snapshot = this.db.snapshot();
+    if (snapshot.status === "unavailable") throw new AppError("SESSION_UNAVAILABLE", snapshot.unavailable_reason ?? "Open a new session");
+    const maxTurns = Math.min(options.maxTurns ?? this.app.budgets.maxTurns, this.app.budgets.maxTurns);
+    if (!Number.isInteger(maxTurns) || maxTurns < 1) throw new AppError("INVALID_INPUT", "maxTurns must be a positive integer");
     if (this.queue.length >= 8) throw new AppError("TASK_QUEUE_FULL", "Too many queued tasks for this session");
     const record: TaskRecord = {
       id: TASK_ID(),
@@ -206,14 +229,15 @@ export class AnalysisSession {
       results: [],
     };
     this.tasks.set(record.id, record);
-    this.queue.push({ record });
+    this.queue.push({ record, maxTurns });
+    this.saveTask(record);
     this.broker.publish(record.id, "task_queued", { goal });
-    void this.drain(options.maxTurns ?? this.app.budgets.maxTurns);
+    void this.drain();
     this.touch();
     return record;
   }
 
-  private async drain(maxTurns: number): Promise<void> {
+  private async drain(): Promise<void> {
     if (this.draining) return;
     this.draining = true;
     try {
@@ -221,7 +245,18 @@ export class AnalysisSession {
         const item = this.queue.shift();
         if (!item) break;
         if (item.record.status !== "queued") continue;
-        await this.runTask(item.record, maxTurns);
+        try {
+          await this.runTask(item.record, item.maxTurns);
+        } catch (error) {
+          item.record.status = "failed";
+          item.record.error = isAppError(error)
+            ? { code: error.code, message: error.message }
+            : { code: "TASK_FAILED", message: (error as Error).message };
+          item.record.finished_at = new Date().toISOString();
+          this.finishTask(item.record);
+        }
+        this.current = undefined;
+        this.sessionRef.current = undefined;
       }
     } finally {
       this.draining = false;
@@ -231,16 +266,23 @@ export class AnalysisSession {
   }
 
   private async runTask(task: TaskRecord, maxTurns: number): Promise<void> {
+    const snapshot = this.db.snapshot();
+    if (snapshot.status === "unavailable") throw new AppError("SESSION_UNAVAILABLE", snapshot.unavailable_reason ?? "Reconnect this session to continue");
     this.current = task;
     this.sessionRef.current = task;
     this.abortRequested = false;
     this.timedOut = false;
     this.turns = 0;
+    this.maxTurns = maxTurns;
+    this.turnBudgetExceeded = false;
+    this.settledAborted = false;
+    this.finalMessage = undefined;
     task.status = "running";
     task.started_at = new Date().toISOString();
     const queriesBefore = this.db.snapshot().queries.used;
     const startedAt = Date.now();
     const usageBefore = this.agent.getSessionStats();
+    this.saveTask(task);
     this.broker.publish(task.id, "task_started", { goal: task.goal, max_turns: maxTurns });
 
     let settledResolve: ((aborted: boolean) => void) | undefined;
@@ -255,15 +297,6 @@ export class AnalysisSession {
     }, this.app.budgets.taskTimeoutMs);
     timer.unref?.();
 
-    const maxTurnTimer = setInterval(() => {
-      if (this.turns > maxTurns && !this.abortRequested) {
-        this.abortRequested = true;
-        this.broker.publish(task.id, "notice", { code: "TURN_BUDGET_EXCEEDED", max_turns: maxTurns });
-        this.agent.abort();
-      }
-    }, 1_000);
-    maxTurnTimer.unref?.();
-
     let failure: unknown;
     try {
       await this.agent.prompt(task.goal);
@@ -274,7 +307,6 @@ export class AnalysisSession {
       await Promise.race([settled, delay(5_000)]).catch(() => undefined);
     } finally {
       clearTimeout(timer);
-      clearInterval(maxTurnTimer);
       this.settledResolve = undefined;
     }
 
@@ -289,6 +321,8 @@ export class AnalysisSession {
       task.results = [];
     }
 
+    // Event callbacks update this field while prompt() is awaited.
+    const finalMessage = this.finalMessage as FinalAssistantMessage | undefined;
     if (this.abortRequested) {
       task.status = "cancelled";
       task.error = { code: "TASK_CANCELLED", message: "Task was cancelled" };
@@ -303,21 +337,43 @@ export class AnalysisSession {
       task.error = isAppError(failure)
         ? { code: failure.code, message: failure.message }
         : { code: "TASK_FAILED", message: (failure as Error).message ?? String(failure) };
-    } else if (this.turns === 0) {
+    } else if (this.turnBudgetExceeded) {
       task.status = "incomplete";
-      task.error = { code: "TASK_INCOMPLETE", message: "The agent produced no turn for this task" };
+      task.error = { code: "TASK_BUDGET_EXCEEDED", message: `Task exhausted its ${maxTurns} turn budget` };
+    } else if (finalMessage?.stopReason === "error") {
+      task.status = "failed";
+      task.error = { code: "MODEL_ERROR", message: finalMessage.errorMessage || "The model failed to complete the response" };
+    } else if (finalMessage?.stopReason === "length") {
+      task.status = "incomplete";
+      task.error = { code: "MODEL_OUTPUT_TRUNCATED", message: "The model response reached its output token limit" };
+    } else if (this.settledAborted || finalMessage?.stopReason === "aborted") {
+      task.status = "incomplete";
+      task.error = { code: "TASK_INTERRUPTED", message: "Agent execution was interrupted" };
+    } else if (this.turns === 0 || !finalMessage?.text || finalMessage.hasTools || finalMessage.stopReason !== "stop") {
+      task.status = "incomplete";
+      task.error = { code: "TASK_INCOMPLETE", message: "The agent did not produce a complete final answer" };
     } else {
       task.status = "succeeded";
     }
 
     task.queries_used = Math.max(0, this.db.snapshot().queries.used - queriesBefore);
+    this.finishTask(task, Date.now() - startedAt);
+  }
+
+  private saveTask(task: TaskRecord): void {
+    this.history?.saveTask(this.ownerKey, task);
+    this.history?.saveSession(this.ownerKey, this.snapshot());
+  }
+
+  private finishTask(task: TaskRecord, durationMs?: number): void {
+    this.saveTask(task);
     this.broker.publish(task.id, "task_finished", {
       status: task.status,
       // Carried on the terminal event so a client that attached late (or missed deltas) can still
       // render the report without a second request.
       answer: task.answer ?? "",
       error: task.error ?? null,
-      duration_ms: Date.now() - startedAt,
+      duration_ms: durationMs,
       turns: task.turns,
       usage: task.usage,
       results: task.results,
@@ -325,23 +381,26 @@ export class AnalysisSession {
   }
 
   async cancelTask(taskId?: string): Promise<boolean> {
-    if (taskId && this.current && this.current.id !== taskId) {
+    if (taskId && this.current?.id !== taskId) {
       const queued = this.queue.find((item) => item.record.id === taskId);
       if (queued) {
         queued.record.status = "cancelled";
         queued.record.finished_at = new Date().toISOString();
+        queued.record.error = { code: "TASK_CANCELLED", message: "Task was cancelled before execution" };
         this.queue.splice(this.queue.indexOf(queued), 1);
-        this.broker.publish(taskId, "task_finished", { status: "cancelled", error: { code: "TASK_CANCELLED" } });
+        this.finishTask(queued.record);
         return true;
       }
       return false;
     }
 
+    if (!this.current || this.current.status !== "running") return false;
+
     this.abortRequested = true;
     // Control channel: cancel the query directly, outside the serialised queue.
-    const cancelled = await this.db.cancel().catch(() => false);
+    await this.db.cancel().catch(() => false);
     this.agent.abort();
-    return cancelled || this.current !== undefined;
+    return true;
   }
 
   async steer(text: string): Promise<void> {
@@ -364,10 +423,17 @@ export class AnalysisSession {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.queue.length = 0;
-    this.agent.abort();
+    for (const item of this.queue.splice(0)) {
+      item.record.status = "cancelled";
+      item.record.finished_at = new Date().toISOString();
+      item.record.error = { code: "SESSION_CLOSED", message: "Session was closed" };
+      this.finishTask(item.record);
+    }
+    await this.cancelTask();
+    while (this.draining) await new Promise((resolve) => setTimeout(resolve, 10));
     this.agent.dispose();
     await this.db.close().catch(() => undefined);
+    this.history?.saveSession(this.ownerKey, this.snapshot());
   }
 
   // -------------------------------------------------------------- pi mapping
@@ -378,7 +444,21 @@ export class AnalysisSession {
     switch (event.type) {
       case "turn_start": {
         this.turns += 1;
+        if (this.turns > this.maxTurns && !this.abortRequested && !this.timedOut) {
+          this.turnBudgetExceeded = true;
+          this.broker.publish(task.id, "notice", { code: "TURN_BUDGET_EXCEEDED", max_turns: this.maxTurns });
+          void this.agent.abort();
+        }
         this.broker.publish(task.id, "turn_started", { turn: this.turns });
+        break;
+      }
+      case "turn_end": {
+        const needsMore = this.finalMessage?.hasTools || this.finalMessage?.stopReason === "toolUse";
+        if (this.turns >= this.maxTurns && needsMore && !this.abortRequested && !this.timedOut) {
+          this.turnBudgetExceeded = true;
+          this.broker.publish(task.id, "notice", { code: "TURN_BUDGET_EXCEEDED", max_turns: this.maxTurns });
+          void this.agent.abort();
+        }
         break;
       }
       case "message_update": {
@@ -412,6 +492,7 @@ export class AnalysisSession {
         break;
       }
       case "agent_settled": {
+        this.settledAborted = Boolean(event.aborted);
         this.settledResolve?.(Boolean(event.aborted));
         this.settledResolve = undefined;
         break;
@@ -426,7 +507,7 @@ export class AnalysisSession {
       }
       case "message_end": {
         const message = event.message as
-          | { role?: string; content?: Array<{ type?: string; text?: string }> }
+          | { role?: string; stopReason?: string; errorMessage?: string; content?: Array<{ type?: string; text?: string }> }
           | undefined;
         if (message?.role === "assistant") {
           const text = (message.content ?? [])
@@ -435,6 +516,11 @@ export class AnalysisSession {
             .join("")
             .trim();
           if (text) task.answer = text;
+          this.finalMessage = {
+            text, stopReason: message.stopReason, errorMessage: message.errorMessage,
+            hasTools: (message.content ?? []).some((part) => part.type === "toolCall"),
+          };
+          this.saveTask(task);
           this.broker.publish(task.id, "usage", { ...this.agent.getSessionStats().tokens });
         }
         break;

@@ -40,6 +40,7 @@ export interface AppConfig {
   model: ModelConfig;
   budgets: BudgetConfig;
   env: "development" | "production";
+  profileSecretKey?: string;
 }
 
 function num(name: string, fallback: number): number {
@@ -93,6 +94,11 @@ export function loadConfig(): AppConfig {
   mkdirSync(resolve(dataDir, "results"), { recursive: true });
   mkdirSync(resolve(dataDir, "pi"), { recursive: true });
 
+  const thinkingLevel = process.env.DATA_AGENT_MODEL_THINKING ?? "medium";
+  if (!["off", "minimal", "low", "medium", "high"].includes(thinkingLevel)) {
+    throw new Error("DATA_AGENT_MODEL_THINKING must be off, minimal, low, medium or high");
+  }
+
   return {
     host: process.env.DATA_AGENT_HOST ?? "0.0.0.0",
     port: num("DATA_AGENT_PORT", 8787),
@@ -102,6 +108,7 @@ export function loadConfig(): AppConfig {
     maxSessions: num("DATA_AGENT_MAX_SESSIONS", 20),
     allowPrivateNetwork: bool("DATA_AGENT_ALLOW_PRIVATE_NETWORK", true),
     env,
+    profileSecretKey: process.env.DATA_AGENT_PROFILE_SECRET_KEY,
     model: {
       // Deliberately NOT PI_*: those are inherited by the pi harness itself and would collide.
       provider: process.env.DATA_AGENT_MODEL_PROVIDER ?? "openai",
@@ -113,7 +120,7 @@ export function loadConfig(): AppConfig {
       headers: process.env.DATA_AGENT_MODEL_HEADERS
         ? (JSON.parse(process.env.DATA_AGENT_MODEL_HEADERS) as Record<string, string>)
         : undefined,
-      thinkingLevel: (process.env.DATA_AGENT_MODEL_THINKING as ModelConfig["thinkingLevel"]) ?? "medium",
+      thinkingLevel: thinkingLevel as ModelConfig["thinkingLevel"],
       contextWindow: process.env.DATA_AGENT_MODEL_CONTEXT_WINDOW
         ? num("DATA_AGENT_MODEL_CONTEXT_WINDOW", 128000)
         : undefined,

@@ -23,7 +23,9 @@ function providerBlock(app: AppConfig) {
       {
         id: model.modelId,
         name: model.modelId,
-        reasoning: false,
+        // An explicit thinking setting must also enable reasoning in custom model metadata;
+        // otherwise the SDK silently clamps every custom endpoint to "off".
+        reasoning: model.thinkingLevel !== "off",
         input: ["text"],
         contextWindow: model.contextWindow ?? 128_000,
         maxTokens: model.maxTokens ?? 16_384,
