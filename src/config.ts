@@ -1,15 +1,19 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { isKnownModelApi, unknownApiMessage } from "./agent/model-apis.js";
 
 export interface ModelConfig {
   provider: string;
   modelId: string;
   apiKey?: string;
   baseUrl?: string;
-  /** pi-ai protocol, e.g. openai-completions / anthropic-messages / openai-responses */
+  /** pi-ai wire protocol, e.g. openai-completions / anthropic-messages / openai-responses. */
   api?: string;
   headers?: Record<string, string>;
   thinkingLevel: "off" | "minimal" | "low" | "medium" | "high";
+  /** Overrides the model's declared thinking capability; defaults to `thinkingLevel !== "off"`. */
+  reasoning?: boolean;
   contextWindow?: number;
   maxTokens?: number;
   /** Path to an existing pi auth.json; avoids exporting a key into the service environment. */
@@ -41,6 +45,14 @@ export interface AppConfig {
   budgets: BudgetConfig;
   env: "development" | "production";
   profileSecretKey?: string;
+  /** Allow the console to override model settings at runtime. Off by default in production. */
+  allowModelEdit: boolean;
+  /**
+   * The operator's own pi `models.json` / `settings.json`, read (never written) so the console can
+   * offer the channels they already configured. Undefined means "do not look outside the data dir".
+   */
+  piModelsPath?: string;
+  piSettingsPath?: string;
 }
 
 function num(name: string, fallback: number): number {
@@ -99,6 +111,32 @@ export function loadConfig(): AppConfig {
     throw new Error("DATA_AGENT_MODEL_THINKING must be off, minimal, low, medium or high");
   }
 
+  // pi accepts an unknown protocol and only fails mid-task, so reject it where it is read.
+  const modelApi = process.env.DATA_AGENT_MODEL_API?.trim() || undefined;
+  if (modelApi && !isKnownModelApi(modelApi)) {
+    throw new Error(unknownApiMessage(modelApi, "DATA_AGENT_MODEL_API"));
+  }
+  // Reuse the operator's own pi setup when it is there: their auth.json makes built-in providers
+  // (deepseek, moonshotai-cn, ...) usable without exporting a key, and their models.json supplies the
+  // custom channels the console lists. Both are only read here; this service never writes to them.
+  const piHome = process.env.DATA_AGENT_PI_HOME ?? join(homedir(), ".pi", "agent");
+  const piFile = (envName: string, name: string): string | undefined => {
+    const explicit = process.env[envName];
+    if (explicit) return explicit;
+    const candidate = join(piHome, name);
+    return existsSync(candidate) ? candidate : undefined;
+  };
+  const piModelsPath = piFile("DATA_AGENT_PI_MODELS_PATH", "models.json");
+  const piSettingsPath = piFile("DATA_AGENT_PI_SETTINGS_PATH", "settings.json");
+  const piAuthPath = piFile("DATA_AGENT_MODEL_AUTH_PATH", "auth.json");
+
+  const reasoningRaw = process.env.DATA_AGENT_MODEL_REASONING?.trim().toLowerCase();
+  if (reasoningRaw && reasoningRaw !== "env") {
+    if (!["1", "0", "true", "false"].includes(reasoningRaw)) {
+      throw new Error("DATA_AGENT_MODEL_REASONING must be 1, 0 or env (follow the thinking level)");
+    }
+  }
+
   return {
     host: process.env.DATA_AGENT_HOST ?? "0.0.0.0",
     port: num("DATA_AGENT_PORT", 8787),
@@ -109,18 +147,24 @@ export function loadConfig(): AppConfig {
     allowPrivateNetwork: bool("DATA_AGENT_ALLOW_PRIVATE_NETWORK", true),
     env,
     profileSecretKey: process.env.DATA_AGENT_PROFILE_SECRET_KEY,
+    piModelsPath,
+    piSettingsPath,
+    // Repointing the model (especially `baseUrl`) sends database answers to another endpoint, so a
+    // shared production token must not be able to do it by accident.
+    allowModelEdit: bool("DATA_AGENT_ALLOW_MODEL_EDIT", env !== "production"),
     model: {
       // Deliberately NOT PI_*: those are inherited by the pi harness itself and would collide.
       provider: process.env.DATA_AGENT_MODEL_PROVIDER ?? "openai",
       modelId: process.env.DATA_AGENT_MODEL_ID ?? "gpt-5.2",
       apiKey: process.env.DATA_AGENT_MODEL_API_KEY,
       baseUrl: process.env.DATA_AGENT_MODEL_BASE_URL,
-      authPath: process.env.DATA_AGENT_MODEL_AUTH_PATH,
+      authPath: piAuthPath,
       api: process.env.DATA_AGENT_MODEL_API,
       headers: process.env.DATA_AGENT_MODEL_HEADERS
         ? (JSON.parse(process.env.DATA_AGENT_MODEL_HEADERS) as Record<string, string>)
         : undefined,
       thinkingLevel: thinkingLevel as ModelConfig["thinkingLevel"],
+      reasoning: reasoningRaw === "1" || reasoningRaw === "true" ? true : reasoningRaw === "0" || reasoningRaw === "false" ? false : undefined,
       contextWindow: process.env.DATA_AGENT_MODEL_CONTEXT_WINDOW
         ? num("DATA_AGENT_MODEL_CONTEXT_WINDOW", 128000)
         : undefined,

@@ -7,6 +7,9 @@ import { ENGINE_IDS, describeEngine, getProfile } from "../db/engines/profiles.j
 import { AppError, isAppError } from "../errors.js";
 import { AnalysisService, callerKey } from "../agent/service.js";
 import { SaveProfileRequest } from "../db/profiles-store.js";
+import { ModelPatch } from "../agent/model-settings.js";
+import { ChannelSelection } from "../agent/channels.js";
+import { toolCatalog } from "../agent/tools.js";
 
 interface RequestIdentity {
   ownerKey: string;
@@ -138,25 +141,58 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.json({ engines: ENGINE_IDS.map((id) => describeEngine(getProfile(id))) });
   });
 
+  const tools = toolCatalog();
+
+  // The console is the only place an operator can see how the model is configured; the API key is
+  // never echoed and runtime edits are refused in production unless explicitly enabled.
+  app.get("/v1/model", (_req, res) => {
+    res.json(service.modelView());
+  });
+
+  // The channels the operator can switch between: their own pi models.json entries plus the built-in
+  // providers pi's enabledModels keeps on. Keys are never included, only whether one resolves.
+  app.get("/v1/model/channels", (_req, res) => {
+    res.json(service.channels());
+  });
+
+  app.post("/v1/model/select", async (req, res) => {
+    const body = ChannelSelection.safeParse(req.body ?? {});
+    if (!body.success) {
+      const issues = body.error.issues.map((issue) => `${issue.path.join(".") || "channel"}: ${issue.message}`);
+      throw new AppError("INVALID_INPUT", `Invalid channel selection — ${issues.join("; ")}`);
+    }
+    res.json(await service.selectChannel(body.data.provider, body.data.modelId));
+  });
+
+  app.put("/v1/model", async (req, res) => {
+    const patch = ModelPatch.safeParse(req.body ?? {});
+    if (!patch.success) {
+      const issues = patch.error.issues.map((issue) => `${issue.path.join(".") || "model"}: ${issue.message}`);
+      throw new AppError("INVALID_INPUT", `Invalid model settings — ${issues.join("; ")}`);
+    }
+    res.json(await service.updateModel(patch.data));
+  });
+
+  app.delete("/v1/model", async (_req, res) => {
+    res.json(await service.resetModel());
+  });
+
+  // Readiness only proves a credential exists; a wrong protocol or base URL surfaces as a request
+  // error, so the console needs a way to make one real call before trusting the settings.
+  app.post("/v1/model/test", async (_req, res) => {
+    res.json(await service.testModel());
+  });
+
+  app.get("/v1/tools", (_req, res) => {
+    res.json({ tools });
+  });
+
   app.get("/v1/capabilities", (_req, res) => {
     res.json({
       engines: ENGINE_IDS,
       source_access: "read_only",
       workspace_access: ["none", "views_only", "tables_and_views"],
-      tool_names: [
-        "session_info",
-        "catalog_search",
-        "object_describe",
-        "data_profile",
-        "query_explain",
-        "query_execute",
-        "job_get",
-        "job_cancel",
-        "result_read",
-        "dataset_create",
-        "dataset_list",
-        "dataset_drop",
-      ],
+      tool_names: tools.map((tool) => tool.name),
       budgets: {
         max_turns: config.budgets.maxTurns,
         max_queries: config.budgets.maxQueries,

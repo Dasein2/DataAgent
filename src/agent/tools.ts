@@ -494,6 +494,63 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
   ];
 }
 
+export interface ToolParameterInfo {
+  name: string;
+  type: string;
+  required: boolean;
+  description?: string;
+}
+
+export interface ToolInfo {
+  name: string;
+  label: string;
+  description: string;
+  promptSnippet?: string;
+  /** True when the tool cannot change data or the connection (`readOnlyHint`). */
+  readOnly: boolean;
+  destructive: boolean;
+  /** Serialised against the session connection, so concurrent calls queue up. */
+  sequential: boolean;
+  parameters: ToolParameterInfo[];
+}
+
+/**
+ * Every factory closes over its runtime and only touches it inside `execute()`, so an inert stub is
+ * enough to describe the catalogue without an analysis session. `tests/tools.test.ts` asserts this
+ * list stays in step with `createDatabaseTools()` and that no tool is executed with the stub.
+ */
+const METADATA_ONLY_RUNTIME = {
+  db: {},
+  budgets: {},
+  currentTaskId: () => undefined,
+  taskStatus: () => ({}),
+  cancelActive: async () => false,
+} as unknown as ToolRuntime;
+
+function describeParameters(schema: unknown): ToolParameterInfo[] {
+  const object = schema as { properties?: Record<string, Record<string, unknown>>; required?: string[] } | undefined;
+  const required = new Set(object?.required ?? []);
+  return Object.entries(object?.properties ?? {}).map(([name, raw]) => {
+    const type = Array.isArray(raw?.type) ? (raw.type as string[]).join(" | ") : String(raw?.type ?? "any");
+    const description = typeof raw?.description === "string" ? raw.description : undefined;
+    return { name, type, required: required.has(name), description };
+  });
+}
+
+/** Public description of the tools the agent is given, for the console and `/v1/tools`. */
+export function toolCatalog(): ToolInfo[] {
+  return createDatabaseTools(METADATA_ONLY_RUNTIME).map((tool) => ({
+    name: tool.name,
+    label: tool.label,
+    description: tool.description,
+    promptSnippet: tool.promptSnippet,
+    readOnly: Boolean(tool.annotations?.readOnlyHint),
+    destructive: Boolean(tool.annotations?.destructiveHint),
+    sequential: tool.executionMode === "sequential",
+    parameters: describeParameters(tool.parameters),
+  }));
+}
+
 export function describeToolError(error: unknown): string {
   if (error instanceof AppError) return `${error.code}: ${error.message}`;
   return (error as Error).message;

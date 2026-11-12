@@ -74,6 +74,44 @@
   .hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
   .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 8px; font: 12px var(--mono); }
   .kv .k { color: var(--muted); }
+  /* Values include urls and absolute paths, which must wrap at a separator instead of overflowing. */
+  .kv > span:not(.k) { overflow-wrap: anywhere; }
+  .kv .src { font-size: 10.5px; color: var(--accent); white-space: nowrap; margin-left: 4px; }
+  /* Folding system panel: buttons on top, content below, the same button closes it again. */
+  #system { margin: 0 16px 24px; }
+  .tabbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  .tab { display: flex; align-items: center; gap: 7px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 5px 14px; font-size: 12.5px; }
+  .tab[aria-expanded="true"] { border-color: var(--accent); background: rgba(59, 130, 246, .16); }
+  .tab-tag { font: 10.5px var(--mono); color: var(--muted); padding: 0 5px; border-radius: 999px; border: 1px solid var(--border); }
+  .tabpanel { padding-top: 14px; }
+  .tabpanel[hidden] { display: none; }
+  .split { display: grid; grid-template-columns: minmax(200px, 300px) minmax(0, 1fr); gap: 18px; align-items: start; }
+  @media (max-width: 820px) { .split { grid-template-columns: 1fr; } }
+  .side { border-right: 1px solid var(--border); padding-right: 14px; max-height: 56vh; overflow: auto; }
+  @media (max-width: 820px) { .side { border-right: none; border-bottom: 1px solid var(--border); padding: 0 0 12px; max-height: none; } }
+  .side-head { display: flex; gap: 6px; align-items: center; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 8px; }
+  .channels { font: 12px var(--mono); }
+  .chan { margin-bottom: 10px; }
+  .chan-head { display: flex; gap: 6px; align-items: center; padding: 2px 4px; color: var(--muted); }
+  .chan-head .name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .chan-head .count { font-size: 10.5px; flex: none; }
+  .chan-head .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--err); flex: none; }
+  .chan-head .dot.ok { background: var(--ok); }
+  .chan-row { display: flex; gap: 6px; align-items: center; padding: 3px 6px 3px 14px; border-radius: 5px; cursor: pointer; }
+  .chan-row:hover { background: var(--panel-2); }
+  .chan-row.active { background: rgba(59, 130, 246, .16); box-shadow: inset 2px 0 0 var(--accent); }
+  .chan-row.muted { color: var(--muted); }
+  .chan-row .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .chan-row .tag { font-size: 10px; color: var(--muted); flex: none; }
+  .chan-more { background: none; border: none; color: var(--muted); font: 11px var(--mono); padding: 2px 6px 2px 14px; cursor: pointer; }
+  .chan-more:hover { color: var(--accent); }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  @media (max-width: 820px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+  .tool-detail h3 { font-size: 13px; margin: 0 0 4px; font-family: var(--mono); }
+  .tool-detail .label { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
+  .tool-detail p { margin: 0 0 10px; white-space: pre-wrap; }
+  .tool-detail .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
 </style>
 </head>
 <body>
@@ -193,6 +231,8 @@
       <div id="sessionInfo" class="kv"><span class="k">—</span><span></span></div>
       <div class="buttons"><button class="ghost" id="btnRefresh" disabled>刷新</button></div>
     </section>
+
+    <!-- 模型配置与工具面板搬到页面底部，用顶部按钮展开 / 收起 -->
   </div>
 
   <section class="panel" id="chat">
@@ -212,6 +252,81 @@
     </div>
   </section>
 </main>
+
+<section class="panel" id="system">
+  <div class="tabbar">
+    <button class="tab" id="tabModel" data-panel="panelModel" aria-expanded="false">
+      模型配置<span class="tab-tag" id="modelTabTag">—</span>
+    </button>
+    <button class="tab" id="tabTools" data-panel="panelTools" aria-expanded="false">
+      工具<span class="tab-tag" id="toolCount">—</span>
+    </button>
+    <span style="flex:1"></span>
+    <span class="hint" style="margin:0">点击按钮展开，再次点击收起</span>
+  </div>
+
+  <div class="tabpanel" id="panelModel" hidden>
+    <div class="split">
+      <div class="side">
+        <div class="side-head">渠道<span class="pill" id="channelSummary">—</span></div>
+        <div id="channelList" class="channels hint">读取中…</div>
+        <div class="hint" id="channelNote"></div>
+      </div>
+      <div>
+        <div id="modelSummary" class="kv"><span class="k">—</span><span></span></div>
+        <div class="grid-3">
+          <div><label>provider</label><input id="mProvider" autocomplete="off" /></div>
+          <div><label>model id</label><input id="mModelId" autocomplete="off" /></div>
+          <div><label>thinking</label><select id="mThinking"></select></div>
+        </div>
+        <div class="grid-2">
+          <div>
+            <label>api 协议（决定请求走哪套 wire protocol）</label>
+            <select id="mApi"></select>
+            <div class="hint" id="mApiHint"></div>
+          </div>
+          <div>
+            <label>base url（留空 = 用 provider 内置地址）</label>
+            <input id="mBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off" />
+            <div class="grid-3">
+              <div><label>context window</label><input id="mContext" type="number" min="1024" step="1024" /></div>
+              <div><label>max tokens</label><input id="mMaxTokens" type="number" min="64" step="64" /></div>
+              <div><label title="模型是否接受 reasoning 参数；关闭后 pi 不会发送思考配置">reasoning</label>
+                <select id="mReasoning">
+                  <option value="auto">跟随 thinking</option>
+                  <option value="on">开启</option>
+                  <option value="off">关闭</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div><label title="由模型元数据决定，本服务只发送文本">输入模态</label><input id="mInput" disabled /></div>
+          <div><label>API key（仅本进程生效，不写磁盘）</label><input id="mApiKey" type="password" autocomplete="new-password" /></div>
+        </div>
+        <div class="buttons">
+          <button class="ghost" id="btnModelReload">重新读取</button>
+          <button id="btnModelSave">保存模型配置</button>
+          <button class="ghost" id="btnModelReset">恢复为 .env</button>
+          <button class="ghost" id="btnModelTest">测试模型</button>
+        </div>
+        <div class="hint">保存写到服务端的 <code>data/model-settings.json</code>，<b>不会修改 .env</b>；只提交你改过的字段，其余继续跟随 .env 与 pi 的模型目录。点「恢复为 .env」可全部清除。仅影响<b>新建</b>的会话。API key 只在本进程有效，想持久化请写进 .env 的 DATA_AGENT_MODEL_API_KEY。</div>
+        <div id="modelStatus" class="status info">未读取</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tabpanel" id="panelTools" hidden>
+    <div class="split">
+      <div class="side">
+        <div class="side-head">工具<span class="pill" id="toolCountSide">—</span></div>
+        <div id="toolList" class="channels hint">读取中…</div>
+      </div>
+      <div id="toolDetail"><div class="hint">选一个工具查看它的参数与行为。</div></div>
+    </div>
+  </div>
+</section>
 
 <div id="drawer">
   <header>
@@ -233,6 +348,9 @@ const state = {
   profiles: [],
   selectedProfile: null,
   sessionReady: false,
+  model: null,
+  channels: null,
+  tools: [],
   assistantEl: null,
   // Text of the segment currently being streamed; reset whenever a tool card splits the transcript.
   segmentText: "",
@@ -241,6 +359,8 @@ const state = {
 $("token").value = state.token;
 void initProfiles();
 void loadHistory();
+void loadModel();
+void loadTools();
 
 function api(path, options = {}) {
   const headers = Object.assign({}, options.headers || {});
@@ -646,6 +766,12 @@ function escapeHtml(text) {
   return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// Absolute paths are long and mostly repetition; the full value stays in the title attribute.
+function shortPath(path) {
+  const parts = path.split(/[\\/]/);
+  return parts.length <= 2 ? path : "…/" + parts.slice(-2).join("/");
+}
+
 function addMessage(who) {
   const wrap = document.createElement("div");
   wrap.className = "msg " + who;
@@ -963,7 +1089,314 @@ $("goal").addEventListener("keydown", (event) => {
 
 api("/healthz").then((health) => { $("modelBadge").textContent = "model: " + health.model; }).catch(() => {});
 
-$("token").addEventListener("change", () => { saveToken(); void initProfiles(); void loadHistory(); });
+$("token").addEventListener("change", () => { saveToken(); void initProfiles(); void loadHistory(); void loadModel(); void loadTools(); });
+
+// ------------------------------------------------------------ model & tools panels
+// The console is where model configuration becomes visible: values, where each one comes from
+// (env or a console override) and whether a credential actually resolves.
+function numberOrNull(id) {
+  const raw = $(id).value.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+function reasoningField(value) {
+  return value === true ? "on" : value === false ? "off" : "auto";
+}
+
+function renderModel(view) {
+  state.model = view;
+  const options = view.api_options || [];
+  const known = options.some((option) => option.id === view.api);
+  $("mApi").innerHTML = '<option value="">— 默认 / none —</option>' + options.map((option) =>
+    '<option value="' + escapeHtml(option.id) + '">' + escapeHtml(option.label) + "</option>").join("") +
+    // An advanced protocol set from .env stays visible and selected instead of silently resetting.
+    (known ? "" : '<option value="' + escapeHtml(view.api || "") + '">' + escapeHtml(view.api || "—") + "（不可在本页选择）</option>");
+  const option = options.find((entry) => entry.id === view.api);
+  $("mApi").value = view.api || "";
+  $("mApiHint").textContent = option ? option.note : "来自 pi 内置 provider 的协议。";
+  $("mProvider").value = view.provider || "";
+  $("mModelId").value = view.model_id || "";
+  $("mBaseUrl").value = view.base_url || "";
+  $("mContext").value = view.context_window == null ? "" : view.context_window;
+  $("mMaxTokens").value = view.max_tokens == null ? "" : view.max_tokens;
+  $("mThinking").innerHTML = (view.thinking_levels || []).map((level) =>
+    '<option value="' + escapeHtml(level) + '">' + escapeHtml(level) + "</option>").join("");
+  $("mThinking").value = view.thinking_level;
+  $("mReasoning").value = reasoningField(view.overrides ? view.overrides.reasoning : null);
+  $("mInput").value = (view.input || []).join(" + ") || "—";
+  $("mApiKey").value = "";
+  $("mApiKey").placeholder = view.has_api_key
+    ? "已配置（来源 " + view.api_key_source + "），留空表示不修改"
+    : "未配置；填入后仅本次运行有效";
+  // Snapshot the rendered form: save() diffs against this, so only fields the operator touched are
+  // sent. Diffing against `.env` instead would pin values that come from pi's built-in catalogue.
+  state.modelForm = {
+    provider: $("mProvider").value,
+    modelId: $("mModelId").value,
+    api: $("mApi").value,
+    baseUrl: $("mBaseUrl").value,
+    thinkingLevel: $("mThinking").value,
+    reasoning: $("mReasoning").value,
+    contextWindow: $("mContext").value,
+    maxTokens: $("mMaxTokens").value,
+  };
+  const overridden = (field) => (view.override_sources && view.override_sources[field] === "console" ? '<span class="src">控制台</span>' : "");
+  const anyOverridden = (...fields) =>
+    (fields.some((field) => view.override_sources && view.override_sources[field] === "console") ? '<span class="src">控制台</span>' : "");
+  $("modelSummary").innerHTML =
+    '<span class="k">model</span><span>' + escapeHtml(view.provider + "/" + view.model_id) + anyOverridden("provider", "modelId") + "</span>" +
+    '<span class="k">api</span><span>' + escapeHtml(view.api || "—") + overridden("api") + "</span>" +
+    '<span class="k">base url</span><span>' + escapeHtml(view.base_url || "（provider 内置）") + overridden("baseUrl") + "</span>" +
+    '<span class="k">thinking</span><span>' + escapeHtml(view.thinking_level) +
+      (view.reasoning ? "，reasoning 开启" : "，reasoning 关闭") + overridden("thinkingLevel") + overridden("reasoning") + "</span>" +
+    '<span class="k">窗口 / 输出</span><span>' + view.context_window + " / " + view.max_tokens + overridden("contextWindow") + overridden("maxTokens") + "</span>" +
+    '<span class="k">输入</span><span>' + escapeHtml((view.input || []).join(" + ") || "—") + "</span>" +
+    '<span class="k">api key</span><span>' + escapeHtml({
+      console: "本进程内存（不落盘）",
+      env: "来自 .env",
+      channel: "来自 pi models.json（只读导入）",
+      "pi-auth": "来自 pi auth.json",
+    }[view.api_key_source] || "none") + "</span>" +
+    '<span class="k">auth 文件</span><span title="' + escapeHtml(view.auth_path || "") + '">' + escapeHtml(view.auth_path ? shortPath(view.auth_path) : "—") + "</span>" +
+    '<span class="k">凭证就绪</span><span style="color:' + (view.ready ? "var(--ok)" : "var(--err)") + '">' +
+      (view.ready ? "yes" : "no — 任务会失败") + "</span>" +
+    '<span class="k">覆盖文件</span><span title="' + escapeHtml(view.settings_path || "") + '">' + escapeHtml(view.settings_status) +
+      (view.settings_status === "ok" ? " · model-settings.json" : " · 尚未创建（当前与 .env 一致）") + "</span>";
+  $("btnModelSave").disabled = !view.editable;
+  $("btnModelReset").disabled = !view.editable;
+  $("modelBadge").textContent = "model: " + view.provider + "/" + view.model_id;
+  $("modelTabTag").textContent = view.provider + "/" + view.model_id;
+  // Re-render from the cached catalogue so the active channel stays highlighted without a refetch.
+  if (state.channels) renderChannels(state.channels);
+  setStatus("modelStatus", view.editable ? "可编辑；保存后新会话生效" : (view.edit_disabled_reason || "只读"), view.editable ? "info" : "err");
+}
+
+async function loadModel() {
+  try { renderModel(await api("/v1/model")); }
+  catch (error) { setStatus("modelStatus", error.message, "err"); }
+}
+
+async function saveModel() {
+  // Only the fields the operator actually changed are sent: an untouched field must keep following
+  // `.env`, and a field cleared back to empty must remove its override instead of pinning "".
+  const before = state.modelForm || {};
+  const now = {
+    provider: $("mProvider").value.trim(),
+    modelId: $("mModelId").value.trim(),
+    api: $("mApi").value,
+    baseUrl: $("mBaseUrl").value.trim(),
+    thinkingLevel: $("mThinking").value,
+    reasoning: $("mReasoning").value,
+    contextWindow: $("mContext").value.trim(),
+    maxTokens: $("mMaxTokens").value.trim(),
+  };
+  const patch = {};
+  for (const field of ["provider", "modelId", "api", "baseUrl", "thinkingLevel", "contextWindow", "maxTokens"]) {
+    if (now[field] === before[field]) continue;
+    if (field === "contextWindow" || field === "maxTokens") {
+      const value = numberOrNull(field === "contextWindow" ? "mContext" : "mMaxTokens");
+      patch[field] = value === null ? null : value;
+    } else {
+      patch[field] = now[field] === "" ? null : now[field];
+    }
+  }
+  if (now.reasoning !== before.reasoning) {
+    patch.reasoning = now.reasoning === "auto" ? null : now.reasoning === "on";
+  }
+  // A protocol must carry an endpoint. The field already shows the provider's built-in URL, so pin it
+  // when the protocol changes instead of failing with "requires a baseUrl" for a value the operator
+  // can see on screen.
+  if (patch.api && !patch.baseUrl && now.baseUrl) patch.baseUrl = now.baseUrl;
+  const key = $("mApiKey").value.trim();
+  if (key) patch.apiKey = key;
+  if (Object.keys(patch).length === 0) {
+    setStatus("modelStatus", "没有改动", "info");
+    return;
+  }
+  try {
+    setStatus("modelStatus", "保存中…", "info");
+    renderModel(await api("/v1/model", { method: "PUT", body: patch }));
+    void loadChannels();
+    const pinned = Object.keys(patch).filter((name) => name !== "apiKey");
+    setStatus("modelStatus", "已保存；覆盖字段：" + pinned.join(", ") + "（新建会话生效）", "ok");
+  } catch (error) { setStatus("modelStatus", error.message, "err"); }
+}
+
+async function testModel() {
+  try {
+    setStatus("modelStatus", "测试中（发送一次最小请求）…", "info");
+    const result = await api("/v1/model/test", { method: "POST" });
+    // No status means the request never got an answer (no key, DNS, TLS); printing "HTTP ?" would
+    // suggest the server replied.
+    const http = result.status ? " · HTTP " + result.status : "";
+    if (result.ok) {
+      setStatus("modelStatus", "模型可用 · " + result.latency_ms + "ms" + http +
+        " · 回复：" + (result.response_text || "（空）"), "ok");
+    } else {
+      setStatus("modelStatus", "模型不可用 · " + result.latency_ms + "ms" + http + " · " + result.error, "err");
+    }
+  } catch (error) { setStatus("modelStatus", error.message, "err"); }
+}
+
+async function resetModel() {
+  try {
+    renderModel(await api("/v1/model", { method: "DELETE" }));
+    setStatus("modelStatus", "已恢复为 .env 配置", "ok");
+    void loadChannels();
+  } catch (error) { setStatus("modelStatus", error.message, "err"); }
+}
+
+async function loadTools() {
+  try {
+    const { tools } = await api("/v1/tools");
+    state.tools = tools;
+    $("toolCount").textContent = String(tools.length);
+    $("toolCountSide").textContent = String(tools.length);
+    $("toolList").innerHTML = tools.map((tool) =>
+      '<div class="chan-row" data-tool="' + escapeHtml(tool.name) + '">' +
+        '<span class="id">' + escapeHtml(tool.name) + "</span>" +
+        (tool.readOnly ? "" : '<span class="tag" style="color:var(--warn)">写</span>') +
+      "</div>").join("");
+    renderToolDetail(tools[0]);
+  } catch (error) { $("toolList").textContent = error.message; }
+}
+
+function renderToolDetail(tool) {
+  if (!tool) { $("toolDetail").innerHTML = '<div class="hint">这个服务没有注册工具。</div>'; return; }
+  $("toolList").querySelectorAll("[data-tool]").forEach((row) =>
+    row.classList.toggle("active", row.dataset.tool === tool.name));
+  const params = tool.parameters || [];
+  $("toolDetail").innerHTML = '<div class="tool-detail">' +
+    "<h3>" + escapeHtml(tool.name) + "</h3>" +
+    '<div class="label">' + escapeHtml(tool.label) + "</div>" +
+    '<div class="pills">' +
+      '<span class="pill">' + (tool.readOnly ? "只读" : "可写") + "</span>" +
+      (tool.destructive ? '<span class="pill" style="color:var(--err);border-color:var(--err)">有破坏性</span>' : "") +
+      (tool.sequential ? '<span class="pill">串行</span>' : "") +
+      '<span class="pill">' + params.length + " 个参数</span>" +
+    "</div>" +
+    "<p>" + escapeHtml(tool.description) + "</p>" +
+    (params.length
+      ? "<table><thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead><tbody>" +
+        params.map((param) => "<tr><td>" + escapeHtml(param.name) + "</td><td>" + escapeHtml(param.type) +
+          "</td><td>" + (param.required ? "是" : "") + "</td><td>" + escapeHtml(param.description || "") + "</td></tr>").join("") +
+        "</tbody></table>"
+      : '<div class="hint">无参数。</div>') +
+    (tool.promptSnippet ? '<div class="hint" style="white-space:pre-wrap">' + escapeHtml(tool.promptSnippet) + "</div>" : "") +
+    "</div>";
+}
+
+$("toolList").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-tool]");
+  if (!row) return;
+  renderToolDetail((state.tools || []).find((tool) => tool.name === row.dataset.tool));
+});
+
+// Folding layout: the button row on top opens and closes each panel; the same button hides it again.
+document.querySelectorAll(".tab").forEach((tab) => {
+  tab.onclick = () => {
+    const panel = $(tab.dataset.panel);
+    const open = panel.hidden;
+    panel.hidden = !open;
+    tab.setAttribute("aria-expanded", open ? "true" : "false");
+    // Opening the model panel re-reads the channels: the operator may have just edited their pi config.
+    if (open && tab.dataset.panel === "panelModel") void loadChannels();
+  };
+});
+
+// One row per switchable model, grouped by channel, mirroring pi's own model picker.
+function channelRow(channel, model) {
+  const active = state.model && state.model.provider === channel.id && state.model.model_id === model.id;
+  return '<div class="chan-row' + (active ? " active" : "") + (model.enabled ? "" : " muted") + '"' +
+    ' data-pick="1" data-provider="' + escapeHtml(channel.id) + '" data-model="' + escapeHtml(model.id) + '"' +
+    ' title="' + escapeHtml(model.api + (model.context_window ? " · " + model.context_window + " 窗口" : "")) + '">' +
+    '<span class="id">' + escapeHtml(model.id) + "</span>" +
+    (model.reasoning ? '<span class="tag">think</span>' : "") +
+    "</div>";
+}
+
+function renderChannels(catalog) {
+  state.channels = catalog;
+  // Keep the channel that holds the active model on top, even when the cached catalogue is older
+  // than the switch that just happened.
+  const active = state.model ? state.model.provider : catalog.active && catalog.active.provider;
+  const channels = [...(catalog.channels || [])].sort(
+    (left, right) => (left.id === active ? 0 : 1) - (right.id === active ? 0 : 1));
+  $("channelSummary").textContent = channels.length + " 个";
+  $("channelList").innerHTML = channels.map((channel) => {
+    const enabled = channel.models.filter((model) => model.enabled);
+    const rest = channel.models.filter((model) => !model.enabled);
+    const key = channel.key_source === "channel" ? "key: models.json"
+      : channel.key_source === "pi-auth" ? "key: pi auth" : "无凭证";
+    return '<div class="chan">' +
+      '<div class="chan-head" title="' + escapeHtml(channel.id + " · " + key) + '">' +
+        '<span class="dot' + (channel.ready ? " ok" : "") + '"></span>' +
+        '<span class="name">' + escapeHtml(channel.name) + "</span>" +
+        '<span class="count">' + channel.enabled_count + "/" + channel.total_count + "</span>" +
+        (channel.source === "pi-models" ? '<span class="count">自有</span>' : "") +
+      "</div>" +
+      (enabled.length
+        ? enabled.map((model) => channelRow(channel, model)).join("")
+        : '<div class="chan-row muted"><span class="id">— 未在 enabledModels 里启用 —</span></div>') +
+      (rest.length
+        ? '<button class="chan-more" data-more="1">+ 模型（' + rest.length + '）</button>' +
+          '<div data-extra hidden>' + rest.map((model) => channelRow(channel, model)).join("") + "</div>"
+        : "") +
+      "</div>";
+  }).join("") || '<span class="hint">没有可切换的渠道</span>';
+  const sources = catalog.sources || {};
+  const modelsFile = sources.models && sources.models.path
+    ? " pi models.json: " + shortPath(sources.models.path) + "（" + sources.models.status + "）" : "";
+  $("channelNote").textContent = (catalog.note || "") + modelsFile;
+}
+
+async function loadChannels() {
+  try { renderChannels(await api("/v1/model/channels")); }
+  catch (error) { $("channelList").textContent = error.message; }
+}
+
+$("channelList").addEventListener("click", (event) => {
+  const more = event.target.closest("[data-more]");
+  if (more) {
+    const extra = more.nextElementSibling;
+    extra.hidden = !extra.hidden;
+    more.textContent = extra.hidden ? "+ 模型（" + extra.children.length + "）" : "收起未启用的模型";
+    return;
+  }
+  const row = event.target.closest("[data-pick]");
+  if (!row) return;
+  void pickChannel(row.dataset.provider, row.dataset.model);
+});
+
+// Switching channels keeps only the thinking preference: base url, protocol and limits belong to the
+// channel they were typed for.
+async function pickChannel(provider, modelId) {
+  try {
+    setStatus("modelStatus", "切换渠道 " + provider + "/" + modelId + " …", "info");
+    const view = await api("/v1/model/select", { method: "POST", body: { provider, modelId } });
+    renderModel(view);
+    setStatus("modelStatus", "已切换到 " + view.provider + "/" + view.model_id + "（新建会话生效）", "ok");
+  } catch (error) { setStatus("modelStatus", error.message, "err"); }
+}
+
+$("btnModelReload").onclick = () => void loadModel();
+$("btnModelSave").onclick = () => void saveModel();
+$("btnModelReset").onclick = () => void resetModel();
+$("btnModelTest").onclick = () => void testModel();
+
+// Naming a protocol means naming an endpoint: say so before the save is attempted.
+$("mApi").addEventListener("change", () => {
+  const view = state.model || {};
+  const option = (view.api_options || []).find((entry) => entry.id === $("mApi").value);
+  $("mApiHint").textContent = $("mApi").value === ""
+    ? "使用 provider 内置的协议与地址。"
+    : (option ? option.note : "") +
+      ($("mBaseUrl").value.trim()
+        ? " 保存时会一并提交当前 base url（" + $("mBaseUrl").value.trim() + "）。"
+        : " 选协议还需要填 base url，否则无法描述一个 endpoint。");
+});
 
 async function loadHistory() {
   try {

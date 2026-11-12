@@ -46,6 +46,11 @@ Callers can add `X-Caller-Id` to scope session ownership (defaults to a hash of 
 | GET | `/healthz` | liveness + active model |
 | GET | `/v1/capabilities` | engines, tool names, budgets, limits |
 | GET | `/v1/engines` | declared engine profiles (port, protocol, dialect, capability flags) |
+| GET | `/v1/model` | effective model settings, where each value comes from, credential readiness |
+| PUT | `/v1/model` | override model settings (write-only `apiKey`); refused unless `DATA_AGENT_ALLOW_MODEL_EDIT` |
+| DELETE | `/v1/model` | drop all console overrides and rebuild from the environment |
+| POST | `/v1/model/test` | send one 16-token completion through the active handle and report latency/HTTP status |
+| GET | `/v1/tools` | tools the agent is given: labels, descriptions, parameters, read-only flags |
 | POST | `/v1/connections/test` | open a connection, report capabilities, close it |
 | GET | `/v1/connections/profiles` | caller's saved connections (credentials redacted) and secret-storage availability |
 | PUT | `/v1/connections/profiles/{name}` | save/replace `{connection, rememberSecret}` |
@@ -154,6 +159,76 @@ MySQL uses statement-only `KILL QUERY`.
 `DATA_AGENT_MODEL_THINKING=off|minimal|low|medium|high` is passed to the SDK. Custom endpoint metadata
 also enables reasoning when the setting is not `off`; use `off` for endpoints without reasoning
 support. Built-in model metadata determines the supported levels for built-in providers.
+`DATA_AGENT_MODEL_REASONING` (default `env`) turns the declared thinking capability on or off
+independently, for a model that accepts a high level but rejects reasoning parameters.
+
+### Wire protocols
+
+`DATA_AGENT_MODEL_API` is validated against the protocols pi-ai can actually speak, because pi accepts
+any string and only fails in the middle of a task:
+
+| Protocol | Use it for |
+| --- | --- |
+| `openai-completions` | Chat Completions; the widest gateway coverage (DeepSeek, Moonshot, Qwen, Ollama, vLLM, one-api) |
+| `openai-responses` | OpenAI Responses API; native reasoning items, better tool-call fidelity |
+| `anthropic-messages` | Claude, or a gateway exposing an Anthropic-compatible endpoint |
+| `google-generative-ai` | Gemini `generateContent` |
+
+`mistral-conversations`, `azure-openai-responses`, `openai-codex-responses`, `bedrock-converse-stream`,
+`google-vertex` and `pi-messages` are recognised but refused here: each needs a credential or setting
+this service does not manage, and the error says which. A protocol without a base URL is also refused,
+because the provider's built-in endpoint already carries its own protocol — leave both unset to use it.
+
+With a base URL the service writes a full provider block (protocol, endpoint, headers, model metadata)
+and declares text input only. Without one it leaves pi's catalogue in charge and writes only the fields
+you set explicitly, so a model's real 400k window is not replaced by a 128k default. `GET /v1/model`
+reports what the runtime will really use for this reason.
+
+### Model settings and tools in the console
+
+The console shows the effective model configuration (provider, model id, protocol, base url, thinking
+level, reasoning, context/max tokens, credential source, readiness) and can override it at runtime.
+Overrides are stored in `model-settings.json` and layered over the environment: `null` in a patch drops
+that override back to the environment value, and **恢复为 .env** clears the file. Two deliberate limits:
+
+- **The API key is never persisted.** It is accepted write-only and held in process memory, so it
+disappears on restart — set `DATA_AGENT_MODEL_API_KEY` to make it durable. The API only reports
+`has_api_key` and the source (`env`, `console`, `none`).
+- **Editing is refused in production by default** (`MODEL_EDIT_DISABLED`, 403), because pointing
+`baseUrl` elsewhere redirects every database answer to another endpoint. Set
+`DATA_AGENT_ALLOW_MODEL_EDIT=1` to allow it deliberately.
+
+The new runtime is built and validated before anything is saved, so an unknown provider/model leaves
+the previous working configuration in place. Overrides apply to sessions created afterwards; an open
+session keeps the model handle it was created with. **测试模型** (`POST /v1/model/test`) sends one
+16-token completion, because a saved protocol or base URL can be well-formed and still wrong — that
+only shows up on a real request.
+
+### Channels imported from the pi config
+
+The console can list and switch between every channel pi itself knows, without copying any secret
+into this service. It reads, and never writes, `~/.pi/agent/models.json`, `settings.json` and
+`auth.json` (`DATA_AGENT_PI_HOME`, `DATA_AGENT_PI_MODELS_PATH`, `DATA_AGENT_PI_SETTINGS_PATH`,
+`DATA_AGENT_MODEL_AUTH_PATH` override the locations):
+
+- `GET /v1/model/channels` returns the channels, their models, why each one is ready
+  (`key_source`: `channel` from a `models.json` key, `pi-auth` from an `auth.json` credential, or
+  `none`), and which models `settings.json`'s `enabledModels` lets through — that glob list filters
+  the list, it is not a whitelist this service enforces.
+- `POST /v1/model/select {provider, modelId}` switches to one of them. Only those two fields are
+  persisted: base url, protocol, limits and any console key belong to the channel they were typed
+  for. Endpoint metadata keeps coming from the pi config, so editing that file stays effective.
+
+Keys from the pi config are read into memory only; the generated `models.json` this service writes
+for its own runtime is built with `apiKey`/`oauth` stripped (a `${VAR}` reference survives, since it
+is not a secret). An `.env` key is never forwarded to another provider's endpoint: switching
+channels drops it, and the channel's own credential is used instead.
+
+The console also lists the agent's tools from `/v1/tools` (the same descriptors feed
+`/v1/capabilities.tool_names`): name, label, description, parameter names/types/optionality, and
+whether a tool is read-only or serialised on the session connection. Both blocks sit in collapsible
+panels below the main view — one button per block, and the model block is split into the channel
+list on the left and the editable form on the right.
 
 ## History and saved connections
 
@@ -232,6 +307,7 @@ src/
   api/http.ts            Express 5 routes, bearer auth, SSE
   agent/
     model.ts             pi ModelRuntime (models.json, in-memory API key)
+    model-settings.ts    console-editable model overrides layered over the environment
     prompts.ts           per-engine system prompt
     tools.ts             12 tool definitions (TypeBox schemas, annotations)
     runtime.ts           pi AgentSession + task queue + event mapping
