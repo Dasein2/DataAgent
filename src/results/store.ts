@@ -214,6 +214,34 @@ export class ResultStore {
     };
   }
 
+  /**
+   * Streams every stored row once. `read()` pages from the start of the file each time, so a full
+   * export through it would be quadratic; exports of large results need a single forward pass.
+   */
+  async *iterateRows(id: string): AsyncGenerator<unknown[]> {
+    const meta = await this.get(id);
+    if (!meta) return;
+    if (!existsSync(this.dataPath(id))) {
+      if (meta.preview.length !== meta.rowCount) throw new Error(`Result ${id} data file is missing`);
+      yield* meta.preview;
+      return;
+    }
+    const input = createReadStream(this.dataPath(id));
+    const reader = createInterface({ input, crlfDelay: Infinity });
+    let count = 0;
+    try {
+      for await (const line of reader) {
+        if (!line) continue;
+        count += 1;
+        yield JSON.parse(line) as unknown[];
+      }
+      if (count !== meta.rowCount) throw new Error(`Result ${id} row count does not match metadata`);
+    } finally {
+      reader.close();
+      input.destroy();
+    }
+  }
+
   async listBySession(sessionId: string): Promise<ResultMeta[]> {
     await mkdir(this.root, { recursive: true });
     const entries = await readdir(this.root);

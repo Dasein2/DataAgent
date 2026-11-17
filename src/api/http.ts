@@ -1,5 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { Request, RequestHandler, Response } from "express";
 import express from "express";
 import { ConnectionConfig } from "../db/types.js";
@@ -10,6 +12,8 @@ import { SaveProfileRequest } from "../db/profiles-store.js";
 import { ModelPatch } from "../agent/model-settings.js";
 import { ChannelSelection } from "../agent/channels.js";
 import { toolCatalog } from "../agent/tools.js";
+import { z } from "zod";
+import { ProviderWrite, ProviderId } from "../agent/provider-store.js";
 
 interface RequestIdentity {
   ownerKey: string;
@@ -50,6 +54,15 @@ function ownerOf(req: Request): string {
   const identity = req.identity;
   if (!identity) throw new AppError("UNAUTHORIZED", "No request identity");
   return identity.ownerKey;
+}
+
+/**
+ * Titles and ids end up in filenames. `filename*` carries the UTF-8 form; the ASCII fallback keeps
+ * older clients from writing a file with a mangled name.
+ */
+function contentDisposition(filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
 function intParam(value: unknown, fallback: number, min: number, max: number, name: string): number {
@@ -155,13 +168,34 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.json(service.channels());
   });
 
+  // Administrative endpoints: guarded by bearer authentication and allowModelEdit, just like
+  // the legacy model editor. These are global server settings, not caller-scoped session data.
+  app.get("/v1/model/providers", (_req, res) => res.json(service.providerCatalog()));
+  app.put("/v1/model/providers/:id", async (req, res) => {
+    res.json(await service.saveProvider(ProviderId.parse(req.params.id), ProviderWrite.parse(req.body)));
+  });
+  app.delete("/v1/model/providers/:id", async (req, res) => {
+    res.json(await service.deleteProvider(ProviderId.parse(req.params.id)));
+  });
+  app.post("/v1/model/providers/:id/test", async (req, res) => {
+    const { modelId, config } = z.object({ modelId: z.string().min(1), config: ProviderWrite }).parse(req.body);
+    res.json(await service.testProvider(ProviderId.parse(req.params.id), config, modelId));
+  });
+  app.post("/v1/model/providers/:id/discover", async (req, res) => {
+    res.json(await service.discoverProvider(ProviderId.parse(req.params.id), ProviderWrite.parse(req.body)));
+  });
+  app.post("/v1/model/import-pi", async (req, res) => {
+    const body = z.object({ sourceId: ProviderId, targetId: ProviderId }).parse(req.body);
+    res.json(await service.importPiProvider(body.sourceId, body.targetId));
+  });
+
   app.post("/v1/model/select", async (req, res) => {
     const body = ChannelSelection.safeParse(req.body ?? {});
     if (!body.success) {
       const issues = body.error.issues.map((issue) => `${issue.path.join(".") || "channel"}: ${issue.message}`);
       throw new AppError("INVALID_INPUT", `Invalid channel selection — ${issues.join("; ")}`);
     }
-    res.json(await service.selectChannel(body.data.provider, body.data.modelId));
+    res.json(await service.selectChannel(body.data.provider, body.data.modelId, body.data.thinkingLevel));
   });
 
   app.put("/v1/model", async (req, res) => {
@@ -201,6 +235,9 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
         preview_rows: config.budgets.previewRows,
         cell_chars: config.budgets.cellChars,
         max_datasets: config.budgets.maxDatasets,
+        max_chart_rows: config.budgets.maxChartRows,
+        max_chart_cells: config.budgets.maxChartCells,
+        max_artifacts_per_task: config.budgets.maxArtifactsPerTask,
       },
       limits: {
         max_sessions: config.maxSessions,
@@ -208,6 +245,17 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
         max_sse_backlog_events: 5_000,
       },
     });
+  });
+
+  // Reads a jump host's host key before anything is pinned. The browser shows it, the operator
+  // confirms, and the fingerprint then travels with the connection like any other profile field.
+  app.post("/v1/connections/host-key", async (req, res) => {
+    const connection = requestConnection(req);
+    const pin = typeof req.body?.pin === "string" ? req.body.pin : "";
+    const profile = typeof req.body?.profile === "string" ? req.body.profile : undefined;
+    res.json(pin
+      ? await service.pinHostKey(connection, ownerOf(req), { profile, fingerprint: pin })
+      : await service.probeHostKey(connection, { observe: req.body?.observe === true }));
   });
 
   app.post("/v1/connections/test", async (req, res) => {
@@ -234,12 +282,24 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.json({ session: session.snapshot() });
   });
 
+  // Names the session from its own conversation. The title is persisted with the snapshot, so it
+  // survives restarts and shows in the history list.
+  app.post("/v1/sessions/:id/title", async (req, res) => {
+    const { title, usage } = await service.generateTitle(req.params.id, ownerOf(req));
+    res.json({ title, usage: usage ?? null });
+  });
+
   app.get("/v1/sessions/:id/tasks", (req, res) => {
     res.json({ tasks: service.history.listTasks(req.params.id, ownerOf(req)) });
   });
 
   app.delete("/v1/sessions/:id", async (req, res) => {
-    await service.closeSession(req.params.id, ownerOf(req));
+    // ?purge=true deletes the saved history, results and artifacts too; the default only closes.
+    if (req.query.purge === "true" || req.query.purge === "1") {
+      await service.deleteSession(req.params.id, ownerOf(req));
+    } else {
+      await service.closeSession(req.params.id, ownerOf(req));
+    }
     res.status(204).end();
   });
 
@@ -336,11 +396,61 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.json(page);
   });
 
+  // Streaming keeps a large export to one pass over the file instead of paging from the start.
+  app.get("/v1/results/:id/data.csv", async (req, res) => {
+    const { filename, truncated, stream } = await service.resultCsv(req.params.id, ownerOf(req), req.ip);
+    res.status(200);
+    res.setHeader("content-type", "text/csv; charset=utf-8");
+    res.setHeader("content-disposition", contentDisposition(filename));
+    res.setHeader("x-result-truncated", truncated);
+    res.setHeader("cache-control", "no-store");
+    await pipeline(Readable.from(stream), res);
+  });
+
+  // ----------------------------------------------------------------- artifacts
+
+  app.get("/v1/sessions/:id/artifacts", async (req, res) => {
+    res.json({ artifacts: await service.listArtifacts(req.params.id, ownerOf(req)) });
+  });
+
+  app.get("/v1/artifacts/:id", async (req, res) => {
+    res.json({ artifact: await service.getArtifact(req.params.id, ownerOf(req)) });
+  });
+
+  app.get("/v1/artifacts/:id/ref", async (req, res) => {
+    const artifact = await service.getArtifact(req.params.id, ownerOf(req));
+    if (typeof req.query.ref !== "string") throw new AppError("INVALID_INPUT", "ref is required");
+    const resolved = service.artifacts.resolve(req.query.ref, artifact);
+    if (!resolved) throw new AppError("INVALID_INPUT", "Invalid artifact reference");
+    res.json({ ...resolved, columns: artifact.data?.columns, source: artifact.source });
+  });
+
+  app.get("/v1/artifacts/:id/data.csv", async (req, res) => {
+    const { filename, body } = await service.artifactCsv(req.params.id, ownerOf(req), req.ip);
+    res.setHeader("content-type", "text/csv; charset=utf-8");
+    res.setHeader("content-disposition", contentDisposition(filename));
+    res.setHeader("cache-control", "no-store");
+    res.send(body);
+  });
+
   // Lightweight console (same API, no build step).
   const webRoot = new URL("../../web/", import.meta.url);
   app.get("/task-stream.js", (_req, res) => {
     void readFile(new URL("task-stream.js", webRoot), "utf8").then(
       (code) => res.type("application/javascript").send(code),
+      () => res.status(404).end(),
+    );
+  });
+  app.get("/model-manager.js", (_req, res) => {
+    void readFile(new URL("model-manager.js", webRoot), "utf8").then(
+      (code) => res.type("application/javascript").send(code),
+      () => res.status(404).end(),
+    );
+  });
+  // Vendored ECharts: served from this origin so the console needs no CDN and no build step.
+  app.get("/vendor/echarts.min.js", (_req, res) => {
+    void readFile(new URL("vendor/echarts.min.js", webRoot)).then(
+      (code) => res.type("application/javascript").setHeader("cache-control", "public, max-age=604800").send(code),
       () => res.status(404).end(),
     );
   });

@@ -9,6 +9,7 @@ import type { AppConfig } from "../../src/config.js";
 import { DbSession } from "../../src/db/session.js";
 import type { ConnectionConfig } from "../../src/db/types.js";
 import { ResultStore } from "../../src/results/store.js";
+import { PostgresEngine } from "../../src/db/engines/postgres.js";
 
 /**
  * Real-database conformance. Skipped unless a DSN is provided, either through the environment or
@@ -51,6 +52,9 @@ function testApp(dataDir: string): AppConfig {
       cellChars: 200,
       maxResultBytes: 8 * 1024 * 1024,
       maxDatasets: 10,
+      maxChartRows: 5_000,
+      maxChartCells: 3_600,
+      maxArtifactsPerTask: 12,
     },
   };
 }
@@ -84,6 +88,31 @@ async function withSession(engine: "postgres" | "mysql", dsn: string, fn: (sessi
     await rm(dataDir, { recursive: true, force: true });
   }
 }
+
+it("PostgreSQL returns to idle after read-only queries, failures and early stream termination", {
+  skip: !process.env.DATA_AGENT_TEST_PG, timeout: 15_000,
+}, async () => {
+  const engine = new PostgresEngine(parseDsn(process.env.DATA_AGENT_TEST_PG!, "postgres", "non_production"), { applicationName: "chart-transaction-test" });
+  try {
+    await engine.connect();
+    let status = "";
+    // Observe actual protocol messages rather than assuming a successful query means COMMIT ran.
+    (engine as any).client.connection.on("readyForQuery", (message: { status: string }) => { status = message.status; });
+    const limits = { timeoutMs: 5000, maxRows: 2, maxBytes: 100_000, maxCellChars: 1000 };
+    const rows: unknown[][] = [];
+    const sink = { onRow: (row: unknown[]) => { rows.push(row); } };
+    await engine.query("SHOW transaction_read_only", limits, sink);
+    assert.equal(rows[0]?.[0], "on");
+    assert.equal(status, "I", "no transaction may remain open after a successful query");
+    await assert.rejects(() => engine.query("SELECT 1 / 0", limits, sink));
+    assert.equal(status, "I", "a failed query must roll back");
+    const capped = await engine.query("SELECT * FROM generate_series(1, 10)", limits, sink);
+    assert.equal(capped.truncated, "rows");
+    assert.equal(status, "I", "closing a cursor at the row cap must roll back");
+    await engine.explain("SELECT 42", limits);
+    assert.equal(status, "I", "buffered metadata/explain queries must commit");
+  } finally { await engine.close(); }
+});
 
 const suites: Array<[string, "postgres" | "mysql", string | undefined]> = [
   ["PostgreSQL", "postgres", process.env.DATA_AGENT_TEST_PG],
@@ -167,7 +196,11 @@ for (const [label, engine, dsn] of suites) {
       });
     });
 
-    it("cancels a running query through the control connection", async () => {
+    it("cancels a running query through the control connection", {
+      skip: engine === "postgres" && process.env.DATA_AGENT_TEST_PGLITE === "1"
+        ? "PGlite multiplexes one backend; cancellation requires a real PostgreSQL server" : false,
+      timeout: 30_000,
+    }, async () => {
       await withSession(engine, dsn!, async (session) => {
         // A deliberately expensive but permissible statement: no blocked functions, so this
         // exercises the cancellation channel rather than the guard.
@@ -188,6 +221,17 @@ for (const [label, engine, dsn] of suites) {
         assert.ok(Date.now() - started < 25_000, "cancellation must interrupt the query promptly");
         const next = await session.query("SELECT 42 AS answer");
         assert.equal(Number(next.preview[0]?.[0]), 42, "statement cancellation must leave the session usable");
+      });
+    });
+
+    it("recovers after a server error and a row-capped stream", async () => {
+      await withSession(engine, dsn!, async (session) => {
+        await assert.rejects(() => session.query("SELECT * FROM missing_chart_fixture_table"));
+        const capped = await session.query("SELECT * FROM sales ORDER BY id", { maxRows: 2 });
+        assert.equal(capped.truncated, "rows");
+        assert.equal(capped.rowCount, 2);
+        const next = await session.query("SELECT 42 AS answer");
+        assert.equal(Number(next.preview[0]?.[0]), 42);
       });
     });
 

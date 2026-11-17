@@ -2,6 +2,15 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { isKnownModelApi, unknownApiMessage } from "./agent/model-apis.js";
+import { readPiConfig } from "./agent/pi-config.js";
+
+/**
+ * Thinking levels pi accepts. Kept in step with pi-ai's `ModelThinkingLevel`: `xhigh` and `max` are
+ * only served by some model families, but pi clamps an unsupported level itself, so listing them is
+ * safe and lets the operator pick what their pi config already defaults to.
+ */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 export interface ModelConfig {
   provider: string;
@@ -11,7 +20,7 @@ export interface ModelConfig {
   /** pi-ai wire protocol, e.g. openai-completions / anthropic-messages / openai-responses. */
   api?: string;
   headers?: Record<string, string>;
-  thinkingLevel: "off" | "minimal" | "low" | "medium" | "high";
+  thinkingLevel: ThinkingLevel;
   /** Overrides the model's declared thinking capability; defaults to `thinkingLevel !== "off"`. */
   reasoning?: boolean;
   contextWindow?: number;
@@ -30,6 +39,12 @@ export interface BudgetConfig {
   cellChars: number;
   maxResultBytes: number;
   maxDatasets: number;
+  /** Hard cap on rows loaded into a chart artifact; the chart layer never aggregates. */
+  maxChartRows: number;
+  /** Heatmap cells / cartesian points above this are refused with a TopN or bucketing hint. */
+  maxChartCells: number;
+  /** Artifacts one task may produce. 0 disables the cap. */
+  maxArtifactsPerTask: number;
 }
 
 export interface AppConfig {
@@ -106,11 +121,6 @@ export function loadConfig(): AppConfig {
   mkdirSync(resolve(dataDir, "results"), { recursive: true });
   mkdirSync(resolve(dataDir, "pi"), { recursive: true });
 
-  const thinkingLevel = process.env.DATA_AGENT_MODEL_THINKING ?? "medium";
-  if (!["off", "minimal", "low", "medium", "high"].includes(thinkingLevel)) {
-    throw new Error("DATA_AGENT_MODEL_THINKING must be off, minimal, low, medium or high");
-  }
-
   // pi accepts an unknown protocol and only fails mid-task, so reject it where it is read.
   const modelApi = process.env.DATA_AGENT_MODEL_API?.trim() || undefined;
   if (modelApi && !isKnownModelApi(modelApi)) {
@@ -119,8 +129,10 @@ export function loadConfig(): AppConfig {
   // Reuse the operator's own pi setup when it is there: their auth.json makes built-in providers
   // (deepseek, moonshotai-cn, ...) usable without exporting a key, and their models.json supplies the
   // custom channels the console lists. Both are only read here; this service never writes to them.
+  const importPi = bool("DATA_AGENT_PI_IMPORT", env !== "production");
   const piHome = process.env.DATA_AGENT_PI_HOME ?? join(homedir(), ".pi", "agent");
   const piFile = (envName: string, name: string): string | undefined => {
+    if (!importPi) return undefined;
     const explicit = process.env[envName];
     if (explicit) return explicit;
     const candidate = join(piHome, name);
@@ -129,6 +141,19 @@ export function loadConfig(): AppConfig {
   const piModelsPath = piFile("DATA_AGENT_PI_MODELS_PATH", "models.json");
   const piSettingsPath = piFile("DATA_AGENT_PI_SETTINGS_PATH", "settings.json");
   const piAuthPath = piFile("DATA_AGENT_MODEL_AUTH_PATH", "auth.json");
+  // The model baseline follows pi: whatever channel pi is set to start on is what this service uses,
+  // unless `.env` pins it explicitly. Reading it (rather than copying the values here) means a pi
+  // upgrade that changes provider, model or thinking level needs no edit in this project.
+  const piDefaults = readPiConfig(undefined, piSettingsPath).defaults;
+  const modelProvider = process.env.DATA_AGENT_MODEL_PROVIDER?.trim() || piDefaults.provider || "openai";
+  const modelId = process.env.DATA_AGENT_MODEL_ID?.trim() || piDefaults.modelId || "gpt-5.2";
+  const thinkingLevel = process.env.DATA_AGENT_MODEL_THINKING?.trim() || piDefaults.thinkingLevel || "medium";
+  if (!(THINKING_LEVELS as readonly string[]).includes(thinkingLevel)) {
+    throw new Error(
+      `DATA_AGENT_MODEL_THINKING must be one of ${THINKING_LEVELS.join(", ")}` +
+        (process.env.DATA_AGENT_MODEL_THINKING ? "" : ` (read "${thinkingLevel}" from pi settings.json)`),
+    );
+  }
 
   const reasoningRaw = process.env.DATA_AGENT_MODEL_REASONING?.trim().toLowerCase();
   if (reasoningRaw && reasoningRaw !== "env") {
@@ -154,8 +179,8 @@ export function loadConfig(): AppConfig {
     allowModelEdit: bool("DATA_AGENT_ALLOW_MODEL_EDIT", env !== "production"),
     model: {
       // Deliberately NOT PI_*: those are inherited by the pi harness itself and would collide.
-      provider: process.env.DATA_AGENT_MODEL_PROVIDER ?? "openai",
-      modelId: process.env.DATA_AGENT_MODEL_ID ?? "gpt-5.2",
+      provider: modelProvider,
+      modelId,
       apiKey: process.env.DATA_AGENT_MODEL_API_KEY,
       baseUrl: process.env.DATA_AGENT_MODEL_BASE_URL,
       authPath: piAuthPath,
@@ -180,6 +205,9 @@ export function loadConfig(): AppConfig {
       cellChars: num("DATA_AGENT_CELL_CHARS", 200),
       maxResultBytes: num("DATA_AGENT_MAX_RESULT_BYTES", 512 * 1024 * 1024),
       maxDatasets: num("DATA_AGENT_MAX_DATASETS", 50),
+      maxChartRows: num("DATA_AGENT_MAX_CHART_ROWS", 20_000),
+      maxChartCells: num("DATA_AGENT_MAX_CHART_CELLS", 3_600),
+      maxArtifactsPerTask: num("DATA_AGENT_MAX_ARTIFACTS_PER_TASK", 12),
     },
   };
 }

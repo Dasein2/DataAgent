@@ -13,8 +13,8 @@ import {
   mergeOverrides,
 } from "../src/agent/model-settings.js";
 import { AnalysisService } from "../src/agent/service.js";
-import { toolCatalog } from "../src/agent/tools.js";
-import { createDatabaseTools } from "../src/agent/tools.js";
+import { declaresReasoning } from "../src/agent/model.js";
+import { createDatabaseTools, normalizeChartSpec, toolCatalog } from "../src/agent/tools.js";
 import { createHttpApp } from "../src/api/http.js";
 import type { AppConfig } from "../src/config.js";
 import { cleanup, testConfig } from "./support.js";
@@ -59,6 +59,19 @@ it("layers console overrides over the environment and drops them back with null"
     assert.equal(baseless.baseUrl, undefined);  } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+it("accepts every thinking level pi serves, including the extended xhigh and max", async () => {
+  // pi grew `xhigh`/`max`; a console that only knew five of them would reject what `.env` and pi's own
+  // defaultThinkingLevel can already say.
+  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+    assert.equal(ModelPatch.parse({ thinkingLevel: level }).thinkingLevel, level);
+  }
+  const extended = mergeOverrides({}, ModelPatch.parse({ thinkingLevel: "xhigh" }));
+  assert.equal(effectiveModel(envModel, extended).thinkingLevel, "xhigh");
+  // A model that cannot think still declares no reasoning, whatever the level name.
+  assert.equal(declaresReasoning({ ...envModel, thinkingLevel: "max" }), true);
+  assert.equal(declaresReasoning({ ...envModel, thinkingLevel: "off" }), false);
 });
 
 it("never persists the API key and ignores an unreadable settings file", async () => {
@@ -257,11 +270,48 @@ it("exposes model settings over HTTP, refuses edits when disabled, and validates
   }
 });
 
+it("normalizes empty and redundant optional chart dimensions emitted by model adapters", () => {
+  const spec = normalizeChartSpec({
+    result_id: "res_1",
+    type: "bar",
+    x: { field: "region" },
+    y: { field: "", title: "", order: [], sort: "label" },
+    series: { field: "region", title: "Region" },
+    value: { field: "amount" },
+  });
+  assert.equal(spec.y, undefined);
+  assert.equal(spec.series, undefined);
+  assert.deepEqual(spec.x, { field: "region" });
+  assert.equal(normalizeChartSpec({
+    result_id: "res_1",
+    type: "bar",
+    x: { field: "region" },
+    series: { field: "", title: "" },
+    value: { field: "amount" },
+  }).series, undefined);
+});
+
 it("describes every agent tool from metadata alone and stays in sync with the factory", () => {
   const catalog = toolCatalog();
   const built = createDatabaseTools({ db: {}, budgets: {} } as never).map((tool) => tool.name);
   assert.deepEqual(catalog.map((tool) => tool.name), built);
-  assert.equal(catalog.length, 12);
+  assert.equal(catalog.length, 13);
+
+  const chart = catalog.find((tool) => tool.name === "chart_create")!;
+  assert.equal(chart.readOnly, false);
+  assert.equal(chart.destructive, false);
+  // Same spec on the same result is deduped, so a retry never duplicates an artifact.
+  assert.equal(chart.sequential, true);
+  assert.deepEqual(chart.parameters.map((param) => param.name), [
+    "result_id",
+    "type",
+    "title",
+    "x",
+    "y",
+    "series",
+    "value",
+    "color",
+  ]);
 
   const sql = catalog.find((tool) => tool.name === "query_execute")!;
   assert.match(sql.description, /SELECT/);

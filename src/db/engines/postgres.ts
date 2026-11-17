@@ -46,6 +46,11 @@ export class PostgresEngine implements Engine {
   private readonly notes: string[] = [];
   /** Backend PID captured while the connection is idle; needed to cancel a running query. */
   private backendPid = 0;
+  /**
+   * Mirrors the old "session is in read-only mode" flag. No transaction is held between statements
+   * any more: each query opens its own `START TRANSACTION READ ONLY`, so an idle session no longer
+   * pins xmin and blocks vacuum on a busy primary.
+   */
   private inReadOnly = false;
   private closed = false;
 
@@ -127,14 +132,30 @@ export class PostgresEngine implements Engine {
 
   async beginReadOnly(): Promise<void> {
     if (!this.client) throw new Error("PostgreSQL connection is not open");
-    await this.client.query("BEGIN TRANSACTION READ ONLY");
+    // Nothing to open: read-only mode is enforced per statement in `readOnlyTransaction()`.
     this.inReadOnly = true;
   }
 
   async endReadOnly(): Promise<void> {
-    if (!this.client || !this.inReadOnly) return;
-    await this.client.query("ROLLBACK").catch(() => undefined);
     this.inReadOnly = false;
+  }
+
+  /**
+   * Runs `fn` inside `START TRANSACTION READ ONLY`, committing on success and rolling back on any
+   * failure. Short transactions are what keep the read-only proof without holding a snapshot open
+   * for the whole session (which blocked vacuum and made one cancelled query poison every later one).
+   */
+  private async readOnlyTransaction<T>(fn: (client: pg.Client) => Promise<T>): Promise<T> {
+    const client = this.assertOpen();
+    await client.query("BEGIN TRANSACTION READ ONLY");
+    try {
+      const result = await fn(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -165,34 +186,14 @@ export class PostgresEngine implements Engine {
     return this.client;
   }
 
-  /**
-   * A failed or cancelled statement aborts the pinned read-only transaction, after which every
-   * statement fails with "current transaction is aborted". Roll back and re-open it so one bad
-   * query does not poison the session.
-   */
-  private async recoverTransaction(): Promise<void> {
-    if (!this.client || this.closed) return;
-    await this.client.query("ROLLBACK").catch(() => undefined);
-    this.inReadOnly = false;
-    await this.beginReadOnly().catch(() => undefined);
-  }
-
   private async buffered(sql: string, timeoutMs: number): Promise<{ fields: ColumnMeta[]; rows: unknown[][] }> {
-    const client = this.assertOpen();
-    if (this.inReadOnly) {
+    const raw = await this.readOnlyTransaction(async (client) => {
       await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
-    }
-    let result: unknown;
-    try {
-      result = await client.query({ text: sql, values: [], rowMode: "array" });
-    } catch (error) {
-      if (this.inReadOnly) await this.recoverTransaction();
-      throw error;
-    }
-    const raw = result as unknown as {
-      fields?: FieldDescription[];
-      rows: unknown[][];
-    };
+      return (await client.query({ text: sql, values: [], rowMode: "array" })) as unknown as {
+        fields?: FieldDescription[];
+        rows: unknown[][];
+      };
+    });
     const fields = (raw.fields ?? []).map((field) => ({
       name: field.name,
       type: this.typeNames.get(field.dataTypeID) ?? `oid_${field.dataTypeID}`,
@@ -203,9 +204,25 @@ export class PostgresEngine implements Engine {
   async query(sql: string, limits: QueryLimits, sink: RowSink): Promise<QueryStats> {
     const client = this.assertOpen();
     if (!this.inReadOnly) await this.beginReadOnly();
-    await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(limits.timeoutMs))}`);
-
+    await client.query("BEGIN TRANSACTION READ ONLY");
     const started = Date.now();
+    try {
+      await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(limits.timeoutMs))}`);
+      return await this.streamRows(client, sql, limits, sink, started);
+    } finally {
+      // A read-only transaction has nothing to persist, so ROLLBACK is equivalent to COMMIT — and it
+      // is safe even when the cursor was destroyed mid-stream or the statement was cancelled.
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
+  }
+
+  private async streamRows(
+    client: pg.Client,
+    sql: string,
+    limits: QueryLimits,
+    sink: RowSink,
+    started: number,
+  ): Promise<QueryStats> {
     const stream = client.query(
       new QueryStream(sql, [], { batchSize: 200, rowMode: "array" }) as never,
     ) as unknown as AsyncIterable<unknown[]> & { destroy: (error?: Error) => void; _result?: { fields?: FieldDescription[] } };
@@ -250,10 +267,6 @@ export class PostgresEngine implements Engine {
         // Give the cursor a moment to close the portal before the next statement.
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-    } catch (error) {
-      // Aborted/cancelled/failed statements abort the transaction; recover before the next one.
-      await this.recoverTransaction();
-      throw error;
     } finally {
       limits.signal?.removeEventListener("abort", cancelOnAbort);
     }
@@ -274,14 +287,18 @@ export class PostgresEngine implements Engine {
 
   async executeWorkspace(sql: string, timeoutMs: number): Promise<QueryStats> {
     const client = this.assertOpen();
-    await this.endReadOnly();
     const started = Date.now();
+    // Workspace DDL must commit, so it needs its own read-write transaction instead of the old
+    // "roll back the pinned transaction, run, re-open it" dance.
+    await client.query("BEGIN");
     try {
-      await client.query(`SET statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
+      await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
       await client.query(sql);
+      await client.query("COMMIT");
       return { columns: [], rowCount: 0, bytes: 0, durationMs: Date.now() - started, truncated: "none", warnings: [] };
-    } finally {
-      await this.beginReadOnly().catch(() => undefined);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
     }
   }
 

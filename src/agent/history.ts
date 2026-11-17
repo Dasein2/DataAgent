@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { ConnectionConfig } from "../db/types.js";
@@ -102,6 +102,27 @@ export class HistoryStore {
 
   listSessions(owner: string): Record<string, any>[] {
     return [...this.sessions.values()].filter((record) => record.owner === owner).map((record) => structuredClone(record.snapshot));
+  }
+
+  /** Names a saved session without touching its database connection. */
+  setSessionTitle(id: string, owner: string, title: string): Record<string, any> {
+    const record = this.getSession(id, owner);
+    record.snapshot.title = title;
+    this.saveSession(owner, record.snapshot, record.connectionKey);
+    return record.snapshot;
+  }
+
+  /** Remove a session and its tasks/events from durable history. Ownership is checked first. */
+  deleteSession(id: string, owner: string): void {
+    this.getSession(id, owner);
+    this.sessions.delete(id);
+    rmSync(join(this.root, "sessions", `${id}.json`), { force: true });
+    for (const [taskId, record] of this.tasks) {
+      if (record.task.session_id !== id) continue;
+      this.tasks.delete(taskId);
+      rmSync(join(this.root, "tasks", `${taskId}.json`), { force: true });
+      rmSync(join(this.root, "events", `${taskId}.ndjson`), { force: true });
+    }
   }
 
   saveTask(owner: string, task: TaskRecord): void {

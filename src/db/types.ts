@@ -17,7 +17,11 @@ export const SshHop = z.object({
   port: z.number().int().min(1).max(65535).default(22),
   username: z.string().min(1),
   auth: SshAuth,
-  /** SHA256 base64 fingerprint of the host key, e.g. "SHA256:abc...". Required in production. */
+  /**
+   * SHA256 fingerprint of the server host key, e.g. "SHA256:abc...". Absent means "not confirmed
+   * yet": a connection refuses it, and `POST /v1/connections/host-key` reports it so the caller can
+   * show it and pin it on the operator's behalf.
+   */
   hostFingerprint: z.string().min(1).optional(),
 });
 

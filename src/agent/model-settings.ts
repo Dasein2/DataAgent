@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
-import type { ModelConfig } from "../config.js";
+import type { ModelConfig, ThinkingLevel } from "../config.js";
+import { THINKING_LEVELS } from "../config.js";
 import { findModelApi, unknownApiMessage } from "./model-apis.js";
 
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
-export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+// The level list lives in config.ts so `.env` parsing and the console dropdown cannot drift apart.
+export { THINKING_LEVELS };
+export type { ThinkingLevel };
 
 /**
  * Wire protocol name. Validated against the catalogue rather than free text: pi accepts any string
@@ -29,8 +31,8 @@ const apiName = z
  * console from disagreeing in ways an operator cannot see.
  */
 export const ModelPatch = z.object({
-  provider: z.string().trim().min(1).max(60).nullable().optional(),
-  modelId: z.string().trim().min(1).max(120).nullable().optional(),
+  provider: z.string().trim().min(1).max(120).nullable().optional(),
+  modelId: z.string().trim().min(1).max(200).nullable().optional(),
   /** pi-ai wire protocol; one of the ids in model-apis.ts. */
   api: apiName.nullable().optional(),
   baseUrl: z.string().trim().url().max(500).nullable().optional(),

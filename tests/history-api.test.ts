@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Server } from "node:http";
 import { HistoryStore, connectionKey } from "../src/agent/history.js";
 import { EventBroker } from "../src/agent/events.js";
 import { AnalysisService } from "../src/agent/service.js";
 import { ResultStore } from "../src/results/store.js";
+import { ArtifactService } from "../src/artifacts/service.js";
+import { ArtifactStore } from "../src/artifacts/store.js";
+import { rowRef } from "../src/artifacts/refs.js";
 import { ProfileStore } from "../src/db/profiles-store.js";
 import { ConnectionConfig } from "../src/db/types.js";
 import { createHttpApp } from "../src/api/http.js";
@@ -102,14 +105,24 @@ it("serves historical results/tasks/events and server profiles over HTTP after r
   let server: Server | undefined; let service: AnalysisService | undefined;
   try {
     const results = new ResultStore(join(config.dataDir, "results"));
-    const first: AnalysisService = new (AnalysisService as any)(config, { hasAuth: true }, results);
+    const artifacts = new ArtifactService(new ArtifactStore(join(config.dataDir, "artifacts")), results, config.budgets);
+    const first: AnalysisService = new (AnalysisService as any)(config, { hasAuth: true }, results, artifacts);
     seed(first.history); first.history.saveSession("alice", { session_id: task().session_id, status: "closed" });
     const writer = await results.create({ sessionId: task().session_id, taskId: task().id, sql: "SELECT 12", previewRows: 2 });
     writer.setColumns([{ name: "count", type: "int" }]); await writer.append([12]); const meta = await writer.finish("none", 1);
+    const { artifact } = await artifacts.createChart({ sessionId: task().session_id, taskId: task().id,
+      spec: { result_id: meta.id, type: "table", title: "计数" } });
+    const partialWriter = await results.create({ sessionId: task().session_id, sql: "SELECT label", previewRows: 1 });
+    partialWriter.setColumns([{ name: "label", type: "text" }]);
+    await partialWriter.append(["=SUM(A1)"]);
+    await partialWriter.append(["x".repeat(9000)]);
+    const partial = await partialWriter.finish("rows", 1);
     const failed = await results.create({ sessionId: task().session_id, sql: "SELECT * FROM missing", previewRows: 2 });
     const failedMeta = await failed.abort("table missing does not exist");
     await first.shutdown();
-    service = new (AnalysisService as any)(config, { hasAuth: true }, new ResultStore(join(config.dataDir, "results")));
+    const restartedResults = new ResultStore(join(config.dataDir, "results"));
+    service = new (AnalysisService as any)(config, { hasAuth: true }, restartedResults,
+      new ArtifactService(new ArtifactStore(join(config.dataDir, "artifacts")), restartedResults, config.budgets));
     const web = await createHttpApp(service!);
     server = await new Promise<Server>((resolve) => { const s = web.listen(0, "127.0.0.1", () => resolve(s)); });
     const port = (server.address() as any).port;
@@ -117,6 +130,34 @@ it("serves historical results/tasks/events and server profiles over HTTP after r
       ...init, headers: { authorization: "Bearer test-token", "x-caller-id": owner, "content-type": "application/json", ...init.headers },
     });
     assert.equal((await (await request(`/v1/results/${meta.id}`)).json()).rows[0][0], 12);
+    const stored = await request(`/v1/artifacts/${artifact.id}`);
+    assert.equal(stored.status, 200);
+    assert.deepEqual((await stored.json()).artifact, artifact);
+    const listed = await (await request(`/v1/sessions/${task().session_id}/artifacts`)).json();
+    assert.equal(listed.artifacts[0].id, artifact.id);
+    const refPath = `/v1/artifacts/${artifact.id}/ref?ref=${encodeURIComponent(rowRef(artifact.id, 0))}`;
+    const resolved = await (await request(refPath)).json();
+    assert.equal(resolved.value, 12);
+    assert.equal(resolved.source.sql, "SELECT 12");
+    const csv = await request(`/v1/artifacts/${artifact.id}/data.csv`);
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers.get("content-disposition")!, /filename\*=UTF-8''/);
+    assert.equal(await csv.text(), "count\r\n12\r\n");
+    const partialCsv = await request(`/v1/results/${partial.id}/data.csv`);
+    assert.equal(partialCsv.headers.get("x-result-truncated"), "rows");
+    assert.match(partialCsv.headers.get("content-disposition")!, /-partial\.csv/);
+    assert.equal(await partialCsv.text(), "label\r\n'=SUM(A1)\r\n" + "x".repeat(9000) + "\r\n");
+    assert.equal((await request(`/v1/results/${failedMeta.id}/data.csv`)).status, 409);
+    for (const path of [`/v1/artifacts/${artifact.id}`, `/v1/artifacts/${artifact.id}/data.csv`, refPath,
+      `/v1/sessions/${task().session_id}/artifacts`, `/v1/results/${meta.id}/data.csv`]) {
+      assert.equal((await request(path, "bob")).status, 404);
+    }
+    const audit = readFileSync(join(config.dataDir, "audit", "exports.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(audit.length, 2);
+    assert.ok(audit.every((entry) => entry.owner_key === "alice"));
+    const vendor = await request("/vendor/echarts.min.js");
+    assert.equal(vendor.status, 200);
+    assert.ok((await vendor.text()).length > 1_000_000);
     const failedResponse = await request(`/v1/results/${failedMeta.id}`);
     assert.equal(failedResponse.status, 409); assert.equal((await failedResponse.json()).error.code, "RESULT_FAILED");
     assert.equal((await (await request(`/v1/sessions/${task().session_id}`)).json()).session.status, "closed");
@@ -146,6 +187,16 @@ it("serves historical results/tasks/events and server profiles over HTTP after r
     assert.equal((await (await request("/v1/connections/profiles", "bob")).json()).profiles.length, 0);
     assert.equal((await request(`/v1/sessions/${task().session_id}/reconnect`, "alice", { method: "POST", body: JSON.stringify({ connection: { ...connection, database: "wrong-db" } }) })).status, 400);
     assert.equal((await request("/v1/connections/profiles/fixture", "alice", { method: "DELETE" })).status, 204);
+    // Purge deletes the saved history, results and artifacts; ownership is enforced first.
+    assert.equal((await request(`/v1/sessions/${task().session_id}?purge=true`, "bob", { method: "DELETE" })).status, 404);
+    assert.equal((await request(`/v1/sessions/${task().session_id}?purge=true`, "alice", { method: "DELETE" })).status, 204);
+    for (const path of [`/v1/sessions/${task().session_id}`, `/v1/sessions/${task().session_id}/tasks`,
+      `/v1/sessions/${task().session_id}/results`, `/v1/results/${meta.id}`, `/v1/artifacts/${artifact.id}`, `/v1/tasks/${task().id}`]) {
+      assert.equal((await request(path)).status, 404);
+    }
+    assert.equal((await (await request("/v1/sessions")).json()).sessions.length, 0);
+    assert.equal(existsSync(join(config.dataDir, "history", "sessions", `${task().session_id}.json`)), false);
+    assert.equal(existsSync(join(config.dataDir, "history", "events", `${task().id}.ndjson`)), false);
   } finally {
     server?.closeAllConnections(); await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     await service?.shutdown(); await cleanup(config);

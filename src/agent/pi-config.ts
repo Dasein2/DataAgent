@@ -19,6 +19,12 @@ export interface PiConfigSnapshot {
   apiKeys: Record<string, string>;
   /** `enabledModels` from pi's settings.json; empty means "everything is enabled". */
   enabledModels: string[];
+  /**
+   * The channel pi itself starts on (`defaultProvider` / `defaultModel` / `defaultThinkingLevel`).
+   * The service uses these when `.env` leaves the model unset, so upgrading pi does not require
+   * editing three more variables here.
+   */
+  defaults: { provider?: string; modelId?: string; thinkingLevel?: string };
   models: { path: string | null; status: PiFileStatus; providers: number };
   settings: { path: string | null; status: PiFileStatus };
 }
@@ -27,6 +33,7 @@ const EMPTY: PiConfigSnapshot = {
   providers: {},
   apiKeys: {},
   enabledModels: [],
+  defaults: {},
   models: { path: null, status: "missing", providers: 0 },
   settings: { path: null, status: "missing" },
 };
@@ -63,6 +70,7 @@ export function readPiConfig(modelsPath?: string, settingsPath?: string): PiConf
     providers: {},
     apiKeys: {},
     enabledModels: [],
+    defaults: {},
     models: { path: modelsPath ?? null, status: "missing", providers: 0 },
     settings: { path: settingsPath ?? null, status: "missing" },
   };
@@ -87,9 +95,21 @@ export function readPiConfig(modelsPath?: string, settingsPath?: string): PiConf
   if (settingsPath) {
     const settings = readJson(settingsPath);
     snapshot.settings.status = settings.status;
-    const enabled = (settings.value as { enabledModels?: unknown } | undefined)?.enabledModels;
+    const value = settings.value as
+      | { enabledModels?: unknown; defaultProvider?: unknown; defaultModel?: unknown; defaultThinkingLevel?: unknown }
+      | undefined;
+    const enabled = value?.enabledModels;
     if (Array.isArray(enabled)) {
       snapshot.enabledModels = enabled.filter((entry): entry is string => typeof entry === "string");
+    }
+    if (typeof value?.defaultProvider === "string" && value.defaultProvider.trim()) {
+      snapshot.defaults.provider = value.defaultProvider.trim();
+    }
+    if (typeof value?.defaultModel === "string" && value.defaultModel.trim()) {
+      snapshot.defaults.modelId = value.defaultModel.trim();
+    }
+    if (typeof value?.defaultThinkingLevel === "string" && value.defaultThinkingLevel.trim()) {
+      snapshot.defaults.thinkingLevel = value.defaultThinkingLevel.trim();
     }
   }
 

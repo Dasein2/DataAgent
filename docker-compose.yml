@@ -1,5 +1,7 @@
 # Production-ish deployment of the analysis service.
-#   cp .env.example .env.prod   # set DATA_AGENT_API_TOKEN + DATA_AGENT_MODEL_*
+#   cp .env.example .env.prod   # set NODE_ENV=production, API_TOKEN, PROFILE_SECRET_KEY
+#   # Set DATA_AGENT_ALLOW_MODEL_EDIT=1 to configure independent channels in the web console.
+#   # No pi directory mount is required; see docs/model-management.md.
 #   docker compose up -d --build
 services:
   data-agent:

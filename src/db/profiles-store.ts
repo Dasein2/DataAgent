@@ -137,6 +137,25 @@ export class ProfileStore {
    * Creates or replaces a profile. Passing `rememberSecret` without a configured key is refused:
    * silently discarding the secret would leave a profile that looks complete but cannot connect.
    */
+  /**
+   * Stores a confirmed host key without touching the rest of the profile. Pinning is a separate
+   * action from saving: it must not rewrite the connection or drop the encrypted credentials that
+   * were saved earlier.
+   */
+  pinHostKey(owner: string, name: string, hopIndex: number, fingerprint: string): ProfileView {
+    const existing = this.find(owner, name);
+    if (!existing) throw new AppError("NOT_FOUND", `Connection profile "${name}" not found`);
+    const ssh = existing.config.ssh as { hops: Array<{ hostFingerprint?: string; host: string }> } | undefined;
+    const hop = ssh?.hops[hopIndex];
+    if (!hop) {
+      throw new AppError("INVALID_INPUT", `Connection profile "${name}" has no SSH hop ${hopIndex + 1}`);
+    }
+    hop.hostFingerprint = fingerprint;
+    existing.updatedAt = new Date().toISOString();
+    this.persist();
+    return this.view(existing);
+  }
+
   save(owner: string, name: string, connection: ConnectionConfig, rememberSecret: boolean): ProfileView {
     if (!PROFILE_NAME.test(name)) {
       throw new AppError("PROFILE_NAME_INVALID", 'Profile name must match [A-Za-z0-9._:-]{1,60}');

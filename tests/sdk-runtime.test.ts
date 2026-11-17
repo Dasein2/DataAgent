@@ -45,6 +45,39 @@ it("passes configured thinking levels into the actual SDK", async () => {
   } finally { restore(); await service?.shutdown(); await cleanup(config); }
 });
 
+it("keeps existing sessions on their original project channel handle after credential rotation", async () => {
+  const config = await testConfig(); config.allowModelEdit = true; config.budgets.taskTimeoutMs = 5000;
+  const restore = stubDatabase(); let service: AnalysisService | undefined;
+  const requests: { key?: string; org?: string }[] = [];
+  const endpoint = createServer(async (req, res) => {
+    for await (const _ of req) { }
+    requests.push({ key: req.headers.authorization, org: req.headers["x-org"] as string });
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ id: "rot", model: "alpha", choices: [{ index: 0, delta: { role: "assistant", content: "OK" }, finish_reason: null }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id: "rot", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+    res.end("data: [DONE]\n\n");
+  });
+  await new Promise<void>((r) => endpoint.listen(0, "127.0.0.1", r));
+  const provider = { name: "Owned", baseUrl: `http://127.0.0.1:${(endpoint.address() as any).port}/v1`, api: "openai-completions", models: [{ id: "alpha" }] };
+  try {
+    service = await AnalysisService.create(config);
+    const { ProviderWrite } = await import("../src/agent/provider-store.js");
+    await service.saveProvider("owned", ProviderWrite.parse({ ...provider, apiKey: "first-key", headers: { "X-Org": "first-org" } }));
+    await service.selectChannel("owned", "alpha");
+    const old = await service.createSession(connection, "alice");
+    await service.saveProvider("owned", ProviderWrite.parse({ ...provider, apiKey: "second-key", headers: { "X-Org": "second-org" } }));
+    const next = await service.createSession(connection, "alice");
+    for (const session of [old, next]) {
+      const task = session.submit("say OK"); await until(() => !!task.finished_at);
+      assert.equal(task.status, "succeeded", JSON.stringify(task.error));
+    }
+    assert.deepEqual(requests, [{ key: "Bearer first-key", org: "first-org" }, { key: "Bearer second-key", org: "second-org" }]);
+  } finally {
+    restore(); await service?.shutdown(); endpoint.closeAllConnections();
+    await new Promise<void>((r) => endpoint.close(() => r())); await cleanup(config);
+  }
+});
+
 it("handles real SDK success/length/error, persists conversation and resumes it after service restart", async () => {
   const config = await testConfig(); config.budgets.taskTimeoutMs = 5_000;
   const restore = stubDatabase(); let service: AnalysisService | undefined;

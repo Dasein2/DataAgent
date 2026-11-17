@@ -6,9 +6,16 @@ import type { AppConfig, ModelConfig } from "../config.js";
 import { AppError } from "../errors.js";
 import { DEFAULT_MODEL_API, findModelApi } from "./model-apis.js";
 import { readPiConfig } from "./pi-config.js";
+import { providerBlocks, type ProviderConfig } from "./provider-store.js";
+
+export interface ManagedRuntimeConfig {
+  providers: Record<string, ProviderConfig>;
+  key?: string;
+  headers?: Record<string, string>;
+}
 
 /** Where the credential for the active model came from. Never includes the secret itself. */
-export type ModelKeySource = "console" | "env" | "channel" | "none";
+export type ModelKeySource = "console" | "env" | "channel" | "managed" | "none";
 
 export interface ModelHandle {
   runtime: ModelRuntime;
@@ -105,38 +112,44 @@ export function modelsFileFor(
  * `consoleKey` is the key the operator saved in the console for this provider; it wins over `.env`
  * and over the provider's own pi credential.
  */
-export async function createModelHandle(app: AppConfig, consoleKey?: string): Promise<ModelHandle> {
+export async function createModelHandle(app: AppConfig, consoleKey?: string, managed?: ManagedRuntimeConfig): Promise<ModelHandle> {
   const dir = join(app.dataDir, "pi");
   await mkdir(dir, { recursive: true });
   const modelsPath = join(dir, "models.json");
   // An operator can point at an existing pi credential store instead of exporting a key; secrets are
   // still only read, never written, and never logged.
-  const authPath = app.model.authPath ?? join(dir, "auth.json");
+  const owned = managed && Object.hasOwn(managed.providers, app.model.provider) ? managed.providers[app.model.provider] : undefined;
+  const authPath = owned ? join(dir, "managed-auth.json") : app.model.authPath ?? join(dir, "auth.json");
   // Channels the operator already configured in pi; keys stay in memory (see `pi-config.ts`).
   const pi = readPiConfig(app.piModelsPath, app.piSettingsPath);
 
   // pi accepts an unknown protocol and only fails when a request is made; reject it up front.
   const api = findModelApi(app.model.api);
-  if (app.model.api && !api) {
+  if (!owned && app.model.api && !api) {
     throw new AppError("MODEL_NOT_CONFIGURED", `Unknown DATA_AGENT_MODEL_API "${app.model.api}"`);
   }
   // A protocol without a base URL cannot describe a provider: pi's built-in catalogue already has
   // the right one, so the operator most likely meant to leave this unset.
-  if (app.model.api && !app.model.baseUrl) {
+  if (!owned && app.model.api && !app.model.baseUrl) {
     throw new AppError(
       "MODEL_NOT_CONFIGURED",
       `DATA_AGENT_MODEL_API=${app.model.api} needs DATA_AGENT_MODEL_BASE_URL. ` +
         "Leave the protocol unset to use the provider's built-in endpoint and protocol.",
     );
   }
-  if (api && !api.selectable && isCustomEndpoint(app.model)) {
+  if (!owned && api && !api.selectable && isCustomEndpoint(app.model)) {
     throw new AppError(
       "MODEL_NOT_CONFIGURED",
       `${api.id} is not supported by this service: it requires ${api.requires}. ${api.note}`,
     );
   }
 
-  await writeFile(modelsPath, JSON.stringify(modelsFileFor(app.model, pi.providers), null, 2), "utf8");
+  // Managed channels own the entire endpoint definition. Environment overrides must not silently
+  // replace it, nor may an identically named pi provider supply credentials to it.
+  const definition = owned ? { ...app.model, api: undefined, baseUrl: undefined, headers: undefined,
+    contextWindow: undefined, maxTokens: undefined, reasoning: undefined } : app.model;
+  const imported = { ...pi.providers, ...providerBlocks(managed?.providers ?? {}) };
+  await writeFile(modelsPath, JSON.stringify(modelsFileFor(definition, imported), null, 2), { encoding: "utf8", mode: 0o600 });
 
   const runtime = await ModelRuntime.create({
     authPath,
@@ -152,8 +165,9 @@ export async function createModelHandle(app: AppConfig, consoleKey?: string): Pr
 
   // An explicit key wins over the one from the operator's models.json; neither is written anywhere.
   const channelKey = pi.apiKeys[app.model.provider];
-  const apiKey = consoleKey ?? app.model.apiKey ?? channelKey;
-  const keySource: ModelKeySource = consoleKey
+  const apiKey = owned ? (owned.authMode === "none" ? "local-no-auth" : managed?.key)
+    : consoleKey ?? app.model.apiKey ?? channelKey;
+  const keySource: ModelKeySource = owned ? (apiKey ? "managed" : "none") : consoleKey
     ? "console"
     : app.model.apiKey
       ? "env"
@@ -179,6 +193,9 @@ export async function createModelHandle(app: AppConfig, consoleKey?: string): Pr
     );
   }
 
-  const hasAuth = runtime.getProviderAuthStatus(app.model.provider).configured;
-  return { runtime, model, hasAuth, keySource };
+  const hasAuth = owned ? Boolean(apiKey) : runtime.getProviderAuthStatus(app.model.provider).configured;
+  // Private headers never enter generated JSON or API responses. Prevent credential expressions
+  // from being evaluated by pi: project-owned values are literal and validated on input.
+  const activeModel = owned ? { ...model, headers: { ...model.headers, ...managed?.headers } } : model;
+  return { runtime, model: activeModel, hasAuth, keySource };
 }

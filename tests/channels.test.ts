@@ -90,6 +90,30 @@ test("imports pi channels without copying their credentials", async () => {
   }
 });
 
+test("reads the channel pi starts on so the service can follow it", () => {
+  const { dir, cleanup } = workspace();
+  try {
+    const settingsPath = join(dir, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ defaultProvider: "PackyAPI国产", defaultModel: "deepseek-flash", defaultThinkingLevel: "xhigh" }),
+    );
+    assert.deepEqual(readPiConfig(undefined, settingsPath).defaults, {
+      provider: "PackyAPI国产",
+      modelId: "deepseek-flash",
+      thinkingLevel: "xhigh",
+    });
+    // A settings.json without those keys, or a broken one, must not invent a default.
+    writeFileSync(join(dir, "plain.json"), JSON.stringify({ theme: "light" }));
+    assert.deepEqual(readPiConfig(undefined, join(dir, "plain.json")).defaults, {});
+    writeFileSync(join(dir, "broken.json"), "{ not json");
+    assert.deepEqual(readPiConfig(undefined, join(dir, "broken.json")).defaults, {});
+    assert.deepEqual(readPiConfig(undefined, undefined).defaults, {});
+  } finally {
+    cleanup();
+  }
+});
+
 test("matches enabledModels globs the way pi does", () => {
   const globs = ["deepseek/*", "moonshotai-cn/kimi-k3", "*/*-local"];
   assert.equal(isModelEnabled(globs, "deepseek", "deepseek-flash"), true);

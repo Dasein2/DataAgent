@@ -13,11 +13,13 @@ import type { ConnectionConfig } from "../db/types.js";
 import { DbSession } from "../db/session.js";
 import { AppError, isAppError } from "../errors.js";
 import type { ResultStore } from "../results/store.js";
+import type { ArtifactService } from "../artifacts/service.js";
 import { buildSystemPrompt } from "./prompts.js";
 import { createDatabaseTools, type ToolRuntime } from "./tools.js";
 import { EventBroker, type TaskEvent } from "./events.js";
 import type { ModelHandle } from "./model.js";
 import type { HistoryStore } from "./history.js";
+import { generateSessionTitle, type GeneratedSessionTitle } from "./session-title.js";
 
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "incomplete";
 
@@ -42,6 +44,8 @@ export interface TaskRecord {
   turns: number;
   queries_used: number;
   results: string[];
+  /** Chart artifacts produced by this task, in creation order. */
+  artifacts?: string[];
   /** Last non-empty assistant message; the report a polling client can read without SSE. */
   answer?: string;
 }
@@ -73,6 +77,7 @@ export class AnalysisSession {
     private readonly broker: EventBroker,
     private readonly app: AppConfig,
     private readonly sessionRef: { current?: TaskRecord },
+    private readonly artifacts: ArtifactService,
     private readonly history?: HistoryStore,
   ) {}
 
@@ -91,16 +96,20 @@ export class AnalysisSession {
   private turnBudgetExceeded = false;
   private settledAborted = false;
   private finalMessage?: FinalAssistantMessage;
+  /** Display name of the session, persisted with the snapshot; null until generated or renamed. */
+  private title?: string;
 
   static async create(options: {
     config: ConnectionConfig;
     app: AppConfig;
     results: ResultStore;
+    artifacts: ArtifactService;
     model: ModelHandle;
     broker: EventBroker;
     ownerKey: string;
     history?: HistoryStore;
     sessionId?: string;
+    title?: string;
   }): Promise<AnalysisSession> {
     const { app, config, broker } = options;
     const db = await DbSession.open({ config, app, results: options.results, sessionId: options.sessionId });
@@ -127,6 +136,7 @@ export class AnalysisSession {
       const toolRuntime: ToolRuntime = {
         db,
         budgets: app.budgets,
+        artifacts: options.artifacts,
         currentTaskId: () => sessionRef.current?.id,
         taskStatus: () => (sessionRef.current ? { ...sessionRef.current } : { status: "idle" }),
         cancelActive: () => db.cancel(),
@@ -150,10 +160,21 @@ export class AnalysisSession {
       throw error;
     }
 
-    const analysis = new AnalysisSession(db.id, options.ownerKey, db, session, broker, app, sessionRef, options.history);
+    const analysis = new AnalysisSession(
+      db.id,
+      options.ownerKey,
+      db,
+      session,
+      broker,
+      app,
+      sessionRef,
+      options.artifacts,
+      options.history,
+    );
     if (options.sessionId) {
       for (const task of options.history?.listTasks(db.id, options.ownerKey) ?? []) analysis.tasks.set(task.id, task);
     }
+    analysis.title = options.title;
     analysis.agent.subscribe((event) => {
       analysis.mapEvent(event);
     });
@@ -182,6 +203,7 @@ export class AnalysisSession {
   snapshot() {
     return {
       ...this.db.snapshot(),
+      title: this.title ?? null,
       tasks: [...this.tasks.values()].slice(-20).map((task) => ({
         id: task.id,
         status: task.status,
@@ -197,6 +219,19 @@ export class AnalysisSession {
         context_usage: safeContextUsage(this.agent),
       },
     };
+  }
+
+  /** Names the session from its live transcript with the session's own model and persists it. */
+  async generateTitle(): Promise<GeneratedSessionTitle> {
+    if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+    const result = await generateSessionTitle(this.agent.agent);
+    this.setTitle(result.title);
+    return result;
+  }
+
+  setTitle(title: string): void {
+    this.title = title;
+    this.history?.saveSession(this.ownerKey, this.snapshot());
   }
 
   getTask(taskId: string): TaskRecord {
@@ -227,6 +262,7 @@ export class AnalysisSession {
       turns: 0,
       queries_used: 0,
       results: [],
+      artifacts: [],
     };
     this.tasks.set(record.id, record);
     this.queue.push({ record, maxTurns });
@@ -313,10 +349,14 @@ export class AnalysisSession {
     const usageAfter = this.agent.getSessionStats();
     task.usage = diffUsage(usageBefore, usageAfter);
     task.turns = this.turns;
-    task.finished_at = new Date().toISOString();
     try {
       const results = await this.db.listResults();
       task.results = results.filter((result) => result.taskId === task.id).map((result) => result.id);
+      const entries = await this.artifacts.listBySession(this.id);
+      task.artifacts = [...new Set([
+        ...(task.artifacts ?? []),
+        ...entries.filter((entry) => entry.task_id === task.id).map((entry) => entry.id),
+      ])];
     } catch {
       task.results = [];
     }
@@ -357,6 +397,9 @@ export class AnalysisSession {
     }
 
     task.queries_used = Math.max(0, this.db.snapshot().queries.used - queriesBefore);
+    // Stamped last: `finished_at` is what a polling client watches, so it must not be visible while
+    // status is still "running".
+    task.finished_at = new Date().toISOString();
     this.finishTask(task, Date.now() - startedAt);
   }
 
@@ -377,6 +420,7 @@ export class AnalysisSession {
       turns: task.turns,
       usage: task.usage,
       results: task.results,
+      artifacts: task.artifacts ?? [],
     });
   }
 
@@ -444,7 +488,9 @@ export class AnalysisSession {
     switch (event.type) {
       case "turn_start": {
         this.turns += 1;
-        if (this.turns > this.maxTurns && !this.abortRequested && !this.timedOut) {
+        // The notice is published once per task; a pending turn after the budget is spent must not
+        // repeat it (turn_end and this branch can both fire for the same overrun).
+        if (this.turns > this.maxTurns && !this.turnBudgetExceeded && !this.abortRequested && !this.timedOut) {
           this.turnBudgetExceeded = true;
           this.broker.publish(task.id, "notice", { code: "TURN_BUDGET_EXCEEDED", max_turns: this.maxTurns });
           void this.agent.abort();
@@ -454,7 +500,7 @@ export class AnalysisSession {
       }
       case "turn_end": {
         const needsMore = this.finalMessage?.hasTools || this.finalMessage?.stopReason === "toolUse";
-        if (this.turns >= this.maxTurns && needsMore && !this.abortRequested && !this.timedOut) {
+        if (this.turns >= this.maxTurns && needsMore && !this.turnBudgetExceeded && !this.abortRequested && !this.timedOut) {
           this.turnBudgetExceeded = true;
           this.broker.publish(task.id, "notice", { code: "TURN_BUDGET_EXCEEDED", max_turns: this.maxTurns });
           void this.agent.abort();
@@ -481,6 +527,11 @@ export class AnalysisSession {
       case "tool_execution_end": {
         const result = event.result as { content?: Array<{ type?: string; text?: string }>; details?: unknown } | undefined;
         const output = result?.content?.find((part) => part.type === "text")?.text;
+        const chartId = (result?.details as { chart_id?: unknown } | undefined)?.chart_id;
+        if (event.toolName === "chart_create" && !event.isError && typeof chartId === "string") {
+          task.artifacts = [...new Set([...(task.artifacts ?? []), chartId])];
+          this.saveTask(task);
+        }
         this.broker.publish(task.id, "tool_finished", {
           call_id: event.toolCallId,
           tool: event.toolName,

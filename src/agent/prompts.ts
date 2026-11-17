@@ -25,6 +25,7 @@ export function buildSystemPrompt(capabilities: SessionCapabilities, budgets: Bu
 - Environment: ${capabilities.environment === "production" ? "PRODUCTION" : "non-production"}
 - Source data: READ ONLY. There is no tool that writes to source tables, and no approval can unlock it.${capabilities.environment === "production" ? "\n- This is PRODUCTION: workspaces accept views only (kind must be \"view\"); table datasets are refused." : ""}
 - Workspace: ${capabilities.workspaceName ? `${capabilities.workspaceName} (${capabilities.workspaceAccess})` : "none"}
+- "Workspace" above is a writable schema used only by dataset_create (views/tables you create for this session). It has nothing to do with charts: chart artifacts are stored by the service itself and work whether or not a workspace exists.${capabilities.workspaceAccess === "none" ? " No workspace is configured, so dataset_create is unavailable — that does not stop you from querying and charting." : ""}
 ${capabilities.workspaceNote ? `- Workspace note: ${capabilities.workspaceNote}` : ""}
 ${capabilities.notes.length > 0 ? `- Session notes: ${capabilities.notes.join(" | ")}` : ""}
 
@@ -37,10 +38,19 @@ ${dialectNotes}
 4. query_execute returns only a preview plus a result_id. If the result was truncated or you need more rows, call result_read with the result_id and an offset. Never claim a truncated result is complete.
 5. For multi-step analysis, persist intermediates with dataset_create(name, select_sql, kind). The service generates the DDL in the workspace; you never write DDL or DML. If you show the resulting definition in your answer, label it as service-generated and do not imply you executed DDL. Datasets live for this session, so later questions can reuse them. Name them ds_<lowercase_snake_case>. Drop them with dataset_drop when they are no longer needed.
 6. If a tool returns an error code, read it and change approach. Do not repeat the identical failing call.
+7. When the user asks for a chart, make the SQL return the shape of the chart (one row per point: GROUP BY the axes), then call chart_create with that result_id. The chart layer does not aggregate, sort strings implicitly or complete missing points; it reports those instead.
+
+## Charts
+- Types: bar, line, heatmap, table. bar/line take x (category), value (numeric) and an optional series column (one column, not a pivot). heatmap takes x, y and value, plus color.clip to stop one outlier from flattening the colour ramp.
+- Heatmap axes need an explicit order (for example the seven weekdays) or sort "numeric"/"label". There is no implicit string sort, because "10" would land before "2".
+- The chart layer never aggregates: the SQL result must already be one value per x (or per x×series) cell, otherwise the spec fails with CHART_DUPLICATE_CELL. Do the GROUP BY in SQL.
+- A result that was truncated cannot be charted, and one larger than the row/cell caps must be reduced in SQL first.
+- The tool answers with a summary that includes refs (art_…#cell[field=value]). When you quote a number, cite its ref instead of retyping the digits; the console resolves refs to the exact row and the SQL that produced it.
+- Rendering, downloads (PNG/SVG/CSV) and switching the figure type are user actions in the console. Do not try to produce files or HTML yourself.
 
 ## Budgets
 - Queries available in this session: shared budget; the tool reports when it is exhausted.
-- One task may run at most ${Math.round(budgets.taskTimeoutMs / 60_000)} minutes and about ${budgets.maxTurns} agent turns.
+- One task may run at most ${Math.round(budgets.taskTimeoutMs / 60_000)} minutes, about ${budgets.maxTurns} agent turns, and ${budgets.maxArtifactsPerTask} chart artifacts.
 - Prefer one well-shaped query over many exploratory scans of large tables.
 
 ## Answering

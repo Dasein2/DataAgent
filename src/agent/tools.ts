@@ -1,6 +1,8 @@
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { BudgetConfig } from "../config.js";
+import type { ArtifactService } from "../artifacts/service.js";
+import type { ChartSpec } from "../artifacts/types.js";
 import { AppError, isAppError } from "../errors.js";
 import type { ColumnMeta } from "../db/engines/base.js";
 import { cellText } from "../db/engines/base.js";
@@ -11,6 +13,8 @@ const TOOL_TEXT_BUDGET = 12_000;
 export interface ToolRuntime {
   db: DbSession;
   budgets: BudgetConfig;
+  /** Chart artifacts are stored and compiled by the service, never by the model. */
+  artifacts: ArtifactService;
   currentTaskId(): string | undefined;
   taskStatus(): Record<string, unknown>;
   cancelActive(): Promise<boolean>;
@@ -47,6 +51,15 @@ function clampText(value: string, max = TOOL_TEXT_BUDGET): string {
   const head = Math.floor(max * 0.6);
   const tail = Math.floor(max * 0.3);
   return `${value.slice(0, head)}\n… [${value.length - head - tail} characters omitted] …\n${value.slice(-tail)}`;
+}
+
+export function normalizeChartSpec(spec: ChartSpec): ChartSpec {
+  const seriesField = spec.series?.field?.trim();
+  return {
+    ...spec,
+    y: spec.y?.field?.trim() ? spec.y : undefined,
+    series: seriesField && seriesField !== spec.x?.field ? spec.series : undefined,
+  };
 }
 
 function renderTable(columns: ColumnMeta[], rows: unknown[][], cellChars: number): string {
@@ -478,6 +491,144 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     },
   });
 
+  const axisParams = (role: string, extra: Record<string, unknown> = {}) =>
+    Type.Object(
+      {
+        field: Type.String({ description: `Column name for the ${role} axis` }),
+        sort: Type.Optional(
+          Type.Union([Type.Literal("numeric"), Type.Literal("label")], {
+            description: "How to order the categories. Omit to keep SQL row order.",
+          }),
+        ),
+        order: Type.Optional(
+          Type.Array(Type.Union([Type.String(), Type.Number()]), {
+            description: "Explicit category order, e.g. [\"周一\",…,\"周日\"]",
+            maxItems: 500,
+          }),
+        ),
+        title: Type.Optional(Type.String({ description: "Axis title shown on the chart" })),
+        ...extra,
+      },
+      { additionalProperties: false },
+    );
+
+  const chartCreate = defineTool({
+    name: "chart_create",
+    label: "Create chart artifact",
+    description:
+      "Turn a result_id into an immutable chart artifact that the console renders. The result must already be " +
+      "the shape of the chart (one row per point): this layer never aggregates, never sorts strings implicitly " +
+      "and never invents missing points. Types: bar, line, heatmap (x, y, value), table (all columns).",
+    promptSnippet: "Chart a result as bar | line | heatmap | table and return the artifact id plus refs",
+    promptGuidelines: [
+      "Aggregate in SQL first (GROUP BY the axes). Duplicate points are rejected, not summed.",
+      "heatmap needs an explicit order or sort; there is no implicit string sort.",
+    ],
+    parameters: Type.Object(
+      {
+        result_id: Type.String({ description: "Result id returned by query_execute" }),
+        type: Type.Union([
+          Type.Literal("bar"),
+          Type.Literal("line"),
+          Type.Literal("heatmap"),
+          Type.Literal("table"),
+        ]),
+        title: Type.Optional(Type.String({ description: "Chart title" })),
+        x: Type.Optional(axisParams("x (category)")),
+        y: Type.Optional(axisParams("y (category, heatmap only)")),
+        series: Type.Optional(
+          Type.Object(
+            {
+              field: Type.String({ description: "Column that splits rows into series (long format, not a pivot)" }),
+              title: Type.Optional(Type.String()),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+        value: Type.Optional(
+          Type.Object(
+            {
+              field: Type.String({ description: "Numeric column plotted as the value" }),
+              format: Type.Optional(
+                Type.Union([
+                  Type.Literal("integer"),
+                  Type.Literal("decimal"),
+                  Type.Literal("percent"),
+                  Type.Literal("compact"),
+                ]),
+              ),
+              title: Type.Optional(Type.String()),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+        color: Type.Optional(
+          Type.Object(
+            {
+              scale: Type.Optional(Type.Union([Type.Literal("sequential"), Type.Literal("diverging")])),
+              clip: Type.Optional(
+                Type.Union([Type.Literal("none"), Type.Literal("p95"), Type.Literal("p99")], {
+                  description: "Clamp the colour ramp so one outlier does not flatten it",
+                }),
+              ),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+    executionMode: "sequential",
+    // Writes an artifact file, but is idempotent: the same spec on the same result reuses one artifact.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    execute: async (_id, params) => {
+      try {
+        const spec = normalizeChartSpec({
+          result_id: params.result_id,
+          type: params.type,
+          title: params.title,
+          x: params.x,
+          y: params.y,
+          series: params.series,
+          value: params.value,
+          color: params.color,
+        });
+        const { artifact, reused } = await runtime.artifacts.createChart({
+          sessionId: db.id,
+          taskId: runtime.currentTaskId(),
+          spec,
+        });
+        const summary = artifact.summary!;
+        const warnings = artifact.compiled?.warnings ?? [];
+        const text = clampText(
+          [
+            summary.text,
+            reused ? "note: identical spec on the same result; the existing artifact was reused" : "",
+            warnings.length > 0 ? `warnings:\n- ${warnings.join("\n- ")}` : "",
+            artifact.alternates && artifact.alternates.length > 0
+              ? `alternates: ${artifact.alternates.map((item) => item.type).join(", ")} (the console can switch figure type without another tool call)`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        );
+        return textOutput(text, {
+          chart_id: artifact.id,
+          type: artifact.spec.type,
+          shape: summary.shape,
+          cells: summary.cells,
+          missing: summary.missing,
+          reused,
+          refs: summary.top.map((item) => ({ ref: item.ref, value: item.value })),
+          warnings,
+          alternates: (artifact.alternates ?? []).map((item) => item.type),
+        });
+      } catch (error) {
+        return errorOutput(error);
+      }
+    },
+  });
+
   return [
     sessionInfo,
     catalogSearch,
@@ -488,6 +639,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     jobGet,
     jobCancel,
     resultRead,
+    chartCreate,
     datasetCreate,
     datasetList,
     datasetDrop,
@@ -522,6 +674,7 @@ export interface ToolInfo {
 const METADATA_ONLY_RUNTIME = {
   db: {},
   budgets: {},
+  artifacts: {},
   currentTaskId: () => undefined,
   taskStatus: () => ({}),
   cancelActive: async () => false,

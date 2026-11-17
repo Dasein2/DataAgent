@@ -1,11 +1,13 @@
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import { isModelEnabled, type PiConfigSnapshot } from "./pi-config.js";
+import { THINKING_LEVELS } from "../config.js";
 
 /** Body of `POST /v1/model/select`; the channel must exist, so both fields are plain strings. */
 export const ChannelSelection = z.object({
   provider: z.string().trim().min(1).max(120),
   modelId: z.string().trim().min(1).max(200),
+  thinkingLevel: z.enum(THINKING_LEVELS).optional(),
 });
 export type ChannelSelectionRequest = z.infer<typeof ChannelSelection>;
 
@@ -26,10 +28,10 @@ export interface ChannelInfo {
   id: string;
   name: string;
   /** `pi-models` channels come from the operator's own pi config; `builtin` from pi's catalogue. */
-  source: "pi-models" | "builtin";
+  source: "project" | "pi-models" | "builtin";
   /** A credential resolves for this channel, so switching to it can actually run a task. */
   ready: boolean;
-  key_source: "channel" | "pi-auth" | "none";
+  key_source: "project" | "channel" | "pi-auth" | "none";
   enabled_count: number;
   total_count: number;
   models: ChannelModelInfo[];

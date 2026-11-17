@@ -6,15 +6,20 @@
 <title>Data Agent Console</title>
 <style>
   :root {
-    color-scheme: dark;
-    --bg: #0d1117; --panel: #161b22; --panel-2: #1c2230; --border: #2a3140;
-    --text: #e6edf3; --muted: #8b949e; --accent: #3b82f6; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    color-scheme: light;
+    --bg: #f8f7f4; --panel: #ffffff; --panel-2: #f4f2ee; --border: #e6e3dc;
+    --text: #292a27; --muted: #74756f; --accent: #a65338; --ok: #34765b; --warn: #946619; --err: #b64040;
+    --accent-hover: #8e422b; --accent-soft: #f9eee7; --border-strong: #ccc8bf;
+    --shadow: 0 2px 8px rgba(42, 35, 24, .025), 0 1px 2px rgba(42, 35, 24, .025);
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  /* The 模型配置 / 工具 toggles live in the header; their panels stay at the bottom of the page. */
+  header .tab { padding: 3px 9px 3px 11px; font-size: 11.5px; gap: 6px; }
+  header .tab-tag { font-size: 10px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   header .badge { font: 11px var(--mono); padding: 2px 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
   main { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; padding: 16px; align-items: start; }
   @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
@@ -52,11 +57,46 @@
   .msg.assistant .body code, .msg.assistant .body pre { font-family: var(--mono); font-size: 12.5px; }
   .msg.assistant .body pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 9px; overflow: auto; }
   .tool { font: 12px var(--mono); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; margin: 4px 0; background: var(--bg); }
-  .tool .head { display: flex; gap: 8px; align-items: center; }
-  .tool .name { color: var(--accent); }
-  .tool .meta { color: var(--muted); }
-  .tool pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+  .tool.has-head { padding: 0; overflow: hidden; }
+  /* The header stays readable while collapsed: a one-line preview of the SQL/command is the record. */
+  .tool-head { display: flex; align-items: center; gap: 7px; width: 100%; padding: 6px 9px; margin: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .tool-head:hover { background: var(--panel-2); }
+  .tool-head .chev { flex: none; color: var(--muted); font-size: 10px; line-height: 1; transition: transform .12s ease; }
+  .tool.open .tool-head .chev { transform: rotate(90deg); }
+  .tool-head .name { flex: none; color: var(--accent); }
+  .tool-head .preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .tool-head .meta { flex: none; margin-left: auto; color: var(--muted); }
+  .tool.error .tool-head .meta { color: var(--err); }
+  .tool-body { border-top: 1px solid var(--border); padding: 6px 9px 8px; }
+  .tool-body[hidden] { display: none; }
+  .tool pre { margin: 4px 0; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
   .tool.error { border-color: var(--err); }
+  /* Agent notices and retries are prose, not tools: no card chrome, so they never read as expandable. */
+  .note { margin: 4px 0; padding: 5px 10px; border-left: 2px solid var(--border-strong); border-radius: 0 4px 4px 0; background: var(--panel-2); font: 12px var(--mono); color: var(--muted); }
+  .note .note-code { color: var(--text); }
+  .note.warn { border-left-color: var(--warn); }
+  .note.warn .note-code { color: var(--warn); }
+  .note.error { border-left-color: var(--err); }
+  .note.error .note-code { color: var(--err); }
+  /* Fenced SQL keeps a header bar so the block itself can be folded away. */
+  .code-block { border: 1px solid var(--border); border-radius: 6px; margin: 8px 0; background: var(--bg); overflow: hidden; }
+  .code-head { display: flex; align-items: center; gap: 8px; padding: 3px 4px 3px 9px; border-bottom: 1px solid var(--border); background: var(--panel-2); font: 11px var(--mono); color: var(--muted); }
+  .code-head .code-lang { text-transform: uppercase; letter-spacing: .06em; }
+  .code-head .code-toggle { margin-left: 2px; padding: 1px 8px; background: transparent; font-size: 11px; }
+  .code-block pre { margin: 0; border: 0; border-radius: 0; }
+  .code-block.collapsed .code-head { border-bottom: 0; }
+  .code-block.collapsed pre { display: none; }
+  .chart-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 8px 0; background: var(--panel); }
+  .chart-card .cc-head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+  .chart-card .cc-title { font-weight: 600; font-size: 13px; }
+  .chart-card .cc-meta { font: 11px var(--mono); color: var(--muted); }
+  .chart-card .cc-plot { width: 100%; min-height: 180px; }
+  .chart-card .cc-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .chart-card .cc-actions button { font-size: 11.5px; padding: 4px 9px; }
+  .chart-card .cc-actions button.active { border-color: var(--accent); color: var(--accent); }
+  .chart-card .cc-note { font: 11px var(--mono); color: var(--muted); margin-top: 6px; }
+  .chart-card .cc-table { max-height: 260px; overflow: auto; margin-top: 8px; display: none; }
+  .chart-card.show-table .cc-table { display: block; }
   .pill { font: 11px var(--mono); padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
   .pill.running { color: var(--warn); border-color: var(--warn); }
   .pill.succeeded { color: var(--ok); border-color: var(--ok); }
@@ -77,15 +117,21 @@
   /* Values include urls and absolute paths, which must wrap at a separator instead of overflowing. */
   .kv > span:not(.k) { overflow-wrap: anywhere; }
   .kv .src { font-size: 10.5px; color: var(--accent); white-space: nowrap; margin-left: 4px; }
-  /* Folding system panel: buttons on top, content below, the same button closes it again. */
-  #system { margin: 0 16px 24px; }
-  .tabbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  /* The header buttons drop a full-width panel directly under the sticky header, like a menu. */
+  #system {
+    position: fixed; left: 0; right: 0; top: var(--header-h, 45px); z-index: 4;
+    margin: 0; border-radius: 0; border-left: none; border-right: none; border-top: none;
+    padding: 14px 16px 16px;
+    max-height: calc(100vh - var(--header-h, 45px) - 24px); overflow: auto;
+    box-shadow: 0 16px 32px rgba(42, 35, 24, .10);
+  }
+  #system .tabpanel { padding-top: 0; }
+  #system .side { max-height: 46vh; }
   .tab { display: flex; align-items: center; gap: 7px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 5px 14px; font-size: 12.5px; }
-  .tab[aria-expanded="true"] { border-color: var(--accent); background: rgba(59, 130, 246, .16); }
+  .tab[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
   .tab-tag { font: 10.5px var(--mono); color: var(--muted); padding: 0 5px; border-radius: 999px; border: 1px solid var(--border); }
   .tabpanel { padding-top: 14px; }
-  .tabpanel[hidden] { display: none; }
-  .split { display: grid; grid-template-columns: minmax(200px, 300px) minmax(0, 1fr); gap: 18px; align-items: start; }
+  .tabpanel[hidden] { display: none; }  .split { display: grid; grid-template-columns: minmax(200px, 300px) minmax(0, 1fr); gap: 18px; align-items: start; }
   @media (max-width: 820px) { .split { grid-template-columns: 1fr; } }
   .side { border-right: 1px solid var(--border); padding-right: 14px; max-height: 56vh; overflow: auto; }
   @media (max-width: 820px) { .side { border-right: none; border-bottom: 1px solid var(--border); padding: 0 0 12px; max-height: none; } }
@@ -99,7 +145,7 @@
   .chan-head .dot.ok { background: var(--ok); }
   .chan-row { display: flex; gap: 6px; align-items: center; padding: 3px 6px 3px 14px; border-radius: 5px; cursor: pointer; }
   .chan-row:hover { background: var(--panel-2); }
-  .chan-row.active { background: rgba(59, 130, 246, .16); box-shadow: inset 2px 0 0 var(--accent); }
+  .chan-row.active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
   .chan-row.muted { color: var(--muted); }
   .chan-row .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   .chan-row .tag { font-size: 10px; color: var(--muted); flex: none; }
@@ -112,41 +158,341 @@
   .tool-detail .label { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
   .tool-detail p { margin: 0 0 10px; white-space: pre-wrap; }
   .tool-detail .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+
+  /* Warm ivory workspace, with quiet surfaces and clearly differentiated actions. */
+  body { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", sans-serif; font-size: 13px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  ::selection { background: #edd7c7; color: var(--text); }
+  [hidden] { display: none !important; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+  .icon { width: 17px; height: 17px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+  body > header { min-height: 68px; padding: 12px 24px; gap: 20px; background: rgba(255, 255, 255, .96); backdrop-filter: blur(12px); }
+  .header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; min-width: 0; }
+  .header-actions > button { flex: none; }
+  .header-actions .connection-badge { margin-right: 4px; }
+  .brand { display: flex; align-items: center; gap: 11px; flex: none; }
+  .brand-mark { display: grid; place-items: center; width: 36px; height: 36px; background: var(--text); color: #faf8f2; border-radius: 10px; }
+  .brand-mark .icon { width: 23px; height: 23px; stroke-width: 1.8; }
+  header h1 { font-size: 16px; font-weight: 650; letter-spacing: -.45px; }
+  .brand-subtitle { margin-top: 1px; font-size: 9px; letter-spacing: 1.7px; color: var(--muted); }
+  header .tab { min-height: 36px; padding: 7px 11px; border-radius: 8px; font-size: 12px; gap: 7px; background: var(--panel); }
+  header .tab-tag { max-width: 190px; padding: 1px 6px; font-size: 10px; background: var(--bg); border-color: var(--border); }
+  #btnHealth { min-height: 36px; font-size: 12px; gap: 7px; }
+  .connection-badge { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 320px; min-height: 36px; padding: 7px 11px; border: 1px solid var(--border); border-radius: 7px; background: #faf9f6; color: #65665f; font-size: 11px; }
+  .connection-badge-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .connection-badge::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: #a5a59d; }
+  .connection-badge[data-ready="true"] { background: #f0f7f2; color: var(--ok); border-color: #d4e5d9; }
+  .connection-badge[data-ready="true"]::before { background: var(--ok); }
+  main { grid-template-columns: 320px minmax(0, 1fr); gap: 20px; padding: 20px 24px 24px; }
+  .sidebar { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  section.panel { min-width: 0; padding: 20px; border-radius: 12px; box-shadow: var(--shadow); }
+  section.panel h2 { color: var(--text); margin: 0; font-size: 14px; text-transform: none; letter-spacing: -.2px; font-weight: 600; }
+  .panel-heading { display: flex; align-items: center; gap: 9px; margin-bottom: 18px; }
+  .panel-heading > .icon { color: var(--muted); }
+  .panel-heading .eyebrow { margin-left: auto; font-size: 10px; color: var(--muted); letter-spacing: .5px; }
+  label { font-size: 11.5px; font-weight: 500; color: #64665f; margin: 12px 0 6px; }
+  label.optional span { font-weight: 400; color: var(--muted); font-size: 10.5px; }
+  input, select, textarea { min-width: 0; min-height: 37px; background: #fdfdfc; border-radius: 7px; padding: 8px 10px; font-size: 12px; line-height: 1.5; transition: border-color .15s, box-shadow .15s, background .15s; }
+  input::placeholder, textarea::placeholder { color: #92938b; opacity: 1; }
+  input:hover:not(:disabled), select:hover:not(:disabled), textarea:hover:not(:disabled) { border-color: var(--border-strong); }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(166, 83, 56, .10); }
+  input[type=checkbox] { appearance: auto; min-height: 0; accent-color: var(--accent); width: 13px; height: 13px; flex: none; }
+  select { cursor: pointer; text-overflow: ellipsis; padding-right: 25px; }
+  textarea { font-family: inherit; }
+  input:disabled, select:disabled, textarea:disabled { background: var(--panel-2); color: var(--muted); cursor: not-allowed; }
+  .row, .row-3 { gap: 10px; }
+  .row > *, .row-3 > *, .grid-2 > *, .grid-3 > * { min-width: 0; }
+  .host-row { grid-template-columns: minmax(0, 1fr) 78px; }
+  .profile-controls { display: flex; gap: 6px; align-items: center; }
+  .profile-controls .select-wrap { flex: 1; width: 0; min-width: 0; }
+  .checkbox-label { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 400; margin-top: 10px; }
+  .checkbox-label input { margin: 0; }
+  .ssh-key-file-controls { display: flex; gap: 6px; }
+  .ssh-key-file-controls > button:first-of-type { flex: 1; }
+  .ssh-key-file-controls > button { min-width: 0; }
+  .ssh-key-file-status { font-size: 11px; line-height: 1.6; margin-top: 7px; overflow-wrap: anywhere; color: var(--muted); }
+  .ssh-key-file-status[data-state="ready"] { color: var(--ok); }
+  .ssh-key-file-status[data-state="error"] { color: var(--err); }
+  .ssh-key-paste { border: 0; padding-top: 0; margin-top: 8px; }
+  .ssh-key-paste summary { font-size: 11px; }
+  .ssh-fingerprint-controls { display: flex; gap: 6px; align-items: center; }
+  .ssh-fingerprint-controls > input { flex: 1; width: 0; min-width: 0; font: 11px/1.6 var(--mono); }
+  .ssh-fingerprint-controls > button { white-space: nowrap; }
+  .ssh-trust { margin-top: 10px; padding: 11px 12px; border: 1px solid var(--accent); border-radius: 8px; background: color-mix(in srgb, var(--accent) 5%, #fff); }
+  .ssh-trust[hidden] { display: none; }
+  .ssh-trust-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+  .ssh-trust-head .icon { width: 15px; height: 15px; stroke: var(--accent); }
+  .ssh-trust p { margin: 6px 0 8px; }
+  .ssh-trust .kv { font-size: 11px; }
+  .ssh-trust .kv .mono { font-family: var(--mono); overflow-wrap: anywhere; }
+  .ssh-trust-warning { margin-top: 9px; padding: 8px 9px; border: 1px solid #d9534f; border-radius: 6px; background: #fdf3f2; font-size: 11px; }
+  .ssh-trust-warning[hidden] { display: none; }
+  .ssh-trust-warning strong { color: #a3261f; }
+  .ssh-trust-warning p { margin: 4px 0 0; }
+  .ssh-trust .buttons { margin-top: 10px; display: flex; gap: 6px; }
+  .ssh-trust .buttons button { flex: 1; }
+  #sshKey { font: 11px/1.6 var(--mono); }
+  .field-divider { border-top: 1px solid var(--border); margin-top: 15px; padding-top: 2px; }
+  button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; background: #fff; border-color: #dcd9d1; border-radius: 7px; padding: 7px 12px; font-size: 12px; line-height: 1.5; font-weight: 500; box-shadow: 0 1px 2px rgba(40, 36, 28, .035); transition: background .15s, border-color .15s, box-shadow .15s, transform .15s; }
+  button:hover:not(:disabled) { background: #f8f7f4; border-color: #bdb8ad; box-shadow: 0 2px 4px rgba(40, 36, 28, .06); }
+  button:active:not(:disabled) { transform: translateY(1px); box-shadow: none; background: #eeece7; }
+  button:focus-visible, summary:focus-visible, .chan-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 550; box-shadow: 0 1px 2px rgba(105, 44, 24, .12), inset 0 1px 0 rgba(255, 255, 255, .10); }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: 0 3px 7px rgba(105, 44, 24, .16); }
+  button.primary:active:not(:disabled) { background: #7c3924; }
+  button.ghost { background: transparent; box-shadow: none; }
+  button:disabled { opacity: 1; color: #92938b; background: #f5f4f1; border-color: #e9e6df; box-shadow: none; }
+  button.primary:disabled { background: #e7ded4; color: #7a6a5a; border-color: #e1d7cb; }
+  button.icon-button { width: 35px; padding: 7px; flex: none; }
+  button.danger:hover:not(:disabled) { color: var(--err); background: #fdf2f1; border-color: #e7c5c2; }
+  .connection-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 18px; }
+  .buttons { gap: 8px; }
+  details { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+  summary { display: flex; align-items: center; gap: 7px; list-style: none; color: #666861; font-size: 11.5px; font-weight: 500; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "+"; margin-left: auto; font-size: 16px; font-weight: 400; color: #8d8d84; line-height: 1; }
+  details[open] > summary::after { content: "−"; }
+  details.storage-note { border: 0; padding: 0; margin-top: 7px; }
+  details.storage-note summary { font-size: 10.5px; color: var(--muted); font-weight: 400; }
+  details.storage-note summary::after { margin-left: 0; font-size: 12px; }
+  .hint { font-size: 11px; line-height: 1.7; }
+  .status { font: 10.5px/1.7 var(--mono); padding: 10px 11px; border-radius: 7px; background: var(--bg); margin-top: 12px; }
+  .status.ok { background: #f0f7f2; }
+  .status.err { background: #fff1ef; }
+  #weakReadOnlyWrap { background: #faf5e9; border: 1px solid #eee1bf; border-radius: 7px; padding: 0 10px 10px; margin-top: 12px; }
+  #weakReadOnlyWrap .hint { color: #837044; font-size: 10.5px; }
+  .session-panel .panel-heading { margin-bottom: 13px; }
+  .session-panel .buttons { margin-top: 14px; }
+  .kv { grid-template-columns: 90px minmax(0, 1fr); font-size: 11px; gap: 7px 9px; }
+  #chat { height: calc(100dvh - var(--header-h, 68px) - 44px); min-height: 480px; position: sticky; top: calc(var(--header-h, 68px) + 20px); padding: 0; overflow: hidden; }
+  .chat-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 24px 14px; flex: none; }
+  .chat-heading .panel-heading { margin: 0; min-width: 0; flex: 1; }
+  .chat-title { display: flex; align-items: center; flex: none; }
+  .chat-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #btnTitle { min-height: 30px; padding: 4px 10px; font-size: 11px; white-space: nowrap; }
+  #btnTitle[data-state="success"] { color: var(--ok); border-color: #d4e5d9; }
+  #btnTitle[data-state="error"] { color: var(--err); }
+  .history-toolbar { display: flex; flex: none; gap: 7px; align-items: center; padding: 0 24px 14px; border-bottom: 1px solid #efede7; }
+  .history-toolbar > .icon { color: #92938b; width: 15px; }
+  .history-toolbar .select-wrap { max-width: 560px; flex: 1; width: 0; min-width: 0; }
+  .history-toolbar button.select-trigger { min-height: 32px; padding: 5px 9px; font-size: 11px; background: var(--bg); }
+  .history-toolbar .icon-button { width: 32px; padding: 5px; }
+  .history-toolbar button { min-height: 32px; padding: 5px 9px; font-size: 11px; white-space: nowrap; flex: none; }
+  #messages { display: flex; flex-direction: column; min-height: 0; max-height: none; padding: 24px; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #d8d4cb transparent; }
+  #messages > * { flex-shrink: 0; }
+  #messages:has(.empty-state) { padding-top: 12px; padding-bottom: 12px; }
+  .empty-state { display: flex; flex: 1 0 auto !important; flex-direction: column; justify-content: center; width: min(100%, 660px); align-self: center; text-align: center; padding: 25px 0; }
+  .empty-mark { width: 52px; height: 52px; display: grid; place-items: center; color: var(--accent); background: #f5eee5; border: 1px solid #eee2d4; border-radius: 15px; margin: 0 auto 21px; }
+  .empty-mark .icon { width: 27px; height: 27px; stroke-width: 1.5; }
+  .empty-eyebrow { font-size: 9px; letter-spacing: 2.3px; font-weight: 500; color: #99958a; margin-bottom: 10px; }
+  .empty-state h3 { font-family: Georgia, "Noto Serif SC", "Songti SC", SimSun, serif; font-size: 30px; line-height: 1.45; font-weight: 400; letter-spacing: 1px; margin: 0 0 12px; }
+  .empty-description { color: var(--muted); line-height: 1.9; font-size: 12px; margin: 0; }
+  .prompt-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 30px; }
+  .prompt-card { flex-direction: column; align-items: flex-start; text-align: left; padding: 15px; gap: 6px; background: #fdfcf9; border-color: #e9e5dd; border-radius: 9px; box-shadow: none; position: relative; }
+  .prompt-card > .icon { margin-bottom: 5px; color: #8e7c68; width: 19px; height: 19px; }
+  .prompt-card strong { font-size: 12px; font-weight: 550; }
+  .prompt-card span { font-size: 10.5px; color: var(--muted); font-weight: 400; }
+  .prompt-card::after { content: "↗"; position: absolute; top: 13px; right: 13px; color: #aaa397; font-size: 14px; }
+  .prompt-card:hover:not(:disabled) { border-color: #c6a48b; background: #fcf8f2; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(70, 48, 25, .05); }
+  .empty-footnote { margin: 18px 0 0; font-size: 10.5px; color: var(--muted); }
+  #composer { margin: 0; padding: 14px 20px 18px; background: #fdfcf9; border-top: 1px solid var(--border); flex: none; }
+  #taskbar { font-size: 10px; gap: 9px; margin-bottom: 10px; min-width: 0; flex-wrap: wrap; }
+  #taskId { overflow-wrap: anywhere; }
+  .taskbar-label { margin-right: auto; font-family: inherit; color: #7d7c73; font-size: 10.5px; }
+  .prompt-editor { background: #fff; border: 1px solid #dedad0; border-radius: 9px; overflow: hidden; box-shadow: 0 2px 4px rgba(30, 25, 15, .025); transition: border-color .15s, box-shadow .15s; }
+  .prompt-editor:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(166, 83, 56, .08); }
+  #goal { display: block; min-height: 75px; max-height: 220px; padding: 13px 14px 8px; border: 0; background: transparent; box-shadow: none; outline: 0; resize: vertical; font-size: 12px; }
+  .composer-actions { display: flex; align-items: center; gap: 7px; padding: 8px 10px 10px; }
+  .composer-hint { font-size: 10px; color: #7c7b73; margin-right: auto; }
+  .composer-actions button { min-height: 30px; font-size: 11px; padding: 5px 9px; }
+  .composer-actions #btnSend { padding: 6px 12px; min-height: 32px; }
+  .pill { font-size: 10px; padding: 2px 7px; border-radius: 5px; background: var(--panel-2); }
+  .pill.running, .pill.incomplete { background: #fcf5e7; border-color: #e6d4a6; }
+  .pill.succeeded { background: #eff7f0; border-color: #cee2d2; }
+  .pill.failed, .pill.cancelled { background: #fff1ef; border-color: #ebceca; }
+  .msg { margin-bottom: 22px; min-width: 0; overflow-wrap: anywhere; }
+  .msg .who { font-size: 10px; letter-spacing: .05em; margin-bottom: 7px; }
+  .msg.user .body { background: #f5f2ec; border-color: #e9e4da; padding: 12px 14px; border-radius: 9px; }
+  .msg.assistant .body { font-size: 13px; line-height: 1.85; overflow-x: auto; }
+  .msg.assistant .body pre { background: #f7f6f2; padding: 13px; }
+  .msg.assistant .body code { font-size: 11.5px; background: #f3f0e9; border-radius: 3px; padding: 1px 3px; }
+  .msg.assistant .body pre code { padding: 0; background: none; }
+  .tool { background: #faf9f6; border-radius: 8px; padding: 10px 12px; font-size: 11px; }
+  .chart-card { border-radius: 10px; padding: 16px; box-shadow: var(--shadow); margin: 12px 0; }
+  .chart-card .cc-head { flex-wrap: wrap; gap: 4px 12px; margin-bottom: 12px; }
+  .chart-card .cc-meta { font-size: 10px; overflow-wrap: anywhere; }
+  .chart-card .cc-actions { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+  .chart-card .cc-actions button { min-height: 30px; border-radius: 6px; font-size: 11px; }
+  .chart-card .cc-actions button.active { background: var(--accent-soft); border-color: #d7b19b; }
+  .chart-card .cc-note { font-size: 10px; line-height: 1.65; }
+  #drawer { box-shadow: -16px 0 56px rgba(38, 32, 21, .12); visibility: hidden; }
+  #drawer.open { visibility: visible; }
+  #drawer header { padding: 20px; min-height: 72px; }
+  #drawer .content { padding: 24px; }
+  #drawer .content > button { margin: 16px 0; }
+  table { font-size: 11px; }
+  th, td { padding: 9px 10px; }
+  th { color: #616259; background: #f7f6f2; font-weight: 500; }
+  tbody tr:hover { background: #faf9f5; }
+  #system { left: auto; right: 20px; width: min(1120px, calc(100% - 40px)); padding: 24px; border: 1px solid var(--border); border-radius: 12px; margin-top: 8px; z-index: 10; }
+  #system .side { max-height: 60vh; }
+  #system .kv { grid-template-columns: 130px minmax(0, 1fr); margin-bottom: 14px; }
+  .side-head { letter-spacing: .03em; font-size: 11px; }
+  .chan-row { padding-top: 7px; padding-bottom: 7px; border-radius: 6px; }
+  .chan-more { min-height: 27px; box-shadow: none; }
+  @media (min-width: 1700px) { main { grid-template-columns: 340px minmax(0, 1fr); gap: 24px; } #messages { padding-inline: 40px; } }
+  @media (max-width: 1200px) { header .tab-tag { max-width: 120px; } .connection-badge { max-width: 250px; } }
+  @media (max-width: 1100px) { .composer-hint { display: none; } .composer-actions #btnSend { margin-left: auto; } .prompt-card { padding: 12px; } }
+  @media (min-width: 681px) and (max-width: 1000px) {
+    body > header { flex-wrap: nowrap; gap: 12px; }
+    .header-actions { flex-wrap: wrap; row-gap: 6px; }
+    .header-actions .connection-badge { min-height: 28px; padding-block: 3px; max-width: 100%; margin-left: auto; margin-right: 0; }
+    .header-actions > button { min-height: 30px; padding-block: 4px; }
+    .header-actions .connection-badge { flex-basis: 100%; justify-content: flex-end; border: 0; background: transparent; }
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 286px minmax(0, 1fr); gap: 16px; padding-inline: 20px; } body > header { padding-inline: 20px; } section.panel { padding: 16px; } .chat-heading { padding: 16px; } .history-toolbar { padding: 0 16px 14px; flex-wrap: wrap; } .history-toolbar > .icon { display: none; } .history-toolbar .select-wrap { max-width: none; flex-basis: 100%; width: 100%; } #messages { padding: 18px; } .prompt-grid { grid-template-columns: 1fr; gap: 7px; margin-top: 22px; } .prompt-card { display: grid; grid-template-columns: 20px 1fr; column-gap: 9px; padding: 10px 12px; } .prompt-card > .icon { grid-row: span 2; margin: 0; } .prompt-card span { grid-column: 2; } .empty-state h3 { font-size: 25px; } #composer { padding: 12px; } }
+  @media (max-width: 680px) {
+    body > header { gap: 8px; padding: 12px 16px; }
+    .brand { width: 100%; }
+    .brand-subtitle { font-size: 8px; }
+    .header-actions { width: 100%; flex-wrap: wrap; gap: 6px; }
+    .header-actions .connection-badge { flex: 1 1 100%; max-width: 100%; min-height: 28px; padding: 3px 0; margin: 0; border: 0; background: transparent; }
+    header .tab { flex: 1; min-width: 0; font-size: 11px; white-space: nowrap; }
+    header #tabTools { flex: 0 0 86px; padding-inline: 8px; }
+    header .tab-tag { min-width: 0; max-width: 125px; }
+    #btnHealth { position: absolute; right: 16px; top: 14px; min-height: 34px; width: 34px; padding: 7px; font-size: 0; gap: 0; }
+    main { grid-template-columns: 1fr; padding: 16px; gap: 16px; }
+    .sidebar { gap: 12px; }
+    section.panel { padding: 18px; }
+    #chat { position: static; height: max(640px, calc(100dvh - var(--header-h, 140px) - 32px)); min-height: 0; }
+    .empty-state { padding: 24px 0; }
+    .empty-description { font-size: 11.5px; }
+    .prompt-grid { grid-template-columns: 1fr; }
+    .empty-footnote { font-size: 10px; }
+    .history-toolbar { flex-wrap: wrap; }
+    .history-toolbar .select-wrap { flex-basis: 100%; width: 100%; }
+    .history-toolbar #btnHistoryDelete { margin-left: auto; }
+    #system { right: 10px; width: calc(100% - 20px); padding: 18px; }
+    #system .kv { grid-template-columns: 100px minmax(0, 1fr); }
+    #system .side { max-height: 32vh; }
+    .split { grid-template-columns: 1fr; }
+    .row-3 { grid-template-columns: 1.2fr .65fr 1fr; }
+  }
+  /* Custom select: the native <select> stays in the DOM as the source of truth (hidden), while a
+     styled trigger plus an animated listbox render the popup in the console's own design language. */
+  .select-wrap { position: relative; min-width: 0; }
+  .select-wrap > select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+  button.select-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 37px; padding: 8px 10px; background: #fdfdfc; border: 1px solid var(--border); border-radius: 7px; font-size: 12px; font-weight: 400; text-align: left; box-shadow: none; }
+  button.select-trigger:hover:not(:disabled):not([aria-expanded="true"]) { background: #fdfdfc; border-color: var(--border-strong); box-shadow: none; }
+  button.select-trigger:active:not(:disabled) { transform: none; background: #fdfdfc; }
+  button.select-trigger:focus-visible, button.select-trigger[aria-expanded="true"] { outline: none; border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(166, 83, 56, .10); }
+  button.select-trigger:disabled { color: #92938b; background: var(--panel-2); cursor: not-allowed; }
+  .select-trigger .select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .select-trigger .chev { width: 13px; height: 13px; color: var(--muted); transition: transform .18s ease; }
+  .select-trigger[aria-expanded="true"] .chev { transform: rotate(180deg); }
+  .select-menu { position: fixed; z-index: 40; min-width: 150px; max-width: min(440px, calc(100vw - 24px)); padding: 5px; background: #fff; border: 1px solid var(--border); border-radius: 9px; box-shadow: 0 14px 38px rgba(42, 35, 24, .14), 0 3px 10px rgba(42, 35, 24, .08); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; opacity: 0; transform: translateY(-5px) scale(.97); transform-origin: top center; transition: opacity .15s ease, transform .17s cubic-bezier(.2, .8, .3, 1.08); }
+  .select-menu.up { transform-origin: bottom center; transform: translateY(5px) scale(.97); }
+  .select-menu.open { opacity: 1; transform: translateY(0) scale(1); }
+  .select-option { display: flex; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 6px; font-size: 12px; line-height: 1.45; color: var(--text); cursor: pointer; }
+  .select-menu.open .select-option { animation: selectItemIn .2s ease both; animation-delay: calc(var(--i) * 14ms); }
+  @keyframes selectItemIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+  .select-option.active { background: var(--panel-2); }
+  .select-option.selected { background: var(--accent-soft); color: var(--accent); font-weight: 550; }
+  .select-option .check { width: 13px; height: 13px; opacity: 0; }
+  .select-option.selected .check { opacity: 1; }
+  .select-option .opt-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+  /* Project-owned model workspace. Constrained panel geometry also works on small servers/laptops. */
+  #system { width: min(1180px, calc(100vw - 40px)); max-width: calc(100vw - 40px); box-sizing: border-box; max-height: calc(100dvh - var(--header-h, 72px) - 24px); overflow: auto; }
+  #panelModel, #modelManager, .mm-layout, .mm-layout > *, #mmEditor { min-width: 0; }
+  .mm-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+  .mm-eyebrow { font-size: 9px; letter-spacing: 1.8px; color: var(--accent); margin-bottom: 4px; }
+  .mm-heading h2 { font-size: 20px !important; }
+  .mm-heading p { margin: 5px 0 0; font-size: 12px; color: var(--muted); }
+  .mm-active { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; padding: 12px 14px; border: 1px solid #e6ddce; background: #faf7f0; border-radius: 8px; margin-bottom: 20px; font-size: 12px; overflow-wrap: anywhere; }
+  .mm-active > .hint { margin-left: auto; }
+  .mm-active > .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); flex: none; }
+  .mm-active > .dot.ok { background: var(--ok); }
+  .mm-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .mm-sidebar { position: sticky; top: 0; }
+  #mmList { max-height: 42vh; overflow-y: auto; margin-top: 10px; }
+  .mm-channel { display: flex; align-items: stretch; flex-direction: column; text-align: left; width: 100%; margin: 6px 0; padding: 12px; gap: 5px; background: var(--bg); border: 1px solid transparent; box-shadow: none; }
+  .mm-channel.active { border-color: #d5ab94; background: var(--accent-soft); }
+  .mm-channel-top { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  .mm-channel-top b { min-width: 0; overflow-wrap: anywhere; }
+  .mm-default { font-size: 10px; color: var(--accent); }
+  .mm-editor-head, .mm-models-heading, .mm-model-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .mm-editor-head h3, .mm-models-heading h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  #mmFields { border: 0; margin: 0; padding: 0; min-width: 0; }
+  #mmEditor label { display: block; }
+  #mmEditor label > input, #mmEditor label > textarea, #mmEditor label > .select-wrap { margin-top: 5px; }
+  #mmEditor .checkbox-label { display: flex; }
+  #mmEditor .checkbox-label > input { margin-top: 0; }
+  .mm-checks { align-self: center; }
+  .mm-security { padding: 9px 12px; margin-top: 10px; background: #faf7f0; border-radius: 6px; }
+  .mm-models-heading { margin: 22px 0 10px; flex-wrap: wrap; }
+  .mm-model { border: 1px solid var(--border); border-radius: 9px; padding: 13px 15px; margin-bottom: 10px; background: #fcfcfa; }
+  .mm-model-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  .mm-model-top button { min-height: 25px; padding: 2px 7px; font-size: 10px; }
+  .mm-model details { padding-top: 8px; margin-top: 9px; }
+  #mmEditor textarea { font-family: var(--mono); font-size: 11px; resize: vertical; }
+  .mm-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+  .mm-test { display: grid; grid-template-columns: minmax(150px, 1fr) 120px auto auto; align-items: end; gap: 8px; border-top: 1px solid var(--border); padding-top: 5px; margin-bottom: 10px; }
+  .mm-test label { margin-bottom: 0; }
+  .mm-test button { margin-bottom: 0; }
+  .mm-empty { padding: 30px 10px; text-align: center; color: var(--muted); }
+  .mm-discovery-list { max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+  .mm-import { display: flex; width: 100%; justify-content: start; margin-top: 6px; }
+  #mmStatus { margin-top: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #legacyModel { margin-top: 18px; }
+  #legacyModel .split { margin-top: 14px; }
+  @media (max-width: 900px) { .mm-layout { grid-template-columns: 190px minmax(0, 1fr); gap: 16px; } .mm-test { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 650px) { #system { right: 8px; width: calc(100% - 16px); max-width: calc(100% - 16px); padding: 16px; } .mm-layout { grid-template-columns: 1fr; } .mm-sidebar { position: static; } #mmList { max-height: 160px; } .mm-heading { align-items: start; } .mm-heading p { max-width: 210px; } .mm-active > .hint { margin-left: 0; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>Data Agent Console</h1>
-  <span class="badge" id="modelBadge">model: —</span>
-  <span class="badge" id="connBadge">no session</span>
-  <span style="flex:1"></span>
-  <button class="ghost" id="btnHealth">check service</button>
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 16v-5m7 5V5m7 11V8M4 20h16" /></svg></span>
+    <div><h1>Data Agent <span style="font-weight:400;color:var(--muted)">Console</span></h1><div class="brand-subtitle">A LITTLE CLARITY IN EVERY QUERY</div></div>
+  </div>
+  <span class="sr-only" id="modelBadge">model: —</span>
+  <div class="header-actions">
+  <span class="connection-badge" id="connBadge" data-ready="false" role="status"><span class="connection-badge-text" id="connBadgeText">未连接</span></span>
+  <button class="tab" id="tabModel" data-panel="panelModel" aria-controls="panelModel" aria-expanded="false" title="模型渠道与当前生效设置">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6m8 4v6" /></svg>
+    模型配置<span class="tab-tag" id="modelTabTag">—</span>
+  </button>
+  <button class="tab" id="tabTools" data-panel="panelTools" aria-controls="panelTools" aria-expanded="false" title="Agent 可用的工具">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></svg>
+    工具<span class="tab-tag" id="toolCount">—</span>
+  </button>
+  <button class="ghost" id="btnHealth" title="检查服务"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4" /></svg>检查服务</button>
+  </div>
 </header>
 
 <main>
-  <div style="display:flex; flex-direction:column; gap:16px">
-    <section class="panel">
-      <h2>连接</h2>
-      <label>API token</label>
-      <input id="token" type="password" placeholder="DATA_AGENT_API_TOKEN (留空表示服务未启用鉴权)" autocomplete="off" />
-      <label>已保存连接</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <select id="profileSelect" style="flex:1">
+  <div class="sidebar">
+    <section class="panel connection-panel" aria-labelledby="connectionTitle">
+      <div class="panel-heading">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v7c0 4 16 4 16 0V5M4 12v7c0 4 16 4 16 0v-7" /></svg>
+        <h2 id="connectionTitle">数据库连接</h2><span class="eyebrow">DATA SOURCE</span>
+      </div>
+      <label for="profileSelect">已保存连接</label>
+      <div class="profile-controls">
+        <select id="profileSelect">
           <option value="">— 未选择，手动填写 —</option>
         </select>
-        <button class="ghost" id="btnProfileSave" style="white-space:nowrap">保存</button>
-        <button class="ghost" id="btnProfileDelete" style="white-space:nowrap">删除</button>
+        <button class="icon-button" id="btnProfileSave" title="保存连接" aria-label="保存连接"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" /><path d="M7 3v6h9V3M7 21v-8h10v8" /></svg></button>
+        <button class="icon-button ghost danger" id="btnProfileDelete" title="删除连接" aria-label="删除连接"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></svg></button>
       </div>
-      <label style="display:flex;align-items:center;gap:6px;margin-top:8px">
-        <input id="profileRememberPassword" type="checkbox" style="width:auto;margin:0" />
+      <label class="checkbox-label">
+        <input id="profileRememberPassword" type="checkbox" />
         连同密码一起保存
       </label>
-      <div class="hint">
-        连接配置保存在服务端，清除浏览器数据后仍可读取。密码 / SSH 私钥仅在服务端配置加密密钥并勾选保存时加密存储。
-      </div>
-      <div class="row">
+      <details class="storage-note"><summary>连接与凭据如何保存</summary><div class="hint">连接配置保存在服务端，清除浏览器数据后仍可读取。密码 / SSH 私钥仅在服务端配置加密密钥并勾选保存时加密存储。</div></details>
+      <div class="row field-divider">
         <div>
-          <label>引擎</label>
+          <label for="engine">引擎</label>
           <select id="engine">
             <option value="postgres" data-port="5432" data-proof="transaction">PostgreSQL</option>
             <option value="mysql" data-port="3306" data-proof="transaction">MySQL</option>
@@ -155,35 +501,39 @@
           </select>
         </div>
         <div>
-          <label>环境</label>
+          <label for="environment">环境</label>
           <select id="environment">
-            <option value="production">production（只允许建视图）</option>
-            <option value="non_production">non_production（可建表）</option>
+            <option value="production" title="生产环境，只允许创建视图">生产 · 仅视图</option>
+            <option value="non_production">非生产 · 可建表</option>
           </select>
         </div>
       </div>
-      <div class="row-3">
-        <div><label>主机</label><input id="host" placeholder="127.0.0.1" /></div>
-        <div><label>端口</label><input id="port" value="5432" /></div>
-        <div><label>库名</label><input id="database" placeholder="app" /></div>
+      <div class="row host-row">
+        <div><label for="host">主机</label><input id="host" placeholder="127.0.0.1" /></div>
+        <div><label for="port">端口</label><input id="port" value="5432" inputmode="numeric" /></div>
       </div>
+      <label for="database">数据库名称</label><input id="database" placeholder="app" />
       <div class="row">
-        <div><label>只读账号</label><input id="user" placeholder="ro_analyst" autocomplete="off" /></div>
-        <div><label>密码</label><input id="password" type="password" autocomplete="new-password" /></div>
+        <div><label for="user">只读账号</label><input id="user" placeholder="ro_analyst" autocomplete="off" /></div>
+        <div><label for="password">密码</label><input id="password" type="password" autocomplete="new-password" /></div>
       </div>
-      <label>工作区（可选，已预建）</label>
+      <label class="optional" for="workspace">分析工作区 <span>可选，需预先创建</span></label>
       <input id="workspace" placeholder="analysis_ws" />
       <div id="weakReadOnlyWrap" style="display:none">
-        <label style="display:flex;align-items:center;gap:6px;margin-top:10px">
-          <input id="allowWeakReadOnly" type="checkbox" style="width:auto;margin:0" />
-          接受弱只读（allowWeakReadOnly）
+        <label class="checkbox-label">
+          <input id="allowWeakReadOnly" type="checkbox" />
+          接受弱只读模式
         </label>
         <div class="hint">
           <span id="weakReadOnlyEngines">此引擎</span>没有只读事务，只能靠 `SHOW GRANTS` 证明账号只读。
           勾选后不再要求该证明，仅由 SQL guard 拦截写入；仅在信任该账号且可接受风险时使用。
         </div>
       </div>
-      <label>TLS</label>
+      <details class="advanced-options" id="advancedConnection">
+      <summary><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6m8 4v6" /></svg>高级连接设置</summary>
+      <label for="token">API token <span>（可选）</span></label>
+      <input id="token" type="password" placeholder="服务启用鉴权时填写" autocomplete="off" />
+      <label for="sslMode">TLS 加密</label>
       <select id="sslMode">
         <option value="">不使用</option>
         <option value="require">require</option>
@@ -191,81 +541,145 @@
         <option value="verify-full">verify-full</option>
       </select>
       <div id="sslExtra" style="display:none">
-        <label>CA 证书 PEM</label>
+        <label for="sslCa">CA 证书 PEM</label>
         <textarea id="sslCa" rows="3" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
-        <label>证书校验名（默认=主机名）</label>
+        <label for="sslServerName">证书校验名（默认=主机名）</label>
         <input id="sslServerName" />
       </div>
 
-      <details>
+      <details id="sshOptions">
         <summary>SSH 跳板机</summary>
         <div class="row-3">
-          <div><label>跳板机</label><input id="sshHost" placeholder="bastion.example.com" /></div>
-          <div><label>端口</label><input id="sshPort" value="22" /></div>
-          <div><label>用户</label><input id="sshUser" /></div>
+          <div><label for="sshHost">跳板机</label><input id="sshHost" placeholder="bastion.example.com" /></div>
+          <div><label for="sshPort">端口</label><input id="sshPort" value="22" inputmode="numeric" /></div>
+          <div><label for="sshUser">用户</label><input id="sshUser" /></div>
         </div>
-        <label>认证方式</label>
+        <label for="sshAuth">认证方式</label>
         <select id="sshAuth">
           <option value="password">密码</option>
           <option value="privateKey">私钥</option>
         </select>
-        <div id="sshPasswordWrap"><label>SSH 密码</label><input id="sshPassword" type="password" autocomplete="new-password" /></div>
+        <div id="sshPasswordWrap"><label for="sshPassword">SSH 密码</label><input id="sshPassword" type="password" autocomplete="new-password" /></div>
         <div id="sshKeyWrap" style="display:none">
-          <label>私钥 PEM</label><textarea id="sshKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-          <label>私钥口令（可选）</label><input id="sshPassphrase" type="password" autocomplete="new-password" />
+          <label for="sshKeyFile">私钥文件</label>
+          <div class="ssh-key-file-controls">
+            <input id="sshKeyFile" type="file" hidden aria-describedby="sshKeyFileStatus sshKeyFileHint" />
+            <button type="button" id="btnSshKeyFile"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v2M3 7h18l-3 12H3Z" /></svg>选择密钥文件…</button>
+            <button type="button" class="ghost" id="btnSshKeyClear" disabled>清除</button>
+          </div>
+          <div class="ssh-key-file-status" id="sshKeyFileStatus" role="status" aria-live="polite">未选择密钥文件</div>
+          <div class="hint" id="sshKeyFileHint">支持 OpenSSH / PEM 私钥（如 id_ed25519、id_rsa、.pem），不支持 .pub 公钥。文件在本地读取，测试、连接或保存时才提交；仅勾选保存凭据时加密存储。</div>
+          <details class="ssh-key-paste" id="sshKeyPaste">
+            <summary>或粘贴私钥内容</summary>
+            <label for="sshKey" class="sr-only">私钥内容（OpenSSH / PEM）</label>
+            <textarea id="sshKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off" spellcheck="false"></textarea>
+          </details>
+          <label for="sshPassphrase">私钥口令（可选）</label><input id="sshPassphrase" type="password" placeholder="仅在私钥已加密时填写" autocomplete="new-password" />
         </div>
-        <label>主机密钥指纹（SHA256，生产必填）</label>
-        <input id="sshFingerprint" placeholder="SHA256:..." />
+        <label for="sshFingerprint">主机密钥指纹（SHA256）</label>
+        <div class="ssh-fingerprint-controls">
+          <input id="sshFingerprint" placeholder="留空即可，首次连接时自动获取" autocomplete="off" spellcheck="false" />
+          <button type="button" class="ghost" id="btnSshFingerprint">获取指纹</button>
+        </div>
+        <div class="ssh-key-file-status" id="sshFingerprintStatus" role="status" aria-live="polite">未确认：连接前会先读出服务器指纹，确认后自动填入</div>
+        <div class="hint" id="sshFingerprintHint">确认一次后长期固定；服务器换了主机密钥才会拒绝连接——重建或换机后点「获取指纹」重新确认。</div>
+        <div class="ssh-trust" id="sshTrust" hidden role="group" aria-labelledby="sshTrustTitle">
+          <div class="ssh-trust-head">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.4 8.3 8 9 4.6-.7 8-4 8-9V6Z" /><path d="m9 12 2 2 4-4" /></svg>
+            <strong id="sshTrustTitle">首次连接这台跳板机</strong>
+          </div>
+          <p class="hint">与运维核对指纹一致后再确认。确认后会写入连接配置，之后每次连接都严格校验。</p>
+          <div class="kv">
+            <span class="k">跳板机</span><span id="sshTrustHost">—</span>
+            <span class="k">算法</span><span id="sshTrustAlgorithm">—</span>
+            <span class="k">指纹</span><span class="mono" id="sshTrustFingerprint">—</span>
+          </div>
+          <div class="ssh-trust-warning" id="sshTrustWarning" hidden role="alert">
+            <strong>与已保存的指纹不一致</strong>
+            <div class="kv">
+              <span class="k">已保存</span><span class="mono" id="sshTrustStored">—</span>
+            </div>
+            <p class="hint">只有在你刚重建或更换了这台跳板机时才应该继续；否则请取消，并检查是否有人在冒充它。</p>
+          </div>
+          <div class="buttons">
+            <button type="button" class="primary" id="btnSshTrust">信任并继续</button>
+            <button type="button" class="ghost" id="btnSshTrustCancel">取消</button>
+          </div>
+        </div>
+      </details>
       </details>
 
-      <div class="buttons">
+      <div class="connection-actions">
         <button id="btnTest">测试连接</button>
-        <button class="primary" id="btnSession">建立会话</button>
-        <button class="ghost" id="btnClose" disabled>关闭会话</button>
+        <button class="primary" id="btnSession">建立会话<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg></button>
       </div>
-      <div id="connStatus" class="status info">尚未连接</div>
+      <div id="connStatus" class="status info" role="status">填写连接信息后，建立分析会话。</div>
     </section>
 
-    <section class="panel">
-      <h2>会话</h2>
-      <div id="sessionInfo" class="kv"><span class="k">—</span><span></span></div>
-      <div class="buttons"><button class="ghost" id="btnRefresh" disabled>刷新</button></div>
+    <section class="panel session-panel" aria-labelledby="sessionTitle">
+      <div class="panel-heading"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" /><path d="m8 10 3 2-3 2m6 1h3" /></svg><h2 id="sessionTitle">会话详情</h2></div>
+      <div id="sessionInfo" class="kv"><span class="k">当前状态</span><span>等待建立连接</span></div>
+      <div class="buttons"><button class="ghost" id="btnRefresh" disabled>刷新状态</button><button class="ghost danger" id="btnClose" disabled>关闭会话</button></div>
     </section>
 
-    <!-- 模型配置与工具面板搬到页面底部，用顶部按钮展开 / 收起 -->
   </div>
 
   <section class="panel" id="chat">
-    <h2>分析对话</h2>
+    <div class="chat-heading">
+      <div class="panel-heading"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z" /></svg><h2 class="chat-title-text" id="chatTitle" data-empty="true">分析对话</h2></div>
+      <div class="chat-title">
+        <button class="ghost" id="btnTitle" title="根据当前对话生成会话标题" disabled>生成标题</button>
+      </div>
+    </div>
+    <div class="history-toolbar">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.8 7M3 4v7h7m2-4v5l3 2" /></svg>
+      <label for="historySelect" class="sr-only">历史会话</label>
+      <select id="historySelect"><option value="">历史会话</option></select><button class="ghost" id="btnHistory">读取历史</button><button class="ghost" id="btnReconnect">恢复分析</button><button class="ghost danger icon-button" id="btnHistoryDelete" title="删除所选历史会话" aria-label="删除历史会话" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></svg></button>
+    </div>
     <div id="messages">
-      <div class="msg assistant"><div class="body" style="color:var(--muted)">建立会话后，用自然语言描述分析目标。Agent 会自行探索 catalog、写 SQL、取数，并可以创建分析视图。</div></div>
+      <div class="empty-state" id="welcome">
+        <div class="empty-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M4 19V9m8 10V4m8 15v-7M2 22h20" /><path d="m16 5 2-3 2 3m-2-3v6" /></svg></div>
+        <div class="empty-eyebrow">YOUR DATA, IN FOCUS</div>
+        <h3>从一个好问题开始</h3>
+        <p class="empty-description">用自然语言描述你想了解的业务。<br />Agent 会探索数据、编写 SQL，将结果整理成清晰的分析与图表。</p>
+        <div class="prompt-grid">
+          <button class="prompt-card" data-prompt="帮我了解当前数据库：梳理核心业务表、表之间的关系和可用于分析的关键指标。">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><path d="M14 17.5h7m-3.5-3.5v7" /></svg>
+            <strong>了解数据全貌</strong><span>梳理业务表与关键指标</span>
+          </button>
+          <button class="prompt-card" data-prompt="按月分析最近一年的核心业务指标，展示变化趋势，对比同期表现，并总结主要增长点。">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18 9 12l4 4 8-11m-6 0h6v6" /></svg>
+            <strong>分析变化趋势</strong><span>追踪表现，发现增长机会</span>
+          </button>
+          <button class="prompt-card" data-prompt="检查最近三个月的业务数据，找出关键指标的异常波动，结合相关维度分析可能原因，并生成图表。">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4" /></svg>
+            <strong>发现异常信号</strong><span>定位波动，寻找背后原因</span>
+          </button>
+        </div>
+        <p class="empty-footnote">连接左侧数据库，或读取历史会话，继续你的探索。</p>
+      </div>
     </div>
     <div id="composer">
-      <div id="taskbar"><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span></div>
-      <div class="buttons"><select id="historySelect"><option value="">历史会话</option></select><button id="btnHistory">读取历史</button><button id="btnReconnect">恢复分析</button></div>
-      <textarea id="goal" rows="3" placeholder="例如：按月统计 2025 年订单 GMV，对比 2024 同期，并指出退款率异常月份"></textarea>
-      <div class="buttons">
-        <button class="primary" id="btnSend" disabled>发送任务</button>
-        <button id="btnCancel" disabled>取消</button>
-        <button id="btnSteer" disabled>插入指令</button>
+      <div id="taskbar"><span class="taskbar-label">分析任务</span><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span></div>
+      <div class="prompt-editor">
+        <label for="goal" class="sr-only">分析目标</label>
+        <textarea id="goal" rows="3" placeholder="你想从数据中了解什么？例如：分析最近一年的月度 GMV，找出增长与异常。"></textarea>
+        <div class="composer-actions">
+          <span class="composer-hint">Ctrl / ⌘ + Enter 发送</span>
+          <button class="ghost" id="btnCancel" disabled>取消</button>
+          <button class="ghost" id="btnSteer" disabled>插入指令</button>
+          <button class="primary" id="btnSend" disabled>发送任务<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-5 5 5-5 5 5" /></svg></button>
+        </div>
       </div>
     </div>
   </section>
 </main>
 
-<section class="panel" id="system">
-  <div class="tabbar">
-    <button class="tab" id="tabModel" data-panel="panelModel" aria-expanded="false">
-      模型配置<span class="tab-tag" id="modelTabTag">—</span>
-    </button>
-    <button class="tab" id="tabTools" data-panel="panelTools" aria-expanded="false">
-      工具<span class="tab-tag" id="toolCount">—</span>
-    </button>
-    <span style="flex:1"></span>
-    <span class="hint" style="margin:0">点击按钮展开，再次点击收起</span>
-  </div>
-
+<!-- Opened from the header buttons; hidden entirely while neither panel is open. -->
+<section class="panel" id="system" hidden>
   <div class="tabpanel" id="panelModel" hidden>
+    <div id="modelManager"></div>
+    <details id="legacyModel"><summary>当前运行配置与兼容设置（.env / pi）</summary>
     <div class="split">
       <div class="side">
         <div class="side-head">渠道<span class="pill" id="channelSummary">—</span></div>
@@ -275,23 +689,23 @@
       <div>
         <div id="modelSummary" class="kv"><span class="k">—</span><span></span></div>
         <div class="grid-3">
-          <div><label>provider</label><input id="mProvider" autocomplete="off" /></div>
-          <div><label>model id</label><input id="mModelId" autocomplete="off" /></div>
-          <div><label>thinking</label><select id="mThinking"></select></div>
+          <div><label for="mProvider">provider</label><input id="mProvider" autocomplete="off" /></div>
+          <div><label for="mModelId">model id</label><input id="mModelId" autocomplete="off" /></div>
+          <div><label for="mThinking">thinking</label><select id="mThinking"></select></div>
         </div>
         <div class="grid-2">
           <div>
-            <label>api 协议（决定请求走哪套 wire protocol）</label>
+            <label for="mApi">api 协议（决定请求走哪套 wire protocol）</label>
             <select id="mApi"></select>
             <div class="hint" id="mApiHint"></div>
           </div>
           <div>
-            <label>base url（留空 = 用 provider 内置地址）</label>
+            <label for="mBaseUrl">base url（留空 = 用 provider 内置地址）</label>
             <input id="mBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off" />
             <div class="grid-3">
-              <div><label>context window</label><input id="mContext" type="number" min="1024" step="1024" /></div>
-              <div><label>max tokens</label><input id="mMaxTokens" type="number" min="64" step="64" /></div>
-              <div><label title="模型是否接受 reasoning 参数；关闭后 pi 不会发送思考配置">reasoning</label>
+              <div><label for="mContext">context window</label><input id="mContext" type="number" min="1024" step="1024" /></div>
+              <div><label for="mMaxTokens">max tokens</label><input id="mMaxTokens" type="number" min="64" step="64" /></div>
+              <div><label for="mReasoning" title="模型是否接受 reasoning 参数；关闭后 pi 不会发送思考配置">reasoning</label>
                 <select id="mReasoning">
                   <option value="auto">跟随 thinking</option>
                   <option value="on">开启</option>
@@ -302,8 +716,8 @@
           </div>
         </div>
         <div class="grid-2">
-          <div><label title="由模型元数据决定，本服务只发送文本">输入模态</label><input id="mInput" disabled /></div>
-          <div><label title="按 provider 保存，换渠道不会带过去">API key（保存在服务端，留空表示不修改）</label><input id="mApiKey" type="password" autocomplete="new-password" /></div>
+          <div><label for="mInput" title="由模型元数据决定，本服务只发送文本">输入模态</label><input id="mInput" disabled /></div>
+          <div><label for="mApiKey" title="按 provider 保存，换渠道不会带过去">API key（保存在服务端，留空表示不修改）</label><input id="mApiKey" type="password" autocomplete="new-password" /></div>
         </div>
         <div class="hint" id="mApiKeyHint"></div>
         <div class="buttons">
@@ -312,10 +726,11 @@
           <button class="ghost" id="btnModelReset">恢复为 .env</button>
           <button class="ghost" id="btnModelTest">测试模型</button>
         </div>
-        <div class="hint">保存写到服务端的 <code>data/model-settings.json</code>，<b>不会修改 .env</b>；只提交你改过的字段，其余继续跟随 .env 与 pi 的模型目录。API key 单独存在 <code>data/model-key.json</code>，按 provider 归属，换渠道不会带过去；点「恢复为 .env」会把覆盖和保存的 key 一起清掉。仅影响<b>新建</b>的会话。</div>
+        <div class="hint">保存写到服务端的 <code>data/model-settings.json</code>，<b>不会修改 .env</b>；只提交你改过的字段，其余继续跟随 .env 与 pi 的模型目录。API key 单独存在 <code>data/model-key.json</code>，按 provider 归属，换渠道不会带过去；点「恢复为 .env」会清除兼容覆盖和旧式 key，保留项目渠道及其凭证。仅影响<b>新建</b>的会话。</div>
         <div id="modelStatus" class="status info">未读取</div>
       </div>
     </div>
+    </details>
   </div>
 
   <div class="tabpanel" id="panelTools" hidden>
@@ -349,6 +764,10 @@ const state = {
   profiles: [],
   selectedProfile: null,
   sessionReady: false,
+  title: null,
+  session: null,
+  // Whether the session already holds a conversation worth naming; gates the title action.
+  hasConversation: false,
   model: null,
   channels: null,
   tools: [],
@@ -358,6 +777,16 @@ const state = {
   lastSegmentText: "",
 };
 $("token").value = state.token;
+if (state.token) $("advancedConnection").open = true;
+
+// Example questions only prepare a draft; submitting still requires an established session.
+document.querySelectorAll("[data-prompt]").forEach((button) => {
+  button.addEventListener("click", () => {
+    $("goal").value = button.dataset.prompt;
+    $("goal").focus();
+  });
+});
+
 void initProfiles();
 void loadHistory();
 void loadModel();
@@ -441,6 +870,9 @@ function connectionPayload() {
   }
   const sshHost = $("sshHost").value.trim();
   if (sshHost) {
+    if ($("sshAuth").value === "privateKey" && sshKeyFileReading) {
+      throw new Error("私钥文件正在读取，请稍候再连接或保存");
+    }
     const hop = {
       host: sshHost,
       port: Number($("sshPort").value || 22),
@@ -545,14 +977,22 @@ function applyProfile(profile) {
   $("sshPort").value = hop && hop.port ? hop.port : 22;
   $("sshUser").value = hop ? hop.username || "" : "";
   $("sshFingerprint").value = hop && hop.hostFingerprint ? hop.hostFingerprint : "";
+  $("sshFingerprint").dataset.host = hop ? hop.host || "" : "";
+  setSshFingerprintStatus($("sshFingerprint").value ? "已固定指纹（来自档案）" : "未确认：连接前会先读出服务器指纹", "info");
   const auth = (hop && hop.auth) || null;
   const method = auth && auth.method === "privateKey" ? "privateKey" : "password";
   $("sshAuth").value = method;
   $("sshPassword").value = (auth && auth.password) || "";
+  $("sshKeyPaste").open = false;
   $("sshKey").value = (auth && auth.privateKey) || "";
+  resetSshKeyFileSelection();
+  if ($("sshKey").value) setSshKeyFileStatus("已载入私钥内容", "ready");
+  else if (method === "privateKey" && profile.hasSecret) setSshKeyFileStatus("使用服务端已保存的私钥；选择文件可替换", "idle");
   $("sshPassphrase").value = (auth && auth.passphrase) || "";
   $("sshKeyWrap").style.display = method === "privateKey" ? "block" : "none";
   $("sshPasswordWrap").style.display = method === "privateKey" ? "none" : "block";
+  $("sshOptions").open = Boolean(hop);
+  $("advancedConnection").open = Boolean(state.token || ssl.mode || hop);
 }
 
 function missingSecrets(profile) {
@@ -638,9 +1078,220 @@ $("profileSelect").addEventListener("change", () => {
   );
 });
 
+// Private-key file import is entirely browser-local. The existing connection/profile actions
+// send the text only when explicitly requested; no file path or key goes into browser storage.
+const SSH_KEY_FILE_MAX_BYTES = 64 * 1024;
+let sshKeyFileReadVersion = 0;
+let sshKeyFileReading = false;
+
+function setSshKeyFileStatus(text, status) {
+  $("sshKeyFileStatus").textContent = text;
+  $("sshKeyFileStatus").dataset.state = status;
+  $("btnSshKeyClear").disabled = !$("sshKey").value && !sshKeyFileReading;
+}
+
+function resetSshKeyFileSelection() {
+  sshKeyFileReadVersion++;
+  sshKeyFileReading = false;
+  $("sshKeyFile").value = "";
+  setSshKeyFileStatus("未选择密钥文件", "idle");
+}
+
+function normalizeSshPrivateKey(text) {
+  const key = text.replace(/^\uFEFF/, "").trim();
+  if (/^PuTTY-User-Key-File-/i.test(key)) {
+    throw new Error("暂不支持 PuTTY .ppk 文件，请先用 PuTTYgen 转换为 OpenSSH 私钥");
+  }
+  if (!/^-----BEGIN ((?:OPENSSH |RSA |EC |DSA |ENCRYPTED )?PRIVATE KEY)-----\r?\n[\s\S]+\r?\n-----END \1-----$/.test(key)) {
+    throw new Error("请选择 OpenSSH / PEM 私钥文件，不是 .pub 公钥或其他文件");
+  }
+  return key + "\n";
+}
+
+async function importSshKeyFile(file) {
+  if (!file) return; // Cancelling the picker keeps the previously loaded key.
+  const version = ++sshKeyFileReadVersion;
+  sshKeyFileReading = true;
+  setSshKeyFileStatus("正在读取密钥文件…", "idle");
+  try {
+    if (file.size === 0) throw new Error("密钥文件为空，请重新选择");
+    if (file.size > SSH_KEY_FILE_MAX_BYTES) throw new Error("密钥文件不能超过 64 KB");
+    let text;
+    try { text = await file.text(); }
+    catch { throw new Error("无法读取密钥文件，请重新选择"); }
+    if (version !== sshKeyFileReadVersion) return;
+    const key = normalizeSshPrivateKey(text);
+    $("sshKey").value = key;
+    $("sshKeyPaste").open = false;
+    setSshKeyFileStatus("已载入：" + file.name, "ready");
+  } catch (error) {
+    if (version !== sshKeyFileReadVersion) return;
+    // Preserve any working key if a replacement is invalid. Never echo its contents in errors.
+    setSshKeyFileStatus(error.message + ($("sshKey").value ? "；仍保留原私钥" : ""), "error");
+  } finally {
+    if (version === sshKeyFileReadVersion) {
+      sshKeyFileReading = false;
+      $("sshKeyFile").value = ""; // Allow selecting the same file again.
+      $("btnSshKeyClear").disabled = !$("sshKey").value;
+    }
+  }
+}
+
+$("btnSshKeyFile").onclick = () => $("sshKeyFile").click();
+$("sshKeyFile").addEventListener("change", () => { void importSshKeyFile($("sshKeyFile").files?.[0]); });
+$("btnSshKeyClear").onclick = () => {
+  $("sshKey").value = "";
+  $("sshPassphrase").value = "";
+  resetSshKeyFileSelection();
+};
+$("sshKey").addEventListener("input", () => {
+  resetSshKeyFileSelection();
+  if ($("sshKey").value) setSshKeyFileStatus("已填写私钥内容", "ready");
+});
+
 $("sslMode").addEventListener("change", () => {
   $("sslExtra").style.display = $("sslMode").value ? "block" : "none";
 });
+// ── host key confirmation ───────────────────────────────────────────────────
+// A jump host is never trusted silently. When its key is not pinned yet the server reads it, the
+// console shows it, and only an explicit confirmation writes it down. Once pinned, every connection
+// verifies it and a changed key is refused instead of being re-confirmed.
+let sshTrustResolver = null;
+
+function setSshFingerprintStatus(text, status) {
+  $("sshFingerprintStatus").textContent = text;
+  $("sshFingerprintStatus").dataset.state = status;
+}
+
+function askHostKeyTrust(hop, options = {}) {
+  $("sshTrustHost").textContent = hop.host + ":" + hop.port;
+  $("sshTrustAlgorithm").textContent = hop.algorithm;
+  $("sshTrustFingerprint").textContent = hop.fingerprint;
+  // Only shown on an explicit re-read: the server stopped presenting the key we pinned.
+  $("sshTrustWarning").hidden = !options.previous;
+  $("sshTrustStored").textContent = options.previous || "—";
+  $("sshTrust").hidden = false;
+  // The panel sits deep in the connection form: bring it where the click came from.
+  $("sshTrust").scrollIntoView?.({ block: "center", behavior: "smooth" });
+  $("btnSshTrust").focus?.();
+  return new Promise((resolve) => { sshTrustResolver = resolve; });
+}
+
+function closeSshTrust(accepted) {
+  $("sshTrust").hidden = true;
+  $("sshTrustWarning").hidden = true;
+  const resolve = sshTrustResolver;
+  sshTrustResolver = null;
+  if (resolve) resolve(Boolean(accepted));
+}
+
+$("btnSshTrust").onclick = () => closeSshTrust(true);
+$("btnSshTrustCancel").onclick = () => closeSshTrust(false);
+
+// Reads the server's host key. No credential is sent: the key is presented before authentication.
+function readHostKey(body) {
+  return api("/v1/connections/host-key", { method: "POST", body: body || connectionRequest() });
+}
+
+function selectedProfileEntry() {
+  if (!state.selectedProfile) return null;
+  return readProfiles().find((entry) => entry.name === state.selectedProfile) || null;
+}
+
+function pinnedFingerprint() {
+  const typed = $("sshFingerprint").value.trim();
+  if (typed) return typed;
+  const profile = selectedProfileEntry();
+  const hop = (profile && profile.ssh && profile.ssh.hops && profile.ssh.hops[0]) || null;
+  return (hop && hop.hostFingerprint) || "";
+}
+
+/**
+ * Makes sure the jump host's key is pinned before a test or a session, returning false when the
+ * operator declined or the key could not be read, so the caller stops instead of failing later.
+ *
+ * `recheck` ignores the pin already on file and asks the server to present its key again; that is
+ * the only way to re-pin a rebuilt host, since connections themselves stay strict.
+ */
+async function ensureHostFingerprint(options = {}) {
+  const profile = selectedProfileEntry();
+  const hasHop = Boolean($("sshHost").value.trim()) || Boolean(profile && profile.ssh && profile.ssh.hops && profile.ssh.hops.length);
+  if (!hasHop) return true;
+  if (!options.recheck && pinnedFingerprint()) return true;
+  setSshFingerprintStatus(options.recheck ? "正在重新读取服务器主机密钥…" : "正在读取服务器主机密钥…", "info");
+  let probe;
+  try {
+    const body = Object.assign({}, connectionRequest(), options.recheck ? { observe: true } : {});
+    probe = await readHostKey(body);
+  } catch (error) {
+    setSshFingerprintStatus("读取主机密钥失败：" + String(error.message || error), "error");
+    return false;
+  }
+  if (probe.status !== "unverified") {
+    setSshFingerprintStatus(probe.status === "verified" ? "指纹已固定并校验通过" : "未配置 SSH 跳板机", "info");
+    return true;
+  }
+  // Re-reading an unchanged key needs no decision: report it and keep the pin.
+  if (options.recheck && probe.previous && !probe.changed) {
+    $("sshFingerprint").value = probe.hop.fingerprint;
+    $("sshFingerprint").dataset.host = probe.hop.host;
+    setSshFingerprintStatus("指纹未变：" + probe.hop.fingerprint, "ready");
+    return true;
+  }
+  setSshFingerprintStatus((probe.changed ? "与已保存指纹不一致，待确认：" : "待确认：") + probe.hop.fingerprint, probe.changed ? "error" : "info");
+  if (!(await askHostKeyTrust(probe.hop, { previous: probe.changed ? probe.previous : "" }))) {
+    setSshFingerprintStatus(
+      probe.changed ? "已取消：仍使用原指纹，连接会继续拒绝这台服务器" : "已取消：未确认跳板机指纹，未发起连接",
+      "error",
+    );
+    return false;
+  }
+  try {
+    // The server reads the key a second time and only stores it if it still matches.
+    const body = Object.assign({}, connectionRequest(), { pin: probe.hop.fingerprint });
+    const pinned = await readHostKey(body);
+    $("sshFingerprint").value = pinned.hop.fingerprint;
+    $("sshFingerprint").dataset.host = pinned.hop.host;
+    setSshFingerprintStatus(
+      state.selectedProfile
+        ? "已确认并写入档案「" + state.selectedProfile + "」"
+        : "已确认并填入指纹；保存连接可长期记住",
+      "ready",
+    );
+    return true;
+  } catch (error) {
+    setSshFingerprintStatus("固定指纹失败：" + String(error.message || error), "error");
+    return false;
+  }
+}
+
+$("btnSshFingerprint").onclick = async () => {
+  saveToken();
+  if (!$("sshHost").value.trim()) {
+    setSshFingerprintStatus("请先填写跳板机地址", "error");
+    return;
+  }
+  $("btnSshFingerprint").disabled = true;
+  try {
+    // 获取指纹 always re-reads, so a rebuilt jump host can be re-pinned from here.
+    await ensureHostFingerprint({ recheck: true });
+  } finally {
+    $("btnSshFingerprint").disabled = false;
+  }
+};
+$("sshHost").addEventListener("input", () => {
+  // A fingerprint belongs to one host: keep the pair consistent instead of silently mismatching.
+  const host = $("sshHost").value.trim();
+  const paired = $("sshFingerprint").dataset.host || "";
+  if ($("sshFingerprint").value.trim() && paired && paired !== host) {
+    $("sshFingerprint").value = "";
+    delete $("sshFingerprint").dataset.host;
+    setSshFingerprintStatus("跳板机已变更，需要重新确认指纹", "info");
+    return;
+  }
+  setSshFingerprintStatus($("sshFingerprint").value.trim() ? "已固定指纹" : "未确认：连接前会先读出服务器指纹", "info");
+});
+
 $("sshAuth").addEventListener("change", () => {
   const key = $("sshAuth").value === "privateKey";
   $("sshKeyWrap").style.display = key ? "block" : "none";
@@ -666,6 +1317,8 @@ $("btnTest").onclick = async () => {
   $("btnTest").disabled = true;
   setStatus("connStatus", "测试中…", "info");
   try {
+    // An unpinned jump host is confirmed first; declining keeps the test from running at all.
+    if (!(await ensureHostFingerprint())) throw new Error("主机密钥指纹未确认，已停止测试");
     const result = await api("/v1/connections/test", { method: "POST", body: connectionRequest() });
     const caps = result.capabilities || {};
     setStatus("connStatus", [
@@ -687,17 +1340,18 @@ $("btnSession").onclick = async () => {
   $("btnSession").disabled = true;
   setStatus("connStatus", "建立会话…", "info");
   try {
+    if (!(await ensureHostFingerprint())) throw new Error("主机密钥指纹未确认，未建立会话");
     const data = await api("/v1/sessions", { method: "POST", body: connectionRequest() });
     state.streamAbort?.abort();
     state.taskId = null;
     state.sessionId = data.session.session_id;
+    state.hasConversation = false;
     applySession(data.session);
     setStatus("connStatus", "会话已建立 · " + state.sessionId, "ok");
     $("btnSend").disabled = false;
     $("btnCancel").disabled = true;
     $("btnClose").disabled = false;
     $("btnRefresh").disabled = false;
-    $("connBadge").textContent = data.session.engine + " · " + data.session.database;
     void loadHistory();
   } catch (error) {
     setStatus("connStatus", String(error.message || error), "err");
@@ -706,13 +1360,29 @@ $("btnSession").onclick = async () => {
   }
 };
 
+function setConnectionBadge(session) {
+  const badge = $("connBadge");
+  const ready = session?.status === "ready";
+  const labels = { ready: "已连接", unavailable: "连接不可用", disconnected: "已断开", closed: "已关闭", expired: "已过期" };
+  const status = session ? (labels[session.status] || session.status || "未连接") : "未连接";
+  const text = session ? [session.engine, session.database, status].filter(Boolean).join(" · ") : status;
+  badge.dataset.ready = String(ready);
+  badge.title = text;
+  $("connBadgeText").textContent = text;
+}
+
 function applySession(session) {
+  state.session = session;
+  state.title = session.title || null;
   state.sessionReady = session.status === "ready";
-  $("connBadge").textContent = session.engine + " · " + session.database + " · " + session.status;
+  setConnectionBadge(session);
   $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId);
+  setChatTitle(state.title);
+  setTitleButtonSource(titleNamingSessionId === state.sessionId ? "naming" : "idle");
   const caps = session.capabilities || {};
   const rows = [
     ["session", session.session_id],
+    ["title", session.title || "未命名会话"],
     ["status", session.status],
     ["engine", session.engine + "/" + (caps.engineLabel || "—")],
     ["database", session.database],
@@ -736,6 +1406,73 @@ function applySession(session) {
   }
 }
 
+function setChatTitle(title) {
+  state.title = title || null;
+  $("chatTitle").textContent = title || "分析对话";
+  $("chatTitle").dataset.empty = String(!title);
+  $("chatTitle").title = title || "";
+}
+
+function clearTitleState() {
+  state.session = null;
+  setChatTitle(null);
+  clearTimeout(titleFlashTimer);
+  $("btnTitle").dataset.state = "idle";
+  $("btnTitle").textContent = "生成标题";
+  $("btnTitle").disabled = true;
+}
+
+let titleFlashTimer = null;
+let titleNamingSessionId = null;
+function setTitleButtonSource(name) {
+  const button = $("btnTitle");
+  button.dataset.state = name;
+  if (name === "naming") {
+    button.disabled = true;
+    button.textContent = "正在生成…";
+    return;
+  }
+  button.disabled = !state.sessionId || !state.hasConversation;
+  button.title = !state.sessionId ? "先建立或读取会话" : !state.hasConversation ? "请先发送消息，再为会话命名" : "根据当前对话生成会话标题";
+  button.textContent = name === "success" ? "标题已更新" : name === "error" ? "生成失败" : "生成标题";
+  if (name === "success" || name === "error") {
+    clearTimeout(titleFlashTimer);
+    titleFlashTimer = setTimeout(() => {
+      // Only heal a flash nobody replaced: a newer click owns the button state by now.
+      if ($("btnTitle").dataset.state === name) setTitleButtonSource("idle");
+    }, 2500);
+  }
+}
+
+// Titles come from the session's own model: a one-shot, tool-free call over the conversation so far.
+// The result is persisted server-side, so it also names historical sessions that have no live agent.
+$("btnTitle").onclick = async () => {
+  const id = state.sessionId;
+  if (!id) return;
+  if (!state.hasConversation) {
+    setStatus("connStatus", "请先发送消息，再为会话命名", "info");
+    return;
+  }
+  titleNamingSessionId = id;
+  setTitleButtonSource("naming");
+  try {
+    const { title } = await api("/v1/sessions/" + id + "/title", { method: "POST" });
+    // A session switch while the request was in flight must not rename the new session's heading.
+    if (state.sessionId !== id) return;
+    setChatTitle(title);
+    if (state.session) applySession(Object.assign({}, state.session, { title }));
+    setTitleButtonSource("success");
+    setStatus("connStatus", "标题已更新：" + title, "ok");
+    void loadHistory();
+  } catch (error) {
+    if (state.sessionId !== id) return;
+    setTitleButtonSource("error");
+    setStatus("connStatus", String(error.message || error), "err");
+  } finally {
+    if (titleNamingSessionId === id) titleNamingSessionId = null;
+  }
+};
+
 $("btnRefresh").onclick = async () => {
   if (!state.sessionId) return;
   try {
@@ -753,11 +1490,13 @@ $("btnClose").onclick = async () => {
   state.taskId = null;
   state.sessionReady = false;
   state.sessionId = null;
+  state.hasConversation = false;
   $("btnSend").disabled = true;
   $("btnClose").disabled = true;
   $("btnRefresh").disabled = true;
   $("btnCancel").disabled = true;
-  $("connBadge").textContent = "no session";
+  setConnectionBadge(null);
+  clearTitleState();
   try { await api("/v1/sessions/" + id, { method: "DELETE" }); } catch (error) { console.warn(error); }
   setStatus("connStatus", "会话已关闭", "info");
   void loadHistory();
@@ -777,6 +1516,7 @@ function keyStore(view) {
 function keySourceText(view) {
   const protection = keyStore(view).protection === "aes-256-gcm" ? "已加密" : "0600 明文";
   return {
+    managed: "项目独立渠道 · " + protection,
     console: "控制台保存 · " + protection,
     env: "来自 .env",
     channel: "来自 pi models.json（只读导入）",
@@ -798,6 +1538,7 @@ function shortPath(path) {
 }
 
 function addMessage(who) {
+  $("welcome")?.remove();
   const wrap = document.createElement("div");
   wrap.className = "msg " + who;
   wrap.innerHTML = '<div class="who">' + (who === "user" ? "you" : "agent") + '</div><div class="body"></div>';
@@ -807,11 +1548,53 @@ function addMessage(who) {
 }
 
 function renderInline(text) {
-  return escapeHtml(text)
+  const refs = [];
+  const replaced = text.replace(/art_[a-z0-9]{8,32}#(?:cell\[[^\]\s]*\]|row=\d+)/g, (ref) => {
+    refs.push(ref);
+    return "\u0000" + (refs.length - 1) + "\u0000";
+  });
+  return escapeHtml(replaced)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
+    .replace(/\u0000(\d+)\u0000/g, (_, index) => {
+      const ref = refs[Number(index)];
+      if (!ref) return "";
+      return '<button class="ghost" data-value-ref="' + escapeHtml(ref) + '" title="查看数值和来源">' + escapeHtml(ref) + '</button>';
+    });
 }
+
+$("messages").addEventListener("click", async (event) => {
+  const toolHead = event.target.closest(".tool-head");
+  if (toolHead) {
+    const card = toolHead.closest(".tool");
+    setToolOpen(card, !card.classList.contains("open"));
+    return;
+  }
+  const sqlToggle = event.target.closest(".code-toggle");
+  if (sqlToggle) {
+    const block = sqlToggle.closest(".code-block");
+    setSqlOpen(block, block.classList.contains("collapsed"));
+    return;
+  }
+  const button = event.target.closest("[data-value-ref]");
+  if (!button) return;
+  const ref = button.dataset.valueRef;
+  $("drawerTitle").textContent = "数值来源";
+  $("drawerBody").textContent = "加载…";
+  $("drawer").classList.add("open");
+  try {
+    const resolved = await api("/v1/artifacts/" + ref.split("#")[0] + "/ref?ref=" + encodeURIComponent(ref));
+    const info = document.createElement("pre");
+    info.textContent = ref + "\n\n值: " + cellToString(resolved.value) +
+      (resolved.row === null ? "（缺失组合）" : "") + "\n执行时间: " + resolved.source.executed_at +
+      "\n结果: " + resolved.source.result_id + "\n\n" + resolved.source.sql;
+    $("drawerBody").replaceChildren(info);
+    if (resolved.row) $("drawerBody").appendChild(artifactTable({ data: { columns: resolved.columns, rows: [resolved.row] } }));
+  } catch (error) {
+    $("drawerBody").textContent = "引用读取失败: " + error.message;
+  }
+});
 
 /** Minimal but practical markdown: fences, headings, tables, lists, bold/inline code, rules. */
 function renderMarkdown(text) {
@@ -821,11 +1604,47 @@ function renderMarkdown(text) {
   let match;
   while ((match = fence.exec(text))) {
     parts.push(renderBlocks(text.slice(last, match.index)));
-    parts.push("<pre><code>" + escapeHtml(match[2]) + "</code></pre>");
+    parts.push(renderFence(match[1], match[2]));
     last = match.index + match[0].length;
   }
   parts.push(renderBlocks(text.slice(last)));
   return parts.join("");
+}
+
+const SQL_LANGS = new Set(["sql", "mysql", "postgres", "postgresql", "sqlite", "doris", "starrocks", "hive", "spark"]);
+
+/** SQL fences get a header with a fold button; other fences stay as plain pre/code. */
+function renderFence(lang, code) {
+  const tag = String(lang || "").toLowerCase();
+  const isSql = SQL_LANGS.has(tag) || (!tag && /^\s*(select|with|show|describe|desc|explain)\b/i.test(code));
+  if (!isSql) return "<pre><code>" + escapeHtml(code) + "</code></pre>";
+  return '<div class="code-block" data-lang="' + escapeHtml(tag || "sql") + '">' +
+      '<div class="code-head"><span class="code-lang">' + escapeHtml(tag || "sql") + '</span>' +
+      '<button type="button" class="code-toggle" aria-expanded="true">收起</button></div>' +
+      "<pre><code>" + escapeHtml(code) + "</code></pre>" +
+    "</div>";
+}
+
+function setToolOpen(card, open) {
+  if (!card) return;
+  card.classList.toggle("open", open);
+  const head = card.querySelector(".tool-head");
+  const body = card.querySelector(".tool-body");
+  if (head) {
+    head.setAttribute("aria-expanded", String(open));
+    head.title = open ? "收起 SQL 与执行输出" : "展开 SQL 与执行输出";
+  }
+  if (body) body.hidden = !open;
+}
+
+function setSqlOpen(block, open) {
+  if (!block) return;
+  block.classList.toggle("collapsed", !open);
+  const toggle = block.querySelector(".code-toggle");
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.textContent = open ? "收起" : "展开";
+  }
 }
 
 function renderBlocks(source) {
@@ -891,6 +1710,8 @@ $("btnSend").onclick = async () => {
   $("btnCancel").disabled = false;
   try {
     const data = await api("/v1/sessions/" + state.sessionId + "/tasks", { method: "POST", body: { goal } });
+    state.hasConversation = true;
+    setTitleButtonSource(titleNamingSessionId === state.sessionId ? "naming" : "idle");
     state.taskId = data.task.id;
     $("taskId").textContent = data.task.id;
     $("taskPill").className = "pill running";
@@ -951,12 +1772,26 @@ function handleEvent(event) {
       // assistant output (including the final report) renders below the card instead of above it.
       closeSegment();
       const el = document.createElement("div");
-      el.className = "tool";
       el.dataset.call = data.call_id;
       const args = data.args || {};
       const detail = args.sql || args.name || args.search || args.result_id || "";
-      el.innerHTML = '<div class="head"><span class="name">' + escapeHtml(data.tool) + '</span><span class="meta">running…</span></div>' +
-        (detail ? "<pre>" + escapeHtml(String(detail)).slice(0, 1200) + "</pre>" : "");
+      // Collapsed by default: the head keeps the tool name plus a one-line preview, so the chat still
+      // records what ran; the full SQL and its output wait in the body until the user expands them.
+      el.className = "tool has-head";
+      const full = String(detail).replace(/\s+/g, " ");
+      // Ellipsis in the string, not just in CSS: a clipped 180-char slice ends mid-token and reads
+      // like the SQL itself stopped there.
+      const preview = full.length > 180 ? full.slice(0, 180) + "…" : full;
+      el.innerHTML = '<button type="button" class="tool-head" aria-expanded="false">' +
+          '<span class="chev" aria-hidden="true">▸</span>' +
+          '<span class="name">' + escapeHtml(data.tool) + '</span>' +
+          '<span class="preview">' + escapeHtml(preview) + '</span>' +
+          '<span class="meta">running…</span>' +
+        '</button>' +
+        '<div class="tool-body" hidden>' +
+          (detail ? '<pre class="tool-sql">' + escapeHtml(String(detail).slice(0, 1200)) +
+            (String(detail).length > 1200 ? "\n…（已截断，共 " + String(detail).length + " 字符）" : "") + "</pre>" : "") +
+        '</div>';
       body.appendChild(el);
       break;
     }
@@ -966,10 +1801,12 @@ function handleEvent(event) {
         el.classList.toggle("error", Boolean(data.is_error));
         const meta = el.querySelector(".meta");
         if (meta) meta.textContent = (data.is_error ? "error" : "ok") + (data.duration_ms != null ? " · " + data.duration_ms + "ms" : "");
+        const body = el.querySelector(".tool-body") || el;
         if (data.summary) {
           const pre = document.createElement("pre");
+          pre.className = "tool-output";
           pre.textContent = String(data.summary).slice(0, 800);
-          el.appendChild(pre);
+          body.appendChild(pre);
         }
         const resultId = data.details && data.details.result_id;
         if (resultId) {
@@ -978,8 +1815,22 @@ function handleEvent(event) {
           btn.style.marginTop = "6px";
           btn.textContent = "查看结果 " + resultId;
           btn.onclick = () => openResult(resultId);
-          el.appendChild(btn);
+          body.appendChild(btn);
         }
+        const chartId = data.details && data.details.chart_id;
+        if (chartId && !data.is_error) {
+          void renderArtifactInto(body, chartId);
+          // A chart is the answer, not raw output: show it without an extra click.
+          setToolOpen(el, true);
+        } else if (chartId) {
+          // A failed chart is still worth showing: the code tells the user what to fix.
+          const note = document.createElement("div");
+          note.className = "cc-note";
+          note.textContent = "chart " + chartId + " failed";
+          body.appendChild(note);
+        }
+        // A failure has no readable preview in the head, so open it for the user.
+        if (data.is_error) setToolOpen(el, true);
       }
       break;
     }
@@ -994,6 +1845,11 @@ function handleEvent(event) {
         node.innerHTML = renderMarkdown(finalAnswer);
         state.assistantEl.appendChild(node);
       }
+      // Cards normally arrive with tool_finished; this covers a client that attached after the fact.
+      if (Array.isArray(data.artifacts) && data.artifacts.length) {
+        ensureAssistant();
+        for (const artifactId of data.artifacts) void renderArtifactInto(state.assistantEl, artifactId);
+      }
       $("messages").scrollTop = $("messages").scrollHeight;
       const status = data.status || "finished";
       $("taskPill").className = "pill " + status;
@@ -1002,36 +1858,42 @@ function handleEvent(event) {
       $("btnCancel").disabled = true;
       if (data.error) {
         ensureAssistant();
-        const body = state.assistantEl;
-        const note = document.createElement("div");
-        note.className = "tool error";
-        note.textContent = data.error.code + ": " + data.error.message;
-        body.appendChild(note);
+        state.assistantEl.appendChild(statusNote(data.error.code + ": " + data.error.message, "error"));
       }
       $("btnRefresh").click();
       break;
     }
     case "retry": {
       ensureAssistant();
-      const body = state.assistantEl;
-      const note = document.createElement("div");
-      note.className = "tool";
-      note.textContent = "retry #" + data.attempt + ": " + data.error;
-      body.appendChild(note);
+      state.assistantEl.appendChild(statusNote("retry #" + data.attempt + ": " + data.error, "warn"));
       break;
     }
     case "notice": {
       ensureAssistant();
-      const body = state.assistantEl;
-      const note = document.createElement("div");
-      note.className = "tool";
-      note.textContent = data.code + (data.max_turns ? " (max " + data.max_turns + " turns)" : "") + (data.text ? ": " + data.text : "");
-      body.appendChild(note);
+      const code = data.code + (data.max_turns ? " (max " + data.max_turns + " turns)" : "");
+      state.assistantEl.appendChild(statusNote(code + (data.text ? ": " + data.text : ""), "warn"));
       break;
     }
     default:
       break;
   }
+}
+
+/** Agent-level status (notice, retry, task error) as a slim margin note instead of a tool card. */
+function statusNote(text, tone) {
+  const note = document.createElement("div");
+  note.className = "note" + (tone ? " " + tone : "");
+  const code = document.createElement("span");
+  code.className = "note-code";
+  const split = text.indexOf(": ");
+  if (split > 0) {
+    code.textContent = text.slice(0, split);
+    note.append(code, document.createTextNode(": " + text.slice(split + 2)));
+  } else {
+    code.textContent = text;
+    note.appendChild(code);
+  }
+  return note;
 }
 
 /** Turn the in-progress text node into markdown and start a new segment after the next card. */
@@ -1053,6 +1915,232 @@ function ensureAssistant() {
     state.segmentText = "";
   }
   return state.textNode;
+}
+
+/**
+ * Charts are rendered from the artifact's *stored* ECharts option, never from raw numbers in the page.
+ * That is what keeps the picture in the console, the downloaded SVG and any later snapshot identical,
+ * and it means clicking "switch to line" needs no model round trip (the alternate option is stored).
+ */
+const echartsLoader = { promise: null };
+function ensureEcharts() {
+  if (window.echarts) return Promise.resolve(window.echarts);
+  if (echartsLoader.promise) return echartsLoader.promise;
+  echartsLoader.promise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/vendor/echarts.min.js";
+    script.onload = () => resolve(window.echarts);
+    script.onerror = () => {
+      echartsLoader.promise = null;
+      script.remove();
+      reject(new Error("ECharts 加载失败（/vendor/echarts.min.js）"));
+    };
+    document.head.appendChild(script);
+  });
+  return echartsLoader.promise;
+}
+
+async function downloadFile(path, fallbackName) {
+  const headers = {};
+  if (state.token) headers["authorization"] = "Bearer " + state.token;
+  const res = await fetch(path, { headers });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  // The server names the file (it carries the artifact id and title); fall back to our guess.
+  const disposition = res.headers.get("content-disposition") || "";
+  const match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  const name = match ? decodeURIComponent(match[1]) : fallbackName;
+  const blob = await res.blob();
+  saveBlob(blob, name);
+}
+
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function artifactTitle(artifact) {
+  const spec = artifact.spec || {};
+  if (spec.title) return spec.title;
+  const summary = artifact.summary || {};
+  return (summary.type || spec.type || "chart") + " · " + String((spec.result_id || "").slice(0, 12));
+}
+
+async function renderArtifactInto(host, artifactId) {
+  if (host.querySelector('[data-artifact="' + artifactId + '"]')) return;
+  const holder = document.createElement("div");
+  holder.className = "cc-note";
+  holder.dataset.artifact = artifactId;
+  holder.textContent = "加载图表 " + artifactId + "…";
+  host.appendChild(holder);
+  try {
+    const { artifact } = await api("/v1/artifacts/" + artifactId);
+    if (!host.isConnected) return;
+    holder.replaceWith(buildChartCard(artifact));
+  } catch (error) {
+    holder.textContent = "图表加载失败: " + (error.message || String(error));
+  }
+}
+
+function artifactTable(artifact) {
+  const data = artifact.data || { columns: [], rows: [] };
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  thead.innerHTML = "<tr>" + data.columns.map((column) => "<th>" + escapeHtml(column.name) + "</th>").join("") + "</tr>";
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (const row of data.rows || []) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = row.map((cell) => "<td>" + escapeHtml(cellToString(cell)) + "</td>").join("");
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
+function buildChartCard(artifact) {
+  const spec = artifact.spec || {};
+  const summary = artifact.summary || {};
+  const compiled = artifact.compiled || {};
+  const card = document.createElement("div");
+  card.className = "chart-card";
+  card.dataset.artifact = artifact.id;
+
+  const head = document.createElement("div");
+  head.className = "cc-head";
+  const meta = [artifact.id, summary.shape, summary.cells != null ? summary.cells + " points" : null].filter(Boolean).join(" · ");
+  head.innerHTML = '<span class="cc-title">' + escapeHtml(artifactTitle(artifact)) + '</span>' +
+    '<span class="cc-meta">' + escapeHtml(meta) + '</span>';
+  card.appendChild(head);
+
+  const plot = document.createElement("div");
+  plot.className = "cc-plot";
+  card.appendChild(plot);
+
+  const actions = document.createElement("div");
+  actions.className = "cc-actions";
+  card.appendChild(actions);
+
+  const notes = [];
+  if (summary.missing > 0) notes.push(summary.missing + " 个空格未画（缺失不是 0）");
+  if (summary.clip) notes.push("颜色截断 " + summary.clip.kind + " = " + summary.clip.at);
+  for (const warning of compiled.warnings || []) notes.push(warning);
+  if (notes.length) {
+    const note = document.createElement("div");
+    note.className = "cc-note";
+    note.textContent = notes.join(" · ");
+    card.appendChild(note);
+  }
+
+  const csv = document.createElement("button");
+  csv.className = "ghost";
+  csv.textContent = "下载 CSV";
+  csv.onclick = () => downloadFile("/v1/artifacts/" + artifact.id + "/data.csv", artifact.id + ".csv").catch((error) => alert(error.message));
+
+  if (compiled.renderer === "table") {
+    plot.style.display = "none";
+    const wrap = document.createElement("div");
+    wrap.className = "cc-table";
+    wrap.style.display = "block";
+    wrap.appendChild(artifactTable(artifact));
+    card.appendChild(wrap);
+    actions.appendChild(csv);
+    return card;
+  }
+
+  const tableButton = document.createElement("button");
+  tableButton.className = "ghost";
+  tableButton.textContent = "数据";
+  tableButton.onclick = () => {
+    if (!tablePane.firstChild) tablePane.appendChild(artifactTable(artifact));
+    card.classList.toggle("show-table");
+  };
+  const tablePane = document.createElement("div");
+  tablePane.className = "cc-table";
+  card.appendChild(tablePane);
+  actions.appendChild(tableButton);
+  actions.appendChild(csv);
+
+  const option = compiled.option || {};
+  const yCount = option.yAxis && Array.isArray(option.yAxis.data) ? option.yAxis.data.length : 0;
+  plot.style.height = (yCount > 6 ? Math.max(320, Math.min(620, yCount * 26 + 110)) : 300) + "px";
+
+  ensureEcharts().then((echarts) => {
+    if (!card.isConnected) return;
+    let currentOption = option;
+    const chart = echarts.init(plot, null, { renderer: "svg" });
+    chart.setOption(structuredClone(currentOption), true);
+    const resize = new ResizeObserver(() => chart.resize());
+    resize.observe(plot);
+    const removal = new MutationObserver(() => {
+      if (card.isConnected) return;
+      resize.disconnect();
+      removal.disconnect();
+      chart.dispose();
+    });
+    removal.observe($("messages"), { childList: true, subtree: true });
+
+    const svg = document.createElement("button");
+    svg.className = "ghost";
+    svg.textContent = "下载 SVG";
+    svg.onclick = () => {
+      // Vector export, so a printed/reviewed copy stays sharp at any size.
+      const url = chart.getDataURL({ type: "svg", backgroundColor: "#ffffff" });
+      const svgText = decodeURIComponent(url.replace(/^data:image\/svg\+xml;charset=UTF-8,/, ""));
+      saveBlob(new Blob([svgText], { type: "image/svg+xml;charset=utf-8" }), artifact.id + ".svg");
+    };
+    const png = document.createElement("button");
+    png.className = "ghost";
+    png.textContent = "下载 PNG";
+    png.onclick = () => pngFromOption(currentOption, artifact.id, chart.getWidth(), chart.getHeight()).catch((error) => alert(error.message));
+    actions.appendChild(svg);
+    actions.appendChild(png);
+
+    // Stored alternates: switching figure type is a UI action, not another model/tool call.
+    const usable = [{ type: spec.type, option }].concat(artifact.alternates || []);
+    const toggle = document.createElement("span");
+    toggle.style.display = "contents";
+    for (const alternate of usable) {
+      const button = document.createElement("button");
+      button.className = "ghost" + (alternate.type === spec.type ? " active" : "");
+      button.textContent = alternate.type === "bar" ? "柱状" : alternate.type === "line" ? "折线" : alternate.type;
+      button.onclick = () => {
+        currentOption = alternate.option;
+        chart.setOption(structuredClone(currentOption), true);
+        for (const other of toggle.querySelectorAll("button")) other.classList.toggle("active", other === button);
+      };
+      toggle.appendChild(button);
+    }
+    if (toggle.childElementCount > 1) actions.insertBefore(toggle, actions.firstChild);
+  }).catch((error) => {
+    plot.innerHTML = '<div class="cc-note">' + escapeHtml(error.message) + '</div>';
+  });
+
+  return card;
+}
+
+/** PNG needs the canvas renderer, so it is drawn off-screen from the same stored option. */
+async function pngFromOption(option, id, width, height) {
+  const echarts = await ensureEcharts();
+  const holder = document.createElement("div");
+  holder.style.cssText = "position:absolute;left:-99999px;top:0";
+  document.body.appendChild(holder);
+  let chart;
+  try {
+    chart = echarts.init(holder, null, { renderer: "canvas", width, height });
+    chart.setOption({ ...structuredClone(option), animation: false }, true);
+    const url = chart.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: "#ffffff" });
+    const blob = await (await fetch(url)).blob();
+    saveBlob(blob, id + ".png");
+  } finally {
+    chart?.dispose();
+    holder.remove();
+  }
 }
 
 async function openResult(resultId) {
@@ -1079,7 +2167,10 @@ async function openResult(resultId) {
     }
     table.appendChild(tbody);
     $("drawerBody").innerHTML = head;
-    $("drawerBody").appendChild(table);
+    const download = document.createElement("button");
+    download.textContent = page.truncated === "none" ? "下载 CSV" : "下载 CSV（不完整结果）";
+    download.onclick = () => downloadFile("/v1/results/" + resultId + "/data.csv", resultId + ".csv").catch((error) => alert(error.message));
+    $("drawerBody").append(download, table);
   } catch (error) {
     $("drawerBody").innerHTML = '<div class="status err">' + escapeHtml(String(error.message || error)) + "</div>";
   }
@@ -1162,7 +2253,7 @@ function renderModel(view) {
     ? "已保存；" + (store.protection === "aes-256-gcm"
       ? "用 DATA_AGENT_PROFILE_SECRET_KEY 加密存放。"
       : "服务端未设置 DATA_AGENT_PROFILE_SECRET_KEY，以 0600 明文存放（与 .env 同级风险）。")
-    : "填了就会保存到 data/model-key.json；留空则不保存。";
+    : view.api_key_source === "managed" ? "来自项目独立渠道；请在上方渠道编辑器中管理。" : "填了就会保存到 data/model-key.json；留空则不保存。";
   // Snapshot the rendered form: save() diffs against this, so only fields the operator touched are
   // sent. Diffing against `.env` instead would pin values that come from pi's built-in catalogue.
   state.modelForm = {
@@ -1193,7 +2284,7 @@ function renderModel(view) {
     '<span class="k">覆盖文件</span><span title="' + escapeHtml(view.settings_path || "") + '">' + escapeHtml(view.settings_status) +
       (view.settings_status === "ok" ? " · model-settings.json" : " · 尚未创建（当前与 .env 一致）") + "</span>" +
     '<span class="k">key 文件</span><span title="' + escapeHtml(keyStore(view).path || "") + '">' + escapeHtml(keyStoreText(view)) + "</span>";
-  $("btnModelSave").disabled = !view.editable;
+  $("btnModelSave").disabled = !view.editable || view.api_key_source === "managed";
   $("btnModelReset").disabled = !view.editable;
   $("modelBadge").textContent = "model: " + view.provider + "/" + view.model_id;
   $("modelTabTag").textContent = view.provider + "/" + view.model_id;
@@ -1323,16 +2414,65 @@ $("toolList").addEventListener("click", (event) => {
   renderToolDetail((state.tools || []).find((tool) => tool.name === row.dataset.tool));
 });
 
-// Folding layout: the button row on top opens and closes each panel; the same button hides it again.
+// The header buttons drop the panels just under the sticky header; the same button closes it again.
+// `--header-h` keeps the dropdown attached while the header wraps on narrow screens.
+function syncHeaderHeight() {
+  const header = document.querySelector("body > header");
+  if (!header) return;
+  document.documentElement.style.setProperty("--header-h", Math.round(header.getBoundingClientRect().height) + "px");
+}
+
+function syncSystemPanel() {
+  const anyOpen = ["panelModel", "panelTools"].some((id) => { const el = $(id); return el && !el.hidden; });
+  const system = $("system");
+  if (system) system.hidden = !anyOpen;
+}
+
+syncHeaderHeight();
+addEventListener("resize", syncHeaderHeight);
+if (typeof ResizeObserver !== "undefined") {
+  const header = document.querySelector("body > header");
+  if (header) new ResizeObserver(syncHeaderHeight).observe(header);
+}
+
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.onclick = () => {
     const panel = $(tab.dataset.panel);
     const open = panel.hidden;
+    if (open) {
+      document.querySelectorAll(".tab").forEach((other) => {
+        if (other === tab) return;
+        $(other.dataset.panel).hidden = true;
+        other.setAttribute("aria-expanded", "false");
+      });
+    }
     panel.hidden = !open;
     tab.setAttribute("aria-expanded", open ? "true" : "false");
+    syncSystemPanel();
     // Opening the model panel re-reads the channels: the operator may have just edited their pi config.
-    if (open && tab.dataset.panel === "panelModel") void loadChannels();
+    if (open && tab.dataset.panel === "panelModel") {
+      void loadChannels();
+      void openModelManager();
+    }
   };
+});
+
+// The dropdown covers the page, so Escape has to be able to dismiss it.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (document.querySelector('.select-menu.open')) return;
+  if ($("drawer").classList.contains("open")) {
+    $("drawer").classList.remove("open");
+    return;
+  }
+  let closed = false;
+  for (const id of ["panelModel", "panelTools"]) {
+    const panel = $(id);
+    if (panel && !panel.hidden) { panel.hidden = true; closed = true; }
+  }
+  if (!closed) return;
+  document.querySelectorAll(".tab").forEach((tab) => tab.setAttribute("aria-expanded", "false"));
+  syncSystemPanel();
 });
 
 // One row per switchable model, grouped by channel, mirroring pi's own model picker.
@@ -1364,7 +2504,7 @@ function renderChannels(catalog) {
         '<span class="dot' + (channel.ready ? " ok" : "") + '"></span>' +
         '<span class="name">' + escapeHtml(channel.name) + "</span>" +
         '<span class="count">' + channel.enabled_count + "/" + channel.total_count + "</span>" +
-        (channel.source === "pi-models" ? '<span class="count">自有</span>' : "") +
+        (channel.source === "project" ? '<span class="count">项目</span>' : channel.source === "pi-models" ? '<span class="count">pi</span>' : "") +
       "</div>" +
       (enabled.length
         ? enabled.map((model) => channelRow(channel, model)).join("")
@@ -1432,10 +2572,52 @@ async function loadHistory() {
     const selected = $("historySelect").value || state.sessionId;
     const { sessions } = await api("/v1/sessions");
     $("historySelect").innerHTML = '<option value="">历史会话</option>' + sessions.slice().reverse().map((item) =>
-      '<option value="' + escapeHtml(item.session_id) + '">' + escapeHtml(item.database + " · " + item.status + " · " + item.session_id) + '</option>').join("");
+      '<option value="' + escapeHtml(item.session_id) + '" title="' + escapeHtml(item.session_id) + '">' + escapeHtml((item.title ? item.title + " · " : "") + item.database + " · " + item.status) + '</option>').join("");
     if (selected) $("historySelect").value = selected;
+    syncHistoryDelete();
   } catch (error) { console.warn(error); }
 }
+
+function syncHistoryDelete() {
+  $("btnHistoryDelete").disabled = !$("historySelect").value;
+}
+$("historySelect").addEventListener("change", syncHistoryDelete);
+
+$("btnHistoryDelete").onclick = async () => {
+  const id = $("historySelect").value;
+  if (!id) return;
+  if (!window.confirm("删除历史会话「" + id + "」？\n对话记录、查询结果和图表都会被删除，无法恢复。")) return;
+  try {
+    await api("/v1/sessions/" + id + "?purge=true", { method: "DELETE" });
+    if (state.sessionId === id) {
+      // The transcript on screen belongs to the deleted session; clear it with the session state.
+      state.streamAbort?.abort();
+      state.taskId = null;
+      state.sessionId = null;
+      state.sessionReady = false;
+      state.hasConversation = false;
+      state.assistantEl = null;
+      state.textNode = null;
+      state.segmentText = "";
+      state.lastSegmentText = "";
+      $("messages").replaceChildren();
+      $("btnSend").disabled = true;
+      $("btnClose").disabled = true;
+      $("btnRefresh").disabled = true;
+      $("btnCancel").disabled = true;
+      $("taskPill").className = "pill";
+      $("taskPill").textContent = "idle";
+      $("taskId").textContent = "";
+      $("turnInfo").textContent = "";
+      setConnectionBadge(null);
+      $("sessionInfo").innerHTML = '<span class="k">当前状态</span><span>等待建立连接</span>';
+      clearTitleState();
+    }
+    $("historySelect").value = "";
+    await loadHistory();
+    setStatus("connStatus", "历史会话已删除", "ok");
+  } catch (error) { setStatus("connStatus", error.message, "err"); }
+};
 
 $("btnHistory").onclick = async () => {
   const id = $("historySelect").value;
@@ -1447,6 +2629,7 @@ $("btnHistory").onclick = async () => {
     ]);
     state.sessionId = id;
     state.taskId = null;
+    state.hasConversation = tasks.length > 0 || Boolean(session.current_task_id);
     state.assistantEl = null;
     state.textNode = null;
     state.segmentText = "";
@@ -1457,6 +2640,12 @@ $("btnHistory").onclick = async () => {
       addMessage("user").textContent = task.goal;
       if (task.answer) addMessage("assistant").innerHTML = renderMarkdown(task.answer);
       if (task.error) addMessage("assistant").textContent = task.error.code + ": " + task.error.message;
+      // Charts belong to the task that produced them; re-rendering them here is what makes a past task
+      // readable without re-running the model.
+      if (Array.isArray(task.artifacts) && task.artifacts.length) {
+        const body = addMessage("assistant");
+        for (const artifactId of task.artifacts) void renderArtifactInto(body, artifactId);
+      }
     }
     if (results.length) {
       const body = addMessage("assistant");
@@ -1495,6 +2684,7 @@ $("btnReconnect").onclick = async () => {
     state.streamAbort?.abort();
     state.sessionId = id;
     state.taskId = null;
+    state.hasConversation = Array.isArray(session.tasks) && session.tasks.length > 0;
     applySession(session);
     $("btnRefresh").disabled = false;
     $("btnClose").disabled = false;
@@ -1502,6 +2692,215 @@ $("btnReconnect").onclick = async () => {
     void loadHistory();
   } catch (error) { setStatus("connStatus", error.message, "err"); }
 };
+
+// ------------------------------------------------------------ custom selects
+// The native <select> stays in the DOM as the source of truth — every read of .value / .options and
+// every "change" listener keeps working. A styled trigger renders its label, and one shared listbox
+// (fixed-positioned, so panel overflow never clips it) animates open in the console's own style.
+const selectSync = new WeakMap();
+{
+  const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+  Object.defineProperty(HTMLSelectElement.prototype, "value", {
+    configurable: true,
+    get() { return desc.get.call(this); },
+    set(value) { desc.set.call(this, value); selectSync.get(this)?.(); },
+  });
+}
+const selectMenu = document.createElement("div");
+selectMenu.className = "select-menu";
+selectMenu.setAttribute("role", "listbox");
+selectMenu.hidden = true;
+document.body.appendChild(selectMenu);
+let openSelect = null;
+let openTrigger = null;
+let activeIndex = -1;
+let menuHideTimer = null;
+
+function enhanceSelect(select) {
+  const wrap = document.createElement("div");
+  wrap.className = "select-wrap";
+  select.replaceWith(wrap);
+  wrap.appendChild(select);
+  select.tabIndex = -1;
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.innerHTML = '<span class="select-value"></span>' +
+    '<svg class="icon chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>';
+  wrap.appendChild(trigger);
+  const label = select.id ? document.querySelector('label[for="' + select.id + '"]') : null;
+  if (label) {
+    trigger.setAttribute("aria-label", label.textContent.trim());
+    label.addEventListener("click", (event) => { event.preventDefault(); trigger.focus(); });
+  }
+  const sync = () => {
+    const option = select.selectedOptions[0];
+    trigger.querySelector(".select-value").textContent = option ? option.textContent : "";
+    trigger.title = option ? option.textContent : "";
+    trigger.disabled = select.disabled;
+    if (openSelect === select) closeSelectMenu(true);
+  };
+  selectSync.set(select, sync);
+  // Options are rebuilt via innerHTML in several loaders; property writes go through the patched
+  // value setter above. Both paths refresh the trigger.
+  new MutationObserver(sync).observe(select, { childList: true, subtree: true, characterData: true, attributes: true });
+  select.addEventListener("change", sync);
+  trigger.addEventListener("click", () => {
+    if (openSelect === select) closeSelectMenu();
+    else openSelectMenu(select, trigger);
+  });
+  trigger.addEventListener("keydown", (event) => {
+    const open = openSelect === select;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) openSelectMenu(select, trigger);
+      setActive(activeIndex + (event.key === "ArrowDown" ? 1 : -1));
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (open) commitActive();
+      else openSelectMenu(select, trigger);
+    } else if (event.key === "Home" || event.key === "End") {
+      if (open) { event.preventDefault(); setActive(event.key === "Home" ? 0 : select.options.length - 1); }
+    } else if ((event.key === "Escape" || event.key === "Tab") && open) {
+      closeSelectMenu();
+    }
+  });
+  sync();
+}
+
+function openSelectMenu(select, trigger) {
+  closeSelectMenu(true);
+  clearTimeout(menuHideTimer);
+  openSelect = select;
+  openTrigger = trigger;
+  selectMenu.setAttribute("aria-label", trigger.getAttribute("aria-label") || "");
+  selectMenu.innerHTML = [...select.options].map((option, index) =>
+    '<div class="select-option' + (index === select.selectedIndex ? " selected" : "") + '" role="option"' +
+      ' id="select-opt-' + index + '" data-index="' + index + '" aria-selected="' + (index === select.selectedIndex) + '"' +
+      ' style="--i:' + Math.min(index, 10) + '"' + (option.title ? ' title="' + escapeHtml(option.title) + '"' : "") + '>' +
+      '<svg class="icon check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4 10-10" /></svg>' +
+      '<span class="opt-label">' + escapeHtml(option.textContent) + "</span></div>").join("");
+  selectMenu.hidden = false;
+  selectMenu.classList.remove("open", "up");
+  selectMenu.style.maxHeight = "none";
+  selectMenu.style.minWidth = Math.round(trigger.getBoundingClientRect().width) + "px";
+  const rect = trigger.getBoundingClientRect();
+  const width = selectMenu.offsetWidth;
+  const natural = selectMenu.scrollHeight;
+  const below = window.innerHeight - rect.bottom - 10;
+  const above = rect.top - 10;
+  const up = natural > below && above > below;
+  const maxHeight = Math.max(120, Math.min(320, up ? above : below));
+  selectMenu.style.maxHeight = maxHeight + "px";
+  const height = Math.min(natural, maxHeight);
+  selectMenu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + "px";
+  selectMenu.style.top = (up ? rect.top - height - 4 : rect.bottom + 4) + "px";
+  selectMenu.classList.toggle("up", up);
+  trigger.setAttribute("aria-expanded", "true");
+  setActive(select.selectedIndex >= 0 ? select.selectedIndex : 0);
+  // Flush the collapsed state so the opening transition runs even when rAF is throttled.
+  void selectMenu.offsetHeight;
+  selectMenu.classList.add("open");
+}
+
+function closeSelectMenu(immediate) {
+  if (openTrigger) {
+    openTrigger.setAttribute("aria-expanded", "false");
+    openTrigger.removeAttribute("aria-activedescendant");
+  }
+  openSelect = null;
+  openTrigger = null;
+  activeIndex = -1;
+  selectMenu.classList.remove("open");
+  clearTimeout(menuHideTimer);
+  if (immediate) { selectMenu.hidden = true; return; }
+  menuHideTimer = setTimeout(() => { if (!openSelect) selectMenu.hidden = true; }, 180);
+}
+
+function setActive(index) {
+  if (!openSelect) return;
+  const count = openSelect.options.length;
+  if (!count) return;
+  activeIndex = Math.max(0, Math.min(count - 1, index));
+  selectMenu.querySelectorAll(".select-option").forEach((item) =>
+    item.classList.toggle("active", Number(item.dataset.index) === activeIndex));
+  const active = selectMenu.querySelector(".select-option.active");
+  // Scroll only the menu itself; scrollIntoView could scroll the page and trip the close-on-scroll handler.
+  if (active) {
+    const top = active.offsetTop;
+    const bottom = top + active.offsetHeight;
+    if (top < selectMenu.scrollTop) selectMenu.scrollTop = top;
+    else if (bottom > selectMenu.scrollTop + selectMenu.clientHeight) selectMenu.scrollTop = bottom - selectMenu.clientHeight;
+  }
+  openTrigger?.setAttribute("aria-activedescendant", "select-opt-" + activeIndex);
+}
+
+function commitActive() {
+  if (!openSelect || activeIndex < 0) return;
+  const select = openSelect;
+  const option = select.options[activeIndex];
+  const trigger = openTrigger;
+  closeSelectMenu();
+  trigger?.focus();
+  if (option && select.value !== option.value) {
+    select.value = option.value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+}
+
+selectMenu.addEventListener("pointermove", (event) => {
+  const item = event.target.closest(".select-option");
+  if (item) setActive(Number(item.dataset.index));
+});
+selectMenu.addEventListener("click", (event) => {
+  const item = event.target.closest(".select-option");
+  if (item) { setActive(Number(item.dataset.index)); commitActive(); }
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!openSelect) return;
+  if (selectMenu.contains(event.target) || (openTrigger && openTrigger.contains(event.target))) return;
+  closeSelectMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (openSelect && event.key === "Escape") { const trigger = openTrigger; closeSelectMenu(); trigger?.focus(); }
+});
+window.addEventListener("resize", () => closeSelectMenu(true));
+window.addEventListener("scroll", (event) => {
+  if (openSelect && !selectMenu.contains(event.target)) closeSelectMenu(true);
+}, true);
+document.querySelectorAll("select").forEach(enhanceSelect);
+// Optional panels must not block the chat's bootstrap. An older running backend can serve the new
+// HTML before it has the new module route; a static import would then disable every page control.
+let modelManager = null;
+let modelManagerLoading = null;
+let modelManagerAttempt = 0;
+async function openModelManager() {
+  if (modelManager) return modelManager.refresh();
+  if (modelManagerLoading) return modelManagerLoading;
+  const root = $("modelManager");
+  root.innerHTML = '<div class="status info" role="status">正在加载模型管理…</div>';
+  modelManagerLoading = (async () => {
+    try {
+      // Failed module imports are cached by the browser. Give an explicit retry a fresh URL so it
+      // can recover after the operator restarts the backend, without requiring a new page.
+      const { initModelManager } = await import("/model-manager.js?load=" + (++modelManagerAttempt));
+      modelManager = initModelManager({ api, enhanceSelect, onChange: async () => { await loadModel(); await loadChannels(); } });
+      await modelManager.refresh();
+    } catch (error) {
+      modelManager = null;
+      root.innerHTML = '<div class="status err" role="alert">独立模型管理模块加载失败。后端可能仍在运行旧版本，请重启项目后重试；开发模式运行 npm run dev，构建版先 npm run build 再 npm start。下方兼容设置仍可使用。</div>' +
+        '<button type="button" class="ghost" id="btnModelManagerRetry">重新加载模型管理</button>';
+      $("legacyModel").open = true;
+      $("btnModelManagerRetry").onclick = () => void openModelManager();
+      console.warn("Model manager could not load; the rest of the console remains available.", error);
+    } finally {
+      modelManagerLoading = null;
+    }
+  })();
+  return modelManagerLoading;
+}
 </script>
 </body>
 </html>

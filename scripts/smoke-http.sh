@@ -18,6 +18,10 @@ sleep 12
     "http://127.0.0.1:$PORT/v1/connections/test"; echo
   echo "--- console html"; $W -s -m 5 "http://127.0.0.1:$PORT/" | head -c 120; echo
   echo "--- unknown result (expect 404)"; $W -s -m 5 "http://127.0.0.1:$PORT/v1/results/res_doesnotexist1"; echo
+  echo "--- unknown result csv (expect 404)"; $W -s -m 5 "http://127.0.0.1:$PORT/v1/results/res_doesnotexist1/data.csv"; echo
+  echo "--- unknown artifact (expect 404)"; $W -s -m 5 "http://127.0.0.1:$PORT/v1/artifacts/art_doesnotexist1"; echo
+  echo "--- unknown artifact csv (expect 404)"; $W -s -m 5 "http://127.0.0.1:$PORT/v1/artifacts/art_doesnotexist1/data.csv"; echo
+  echo "--- vendored echarts (expect 200 + ~1MB)"; $W -s -m 10 -o /tmp/echarts.min.js -w "%{http_code} %{size_download}\n" "http://127.0.0.1:$PORT/vendor/echarts.min.js"; echo
   echo "--- unknown task events (expect error event)"; $W -s -m 5 "http://127.0.0.1:$PORT/v1/tasks/task_nope/events"; echo
   echo "--- unknown route (expect 404)"; $W -s -m 5 "http://127.0.0.1:$PORT/v1/nope"; echo
 } > /tmp/api.out 2>&1
