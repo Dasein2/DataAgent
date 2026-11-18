@@ -353,7 +353,7 @@ export class MysqlEngine implements Engine {
     if (this.profile.explain === "none") {
       throw new AppError(
         "FEATURE_UNSUPPORTED",
-        `${this.profile.label} does not support SQL EXPLAIN. Use data_profile for distributions, or run the query with a LIMIT.`,
+        `${this.profile.label} does not support SQL EXPLAIN. Use selective filters and timeout/row/byte limits. LIMIT alone does not bound scan cost.`,
         { engine: this.profile.id, feature: "explain" },
       );
     }
@@ -372,23 +372,36 @@ export class MysqlEngine implements Engine {
     const warnings: string[] = [];
     let estimatedCost: number | null = null;
     let estimatedRows: number | null = null;
+    let estimatedScanRows: number | null = null;
     try {
-      const parsed = JSON.parse(planText) as { query_block?: { cost_info?: { query_cost?: string }; table?: { rows_examined_per_scan?: number } } };
+      const parsed = JSON.parse(planText) as {
+        query_block?: { cost_info?: { query_cost?: string }; table?: { rows_examined_per_scan?: number } };
+      };
       const cost = parsed.query_block?.cost_info?.query_cost;
       if (cost !== undefined && Number.isFinite(Number(cost))) estimatedCost = Number(cost);
+      let scanNodes = 0;
+      const scans = (node: unknown): number => {
+        if (!node || typeof node !== "object") return 0;
+        if (Array.isArray(node)) return node.reduce((n, item) => n + scans(item), 0);
+        const obj = node as Record<string, unknown>;
+        if (typeof obj.rows_examined_per_scan === "number") scanNodes++;
+        return (
+          (typeof obj.rows_examined_per_scan === "number" ? obj.rows_examined_per_scan : 0) +
+          Object.values(obj).reduce<number>((n, child) => n + scans(child), 0)
+        );
+      };
+      const totalScans = scans(parsed);
+      estimatedScanRows = scanNodes ? totalScans : null;
       const rowsExamined = parsed.query_block?.table?.rows_examined_per_scan;
       if (typeof rowsExamined === "number") estimatedRows = rowsExamined;
     } catch {
       warnings.push(`${this.profile.label} returned a plan that is not valid JSON`);
     }
-    return { planText, estimatedCost, estimatedRows, warnings };
+    return { planText, estimatedCost, estimatedRows, estimatedScanRows, warnings };
   }
 
   async listScopes(): Promise<string[]> {
-    const { rows } = await this.buffered(
-      `SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY 1`,
-      15_000,
-    );
+    const { rows } = await this.buffered(`SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY 1`, 15_000);
     return rows.map((row) => String(row[0])).filter((name) => !this.hiddenScope(name));
   }
 
@@ -404,7 +417,8 @@ export class MysqlEngine implements Engine {
       `SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE, ${estimateExpr}, TABLE_COMMENT
        FROM information_schema.TABLES
        WHERE TABLE_SCHEMA NOT IN ('mysql','information_schema','performance_schema','sys')
-         AND (${this.literal(search)} IS NULL OR TABLE_NAME LIKE ${this.like(search)} OR TABLE_SCHEMA LIKE ${this.like(search)})
+         AND (${this.literal(search)} IS NULL OR TABLE_NAME LIKE ${this.like(search)} OR TABLE_SCHEMA LIKE ${this.like(search)} OR TABLE_COMMENT LIKE ${this.like(search)}
+           ${filter.searchColumns ? `OR EXISTS (SELECT 1 FROM information_schema.COLUMNS mc WHERE mc.TABLE_SCHEMA=TABLES.TABLE_SCHEMA AND mc.TABLE_NAME=TABLES.TABLE_NAME AND (mc.COLUMN_NAME LIKE ${this.like(search)} OR mc.COLUMN_COMMENT LIKE ${this.like(search)}))` : ""})
          AND (${this.literal(filter.schema ?? null)} IS NULL OR TABLE_SCHEMA = ${this.literal(filter.schema ?? null)})
        ORDER BY TABLE_SCHEMA, TABLE_NAME
        LIMIT ${Math.max(1, Math.min(2_000, filter.limit))}`,
@@ -495,13 +509,20 @@ export class MysqlEngine implements Engine {
           )
         ).rows
       : [];
-    const fkMap = new Map<string, { name: string; columns: string[]; references: string }>();
+    const fkMap = new Map<
+      string,
+      { name: string; columns: string[]; references: string; referencedColumns: string[] }
+    >();
     for (const row of fkRows) {
       const fkName = String(row[0]);
-      const entry =
-        fkMap.get(fkName) ??
-        { name: fkName, columns: [], references: `${String(row[2])}.${String(row[3])}.${String(row[4])}` };
+      const entry = fkMap.get(fkName) ?? {
+        name: fkName,
+        columns: [],
+        references: `${String(row[2])}.${String(row[3])}`,
+        referencedColumns: [],
+      };
       entry.columns.push(String(row[1]));
+      entry.referencedColumns.push(String(row[4]));
       fkMap.set(fkName, entry);
     }
 
@@ -520,10 +541,16 @@ export class MysqlEngine implements Engine {
     };
   }
 
-  async profileObject(schema: string | null, name: string, sampleRows: number, timeoutMs: number): Promise<ProfileResult> {
+  async profileObject(
+    schema: string | null,
+    name: string,
+    sampleRows: number,
+    timeoutMs: number,
+    method: "head" | "random" = this.profile.sampling,
+  ): Promise<ProfileResult> {
     const scope = schema ?? (await this.defaultScope());
     const described = await this.describeObject(scope, name);
-    const { fields, rows } = await this.buffered(sampleSql(this.profile, scope, name, sampleRows), 15_000 + timeoutMs);
+    const { fields, rows } = await this.buffered(sampleSql(this.profile, scope, name, sampleRows, method), timeoutMs);
 
     const columns: ProfileColumn[] = fields.map((field, index) => {
       const values = rows.map((row) => row[index]);
@@ -546,6 +573,9 @@ export class MysqlEngine implements Engine {
       rowCount: described.object.rowEstimate ?? null,
       columns,
       sampled: rows.length > 0,
+      sampleMethod: method,
+      sampleRows: rows.length,
+      warnings: ["Sample statistics describe only the sampled rows; head sampling is not representative."],
     };
   }
 
@@ -643,7 +673,9 @@ export class MysqlEngine implements Engine {
       this.profile.cancel === "connection-id" ? `KILL ${Number(threadId)}` : `KILL QUERY ${Number(threadId)}`;
     let control: Connection | undefined;
     try {
-      const stream = this.tunnel ? await this.tunnel.dial({ host: this.config.host, port: this.config.port }) : undefined;
+      const stream = this.tunnel
+        ? await this.tunnel.dial({ host: this.config.host, port: this.config.port })
+        : undefined;
       control = await this.newConnection(stream);
       await new Promise<void>((resolve, reject) => {
         control!.query(statement, (error) => (error ? reject(error) : resolve()));

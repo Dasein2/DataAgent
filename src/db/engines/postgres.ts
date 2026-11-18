@@ -35,6 +35,12 @@ interface FieldDescription {
   dataTypeID: number;
 }
 
+/** Sum scan-node estimates, not root aggregate output cardinality. Planner estimates are advisory. */
+function estimateScans(node: Record<string, unknown>): number {
+  const own = /Scan/.test(String(node["Node Type"])) ? Number(node["Plan Rows"] ?? 0) : 0;
+  return own + (Array.isArray(node.Plans) ? node.Plans.reduce((n: number, child: Record<string, unknown>) => n + estimateScans(child), 0) : 0);
+}
+
 export class PostgresEngine implements Engine {
   readonly kind = "postgres" as const;
   readonly profile: EngineProfile;
@@ -302,13 +308,15 @@ export class PostgresEngine implements Engine {
     }
   }
 
-  async explain(sql: string, limits: QueryLimits): Promise<ExplainResult> {
-    const { rows } = await this.buffered(`EXPLAIN (FORMAT JSON, VERBOSE false) ${sql}`, limits.timeoutMs);
+  async explain(sql: string, limits: QueryLimits, analyze = false): Promise<ExplainResult> {
+    const { rows } = await this.buffered(`EXPLAIN (FORMAT JSON, VERBOSE false${analyze ? ", ANALYZE true, BUFFERS true" : ""}) ${sql}`, limits.timeoutMs);
     const plan = (rows[0]?.[0] as Array<{ Plan?: Record<string, unknown> }> | undefined)?.[0]?.Plan;
     return {
       planText: JSON.stringify(plan ?? rows.map((row) => row[0]), null, 2),
       estimatedCost: typeof plan?.["Total Cost"] === "number" ? (plan["Total Cost"] as number) : null,
       estimatedRows: typeof plan?.["Plan Rows"] === "number" ? (plan["Plan Rows"] as number) : null,
+      estimatedScanRows: plan ? estimateScans(plan) : null,
+      analyzed: analyze,
       warnings: plan ? [] : ["PostgreSQL did not return a JSON plan"],
     };
   }
@@ -341,7 +349,9 @@ export class PostgresEngine implements Engine {
          AND n.nspname NOT LIKE 'pg_temp%'
          AND (${this.literal(filter.search ?? null)}::text IS NULL
               OR c.relname ILIKE '%' || ${this.literal(filter.search ?? null)} || '%'
-              OR n.nspname ILIKE '%' || ${this.literal(filter.search ?? null)} || '%')
+              OR n.nspname ILIKE '%' || ${this.literal(filter.search ?? null)} || '%'
+              OR obj_description(c.oid, 'pg_class') ILIKE '%' || ${this.literal(filter.search ?? null)} || '%'
+              ${filter.searchColumns ? `OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND (a.attname ILIKE '%' || ${this.literal(filter.search ?? null)} || '%' OR col_description(c.oid,a.attnum) ILIKE '%' || ${this.literal(filter.search ?? null)} || '%'))` : ""})
          AND (${this.literal(filter.schema ?? null)}::text IS NULL OR n.nspname = ${this.literal(filter.schema ?? null)})
        ORDER BY 1, 2
        LIMIT ${Math.max(1, Math.min(2_000, filter.limit))}`,
@@ -416,7 +426,11 @@ export class PostgresEngine implements Engine {
                 SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
                 ORDER BY k.ord), ','),
-              rn.nspname || '.' || rc.relname
+              rn.nspname || '.' || rc.relname,
+              array_to_string(ARRAY(
+                SELECT a.attname FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
+                JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum
+                ORDER BY k.ord), ',')
        FROM pg_constraint con
        JOIN pg_class rc ON rc.oid = con.confrelid
        JOIN pg_namespace rn ON rn.oid = rc.relnamespace
@@ -425,7 +439,9 @@ export class PostgresEngine implements Engine {
       15_000,
     );
 
-    const primaryKey = indexRows.filter((row) => Boolean(row[1])).flatMap((row) => String(row[2] ?? "").split(",").filter(Boolean));
+    let partitionKey: string | null = null;
+    if (relkind === "p") { const { rows } = await this.buffered(`SELECT pg_get_partkeydef(${String(oid)}::oid)`, 5000); partitionKey = rows[0]?.[0] ? String(rows[0][0]) : null; }
+    const primaryKey = indexRows.filter((row) => Boolean(row[1])).flatMap((row) => String(row[3] ?? "").split(",").filter(Boolean));
 
     return {
       object: {
@@ -437,24 +453,26 @@ export class PostgresEngine implements Engine {
         comment: comment ? String(comment) : null,
       },
       columns,
+      partitionKey,
       primaryKey,
       indexes: indexRows.map((row) => ({
         name: String(row[0]),
-        columns: String(row[2] ?? "").split(",").filter(Boolean),
-        unique: Boolean(row[3]),
+        columns: String(row[3] ?? "").split(",").filter(Boolean),
+        unique: Boolean(row[2]),
       })),
       foreignKeys: fkRows.map((row) => ({
         name: String(row[0]),
         columns: String(row[1] ?? "").split(",").filter(Boolean),
         references: String(row[2]),
+        referencedColumns: String(row[3] ?? "").split(",").filter(Boolean),
       })),
     };
   }
 
-  async profileObject(schema: string | null, name: string, sampleRows: number, timeoutMs: number): Promise<ProfileResult> {
+  async profileObject(schema: string | null, name: string, sampleRows: number, timeoutMs: number, method: "head" | "random" = this.profile.sampling): Promise<ProfileResult> {
     const scope = schema ?? (await this.defaultScope());
     const described = await this.describeObject(scope, name);
-    const { fields, rows } = await this.buffered(sampleSql(this.profile, scope, name, sampleRows), 15_000 + timeoutMs);
+    const { fields, rows } = await this.buffered(sampleSql(this.profile, scope, name, sampleRows, method), timeoutMs);
 
     const columns: ProfileColumn[] = fields.map((field, index) => {
       const values = rows.map((row) => row[index]);
@@ -481,6 +499,9 @@ export class PostgresEngine implements Engine {
       rowCount: described.object.rowEstimate ?? null,
       columns,
       sampled: rows.length > 0,
+      sampleMethod: method,
+      sampleRows: rows.length,
+      warnings: ["Sample statistics are not full-table statistics; head samples are not random or representative."],
     };
   }
 

@@ -16,7 +16,7 @@ export interface HistoricalSession {
 export function connectionKey(config: ConnectionConfig): string {
   return createHash("sha256").update(JSON.stringify([
     config.engine, config.host, config.port, config.database, config.user,
-    config.environment, config.workspace?.name ?? null,
+    config.environment, config.workspace?.name ?? null, config.timezone ?? null,
   ])).digest("hex");
 }
 
@@ -102,6 +102,10 @@ export class HistoryStore {
 
   listSessions(owner: string): Record<string, any>[] {
     return [...this.sessions.values()].filter((record) => record.owner === owner).map((record) => structuredClone(record.snapshot));
+  }
+
+  retentionCandidates() {
+    return [...this.sessions].map(([id, r]) => ({ id, owner: r.owner, at: String(r.snapshot.last_used_at ?? r.snapshot.created_at) }));
   }
 
   /** Names a saved session without touching its database connection. */

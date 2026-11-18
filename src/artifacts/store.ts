@@ -24,6 +24,7 @@ export interface ArtifactIndexEntry {
   task_id: string | null;
   status: Artifact["status"];
   created_at: string;
+  archived?: boolean;
 }
 
 interface SessionIndex {
@@ -100,6 +101,19 @@ export class ArtifactStore {
     });
   }
 
+  async archive(id: string, sessionId: string, archived: boolean): Promise<void> {
+    await this.serial(sessionId, async () => {
+      const artifact = await this.get(id);
+      if (!artifact || artifact.session_id !== sessionId) throw new Error("Artifact not found in session");
+      // Durable sidecar survives index rebuilds; immutable chart evidence is not rewritten.
+      await writeFile(this.objectPath(id) + ".archive", JSON.stringify({ archived }), { mode: 0o600 });
+      const index = await this.readIndex(sessionId);
+      const entry = index.artifacts.find(e => e.id === id);
+      if (entry) entry.archived = archived;
+      await this.writeIndex(index);
+    });
+  }
+
   /** Dedupe key: the same result bound to the same spec is the same chart. */
   async findBySpec(sessionId: string, specHash: string, resultId: string): Promise<ArtifactIndexEntry | undefined> {
     const entries = await this.listBySession(sessionId);
@@ -119,7 +133,7 @@ export class ArtifactStore {
     await this.serial(sessionId, async () => {
       const index = await this.readIndex(sessionId);
       await Promise.all(
-        index.artifacts.map((entry) => rm(this.objectPath(entry.id), { force: true })),
+        index.artifacts.flatMap((entry) => [rm(this.objectPath(entry.id), { force: true }), rm(this.objectPath(entry.id) + ".archive", { force: true })]),
       );
       await rm(this.indexPath(sessionId), { force: true });
     });
@@ -143,7 +157,11 @@ export class ArtifactStore {
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
       const artifact = await this.get(name.slice(0, -5));
-      if (artifact && artifact.session_id === sessionId) entries.push(toEntry(artifact));
+      if (artifact && artifact.session_id === sessionId) {
+        const entry = toEntry(artifact);
+        try { entry.archived = JSON.parse(await readFile(this.objectPath(artifact.id) + ".archive", "utf8")).archived === true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        entries.push(entry);
+      }
     }
     entries.sort((a, b) => a.created_at.localeCompare(b.created_at));
     await this.writeIndex({ session_id: sessionId, artifacts: entries });

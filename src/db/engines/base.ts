@@ -38,6 +38,7 @@ export interface QueryStats {
 
 export interface ObjectFilter {
   search?: string;
+  searchColumns?: boolean;
   schema?: string;
   kinds?: Array<"table" | "view" | "materialized_view" | "foreign_table" | "sequence">;
   limit: number;
@@ -122,11 +123,11 @@ export interface Engine {
   executeWorkspace(sql: string, timeoutMs: number): Promise<QueryStats>;
   beginReadOnly(): Promise<void>;
   endReadOnly(): Promise<void>;
-  explain(sql: string, limits: QueryLimits): Promise<ExplainResult>;
+  explain(sql: string, limits: QueryLimits, analyze?: boolean): Promise<ExplainResult>;
   listScopes(): Promise<string[]>;
   listObjects(filter: ObjectFilter): Promise<ObjectRef[]>;
   describeObject(schema: string | null, name: string): Promise<ObjectDescription>;
-  profileObject(schema: string | null, name: string, sampleRows: number, timeoutMs: number): Promise<ProfileResult>;
+  profileObject(schema: string | null, name: string, sampleRows: number, timeoutMs: number, method?: "head" | "random"): Promise<ProfileResult>;
   /** True when a workspace object is writable by this account. */
   probeWorkspace(name: string, mode: "schema" | "database"): Promise<{ ok: boolean; note?: string }>;
   createView(workspace: string, name: string, selectSql: string): Promise<void>;
@@ -156,11 +157,11 @@ export function mapColumn(column: ColumnInfo): ColumnInfo {
  * `head` is the first N rows and is labelled as such to the caller; a profile that declares
  * `random` opts into a shuffled sample.
  */
-export function sampleSql(profile: EngineProfile, schema: string, name: string, sampleRows: number): string {
+export function sampleSql(profile: EngineProfile, schema: string, name: string, sampleRows: number, method = profile.sampling): string {
   const quote = profile.quote === '"' ? quoteAnsi : quoteBacktick;
   const relation = `${quote(schema)}.${quote(name)}`;
   const limit = Math.max(1, Math.min(500, sampleRows));
-  if (profile.sampling === "random") {
+  if (method === "random") {
     return `SELECT * FROM ${relation} ORDER BY ${profile.dialect === "Postgresql" ? "RANDOM" : "RAND"}() LIMIT ${limit}`;
   }
   return `SELECT * FROM ${relation} LIMIT ${limit}`;

@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { analysisOptions } from "../analysis/options.js";
+import { localSql, summarize, ownedResult } from "../analysis/results.js";
+import { SnapshotStore } from "../analysis/snapshots.js";
+import { checkLocalSize } from "../analysis/privacy.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
@@ -193,7 +197,7 @@ export class AnalysisService {
     const secret = AnalysisService.providerSecret(providerKeys, app.model.provider);
     const model = await createModelHandle(app, savedKey, { providers: owned, ...secret });
     const results = new ResultStore(`${app.dataDir}/results`);
-    const artifacts = new ArtifactService(new ArtifactStore(join(app.dataDir, "artifacts")), results, app.budgets);
+    const artifacts = new ArtifactService(new ArtifactStore(join(app.dataDir, "artifacts")), results, app.budgets, analysisOptions(app).maxSeries);
     const service = new AnalysisService(
       app,
       model,
@@ -203,7 +207,7 @@ export class AnalysisService {
       modelKeys,
       envModel,
     );
-    service.sweeper = setInterval(() => void service.sweepExpired(), 30_000);
+    service.sweeper = setInterval(() => void service.sweepExpired().catch(error => console.warn("Session maintenance failed", (error as Error).message)), 30_000);
     service.sweeper.unref?.();
     return service;
   }
@@ -928,7 +932,12 @@ export class AnalysisService {
       await live.close();
     }
     await this.artifacts.store.deleteSession(sessionId);
-    await this.results.deleteSession(sessionId);
+    await this.results.serializeWrite(sessionId, async () => {
+      await this.results.deleteSession(sessionId);
+      await rm(join(this.app.dataDir, "snapshots", sessionId + ".json"), { force: true });
+    });
+    await rm(join(this.app.dataDir, "conversations", sessionId), { recursive: true, force: true });
+    await rm(join(this.app.dataDir, "workspaces", sessionId), { recursive: true, force: true });
     this.history.deleteSession(sessionId, ownerKey);
     for (const task of tasks) this.broker.drop(task.id);
   }
@@ -962,6 +971,53 @@ export class AnalysisService {
     return page;
   }
 
+  async resultSummary(resultId: string, ownerKey: string) {
+    const page = await this.readResult(resultId, ownerKey, 0, 1);
+    return summarize(this.results, (await this.results.get(page.id))!, analysisOptions(this.app));
+  }
+
+  async transformResult(resultId: string, ownerKey: string, sql: string, allowPartial = false) {
+    const page = await this.readResult(resultId, ownerKey, 0, 1);
+    const meta = (await this.results.get(page.id))!;
+    return localSql(this.results, meta, sql, analysisOptions(this.app), { allowPartial });
+  }
+
+  async snapshots(sessionId: string, ownerKey: string) {
+    this.sessionSnapshot(sessionId, ownerKey);
+    return new SnapshotStore(join(this.app.dataDir, "snapshots")).list(sessionId);
+  }
+
+  async createSnapshot(sessionId: string, ownerKey: string, resultId: string, name: string) {
+    this.sessionSnapshot(sessionId, ownerKey);
+    return this.results.serializeWrite(sessionId, async () => {
+      const meta = await ownedResult(this.results, resultId, sessionId);
+      checkLocalSize(meta.rowCount, meta.bytes, analysisOptions(this.app));
+      if (meta.truncated !== "none") throw new AppError("RESULT_FAILED", "A snapshot requires a complete input result");
+      return new SnapshotStore(join(this.app.dataDir, "snapshots")).create(sessionId, resultId, name);
+    });
+  }
+
+  async dropSnapshot(sessionId: string, ownerKey: string, snapshotId: string) {
+    this.sessionSnapshot(sessionId, ownerKey);
+    await this.results.serializeWrite(sessionId, () => new SnapshotStore(join(this.app.dataDir, "snapshots")).drop(sessionId, snapshotId));
+  }
+
+  async querySnapshot(sessionId: string, ownerKey: string, snapshotId: string, sql: string) {
+    const snapshot = (await this.snapshots(sessionId, ownerKey)).find(s => s.id === snapshotId);
+    if (!snapshot) throw new AppError("NOT_FOUND", "Snapshot not found");
+    return this.transformResult(snapshot.result_id, ownerKey, sql);
+  }
+
+  async archiveArtifact(id: string, ownerKey: string, archived: boolean) {
+    const artifact = await this.getArtifact(id, ownerKey);
+    await this.artifacts.archive(id, artifact.session_id, archived);
+  }
+
+  async auditFigure(id: string, ownerKey: string, format: "png" | "svg", client?: string) {
+    const artifact = await this.getArtifact(id, ownerKey);
+    await auditExport(this.app.dataDir, { format, object: "artifact", object_id: id, owner_key: ownerKey, session_id: artifact.session_id, rows: artifact.data?.rows.length ?? 0, complete: artifact.source.truncated === "none", client });
+  }
+
   // --------------------------------------------------------------- lifecycle
 
   private async sweepExpired(): Promise<void> {
@@ -971,6 +1027,14 @@ export class AnalysisService {
       if (!expired || session.isBusy) continue;
       this.sessions.delete(id);
       await session.close().catch(() => undefined);
+    }
+    const days = analysisOptions(this.app).retentionDays;
+    if (days > 0) {
+      for (const { id, owner, at } of this.history.retentionCandidates()) {
+        const timestamp = Date.parse(at);
+        if (this.sessions.has(id) || !Number.isFinite(timestamp) || now - timestamp < days * 86_400_000) continue;
+        await this.deleteSession(id, owner);
+      }
     }
   }
 

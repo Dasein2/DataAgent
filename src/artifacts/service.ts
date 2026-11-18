@@ -20,6 +20,7 @@ export class ArtifactService {
     readonly store: ArtifactStore,
     private readonly results: ResultStore,
     private readonly budgets: BudgetConfig,
+    private readonly maxSeries = 30,
   ) {}
 
   async createChart(options: {
@@ -69,6 +70,8 @@ export class ArtifactService {
       executed_at: meta.createdAt,
       row_count: meta.rowCount,
       truncated: meta.truncated,
+      ...(meta.lineage ? { lineage: meta.lineage } : {}),
+      ...(meta.timezone ? { timezone: meta.timezone } : {}),
     };
 
     const id = `art_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
@@ -78,7 +81,7 @@ export class ArtifactService {
       columns: meta.columns,
       rows,
       source,
-      limits: { maxCells: this.budgets.maxChartCells, maxRows: this.budgets.maxChartRows },
+      limits: { maxCells: this.budgets.maxChartCells, maxRows: this.budgets.maxChartRows, maxSeries: this.maxSeries },
     });
 
     const artifact: Artifact = {
@@ -105,8 +108,14 @@ export class ArtifactService {
     return this.store.get(id);
   }
 
-  async listBySession(sessionId: string) {
-    return this.store.listBySession(sessionId);
+  async listBySession(sessionId: string, includeArchived = false) {
+    const list = await this.store.listBySession(sessionId);
+    return includeArchived ? list : list.filter(e => !e.archived);
+  }
+
+  async archive(id: string, sessionId: string, archived: boolean) {
+    await this.ownedBy(id, sessionId);
+    await this.store.archive(id, sessionId, archived);
   }
 
   /** Load an artifact and re-check it belongs to a session the caller can see. */

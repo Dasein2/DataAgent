@@ -42,6 +42,7 @@ export interface TaskRecord {
   error?: { code: string; message: string };
   usage?: TaskUsage;
   turns: number;
+  max_turns?: number;
   queries_used: number;
   results: string[];
   /** Chart artifacts produced by this task, in creation order. */
@@ -138,7 +139,7 @@ export class AnalysisSession {
         budgets: app.budgets,
         artifacts: options.artifacts,
         currentTaskId: () => sessionRef.current?.id,
-        taskStatus: () => (sessionRef.current ? { ...sessionRef.current } : { status: "idle" }),
+        taskStatus: () => (sessionRef.current ? { ...sessionRef.current, max_turns: sessionRef.current.max_turns ?? app.budgets.maxTurns } : { status: "idle" }),
         cancelActive: () => db.cancel(),
       };
       const customTools = createDatabaseTools(toolRuntime);
@@ -261,6 +262,7 @@ export class AnalysisSession {
       created_at: new Date().toISOString(),
       turns: 0,
       queries_used: 0,
+      max_turns: maxTurns,
       results: [],
       artifacts: [],
     };
@@ -528,7 +530,7 @@ export class AnalysisSession {
         const result = event.result as { content?: Array<{ type?: string; text?: string }>; details?: unknown } | undefined;
         const output = result?.content?.find((part) => part.type === "text")?.text;
         const chartId = (result?.details as { chart_id?: unknown } | undefined)?.chart_id;
-        if (event.toolName === "chart_create" && !event.isError && typeof chartId === "string") {
+        if (["chart_create", "chart_revise"].includes(event.toolName) && !event.isError && typeof chartId === "string") {
           task.artifacts = [...new Set([...(task.artifacts ?? []), chartId])];
           this.saveTask(task);
         }
@@ -572,7 +574,7 @@ export class AnalysisSession {
             hasTools: (message.content ?? []).some((part) => part.type === "toolCall"),
           };
           this.saveTask(task);
-          this.broker.publish(task.id, "usage", { ...this.agent.getSessionStats().tokens });
+          this.broker.publish(task.id, "usage", { ...this.agent.getSessionStats().tokens, context_usage: safeContextUsage(this.agent) });
         }
         break;
       }

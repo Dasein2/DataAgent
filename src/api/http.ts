@@ -227,6 +227,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       source_access: "read_only",
       workspace_access: ["none", "views_only", "tables_and_views"],
       tool_names: tools.map((tool) => tool.name),
+      analysis: { ...config.analysis, masking: undefined, masking_rules: config.analysis?.masking?.length ?? 0 },
       budgets: {
         max_turns: config.budgets.maxTurns,
         max_queries: config.budgets.maxQueries,
@@ -389,11 +390,41 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     });
   });
 
+  app.get("/v1/sessions/:id/catalog", async (req, res) => {
+    const session = service.getSession(req.params.id, ownerOf(req));
+    const search = typeof req.query.search === "string" ? req.query.search.slice(0, 120) : undefined;
+    res.json({ objects: await session.db.catalogSearch({ search, searchColumns: req.query.columns === "true", limit: 200, refresh: req.query.refresh === "true" }) });
+  });
+  app.get("/v1/sessions/:id/object", async (req, res) => {
+    const session = service.getSession(req.params.id, ownerOf(req));
+    const q = z.object({ name: z.string().min(1).max(256), schema: z.string().max(256).optional() }).parse(req.query);
+    res.json(await session.db.describe(q.schema ?? null, q.name));
+  });
+  app.get("/v1/sessions/:id/datasets", async (req, res) => res.json({ datasets: await service.getSession(req.params.id, ownerOf(req)).db.listDatasets() }));
+  app.get("/v1/sessions/:id/snapshots", async (req, res) => res.json({ snapshots: await service.snapshots(req.params.id, ownerOf(req)) }));
+  app.post("/v1/sessions/:id/snapshots", async (req, res) => {
+    const p = z.object({ result_id: z.string(), name: z.string().min(1).max(120) }).parse(req.body);
+    res.status(201).json({ snapshot: await service.createSnapshot(req.params.id, ownerOf(req), p.result_id, p.name) });
+  });
+  app.delete("/v1/sessions/:id/snapshots/:snapshotId", async (req, res) => { await service.dropSnapshot(req.params.id, ownerOf(req), req.params.snapshotId); res.status(204).end(); });
+  app.post("/v1/sessions/:id/snapshots/:snapshotId/query", async (req, res) => { const p = z.object({ sql: z.string().min(1).max(30_000) }).parse(req.body); res.json({ result: await service.querySnapshot(req.params.id, ownerOf(req), req.params.snapshotId, p.sql) }); });
+  app.post("/v1/results/:id/transform", async (req, res) => {
+    const p = z.object({ sql: z.string().min(1).max(30_000), allow_partial: z.boolean().optional() }).parse(req.body);
+    res.json({ result: await service.transformResult(req.params.id, ownerOf(req), p.sql, p.allow_partial) });
+  });
+  app.get("/v1/results/:id/summary", async (req, res) => res.json(await service.resultSummary(req.params.id, ownerOf(req))));
+
   app.get("/v1/results/:id", async (req, res) => {
     const offset = intParam(req.query.offset, 0, 0, 10_000_000, "offset");
     const limit = intParam(req.query.limit, 50, 1, 1_000, "limit");
     const page = await service.readResult(req.params.id, ownerOf(req), offset, limit);
-    res.json(page);
+    if (typeof req.query.columns === "string") {
+      const names = req.query.columns.split(","); if (names.length > 100) throw new AppError("INVALID_INPUT", "At most 100 projected columns");
+      const indexes = names.map(name => { const found = page.columns.map((c,i) => c.name === name ? i : -1).filter(i => i >= 0); if (found.length !== 1) throw new AppError("INVALID_INPUT", `Column ${name} is missing or ambiguous`); return found[0]!; });
+      page.columns = indexes.map(i => page.columns[i]!); page.rows = page.rows.map(r => indexes.map(i => r[i]));
+    }
+    const meta = await service.results.get(req.params.id);
+    res.json({ ...page, sessionId: meta?.sessionId, durationMs: meta?.durationMs, bytes: meta?.bytes, timezone: meta?.timezone, warnings: meta?.warnings, lineage: meta?.lineage, privacy: meta?.privacy });
   });
 
   // Streaming keeps a large export to one pass over the file instead of paging from the start.
@@ -413,6 +444,14 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.json({ artifacts: await service.listArtifacts(req.params.id, ownerOf(req)) });
   });
 
+  app.post("/v1/artifacts/:id/archive", async (req, res) => {
+    const p = z.object({ archived: z.boolean() }).parse(req.body);
+    await service.archiveArtifact(req.params.id, ownerOf(req), p.archived); res.json({ ok: true });
+  });
+  app.post("/v1/artifacts/:id/export-action", async (req, res) => {
+    const p = z.object({ format: z.enum(["png", "svg"]) }).parse(req.body);
+    await service.auditFigure(req.params.id, ownerOf(req), p.format, req.ip); res.json({ ok: true });
+  });
   app.get("/v1/artifacts/:id", async (req, res) => {
     res.json({ artifact: await service.getArtifact(req.params.id, ownerOf(req)) });
   });
@@ -447,6 +486,9 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       () => res.status(404).end(),
     );
   });
+  for (const file of ["explore.js", "charts.js", "workbench.js", "workbench.css"]) {
+    app.get("/" + file, (_req, res) => { void readFile(new URL(file, webRoot), "utf8").then(code => res.type(file.endsWith("css") ? "text/css" : "application/javascript").send(code), () => res.status(404).end()); });
+  }
   // Vendored ECharts: served from this origin so the console needs no CDN and no build step.
   app.get("/vendor/echarts.min.js", (_req, res) => {
     void readFile(new URL("vendor/echarts.min.js", webRoot)).then(
@@ -471,7 +513,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       return;
     }
     if (isAppError(error)) {
-      res.status(error.status).json({ error: { code: error.code, message: error.message } });
+      res.status(error.status).json({ error: { code: error.code, message: error.message, details: error.details } });
       return;
     }
     if (error instanceof Error && error.name === "ZodError") {

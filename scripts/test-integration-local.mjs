@@ -31,7 +31,7 @@ try {
   });
   tests = spawn(process.execPath, ["--import", "tsx", "--test", "--test-timeout=45000", "tests/integration/*.test.ts"], {
     cwd, stdio: "inherit",
-    env: { ...process.env, DATA_AGENT_TEST_PG: `postgres://postgres:postgres@127.0.0.1:${port}/postgres?workspace=analysis_ws`, DATA_AGENT_TEST_PGLITE: "1" },
+    env: { ...process.env, DATA_AGENT_TEST_MYSQL: process.argv.includes("--all") ? (process.env.DATA_AGENT_TEST_MYSQL ?? "") : "", DATA_AGENT_TEST_PG: `postgres://postgres:postgres@127.0.0.1:${port}/postgres?workspace=analysis_ws`, DATA_AGENT_TEST_PGLITE: "1" },
   });
   const deadline = setTimeout(() => tests.kill("SIGKILL"), 55_000);
   try {

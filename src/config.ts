@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { isKnownModelApi, unknownApiMessage } from "./agent/model-apis.js";
 import { readPiConfig } from "./agent/pi-config.js";
+import type { AnalysisOptions } from "./analysis/options.js";
 
 /**
  * Thinking levels pi accepts. Kept in step with pi-ai's `ModelThinkingLevel`: `xhigh` and `max` are
@@ -58,6 +59,7 @@ export interface AppConfig {
   allowPrivateNetwork: boolean;
   model: ModelConfig;
   budgets: BudgetConfig;
+  analysis?: Partial<AnalysisOptions>;
   env: "development" | "production";
   profileSecretKey?: string;
   /** Allow the console to override model settings at runtime. Off by default in production. */
@@ -75,6 +77,14 @@ function num(name: string, fallback: number): number {
   if (!raw) return fallback;
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number`);
+  return value;
+}
+
+function nonnegative(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a nonnegative integer`);
   return value;
 }
 
@@ -194,6 +204,24 @@ export function loadConfig(): AppConfig {
         ? num("DATA_AGENT_MODEL_CONTEXT_WINDOW", 128000)
         : undefined,
       maxTokens: process.env.DATA_AGENT_MODEL_MAX_TOKENS ? num("DATA_AGENT_MODEL_MAX_TOKENS", 16384) : undefined,
+    },
+    analysis: {
+      metadataTtlMs: nonnegative("DATA_AGENT_METADATA_TTL_MS", 300_000),
+      metadataConcurrency: Math.max(1, Math.min(4, Math.floor(num("DATA_AGENT_METADATA_CONCURRENCY", 2)))),
+      resultCacheTtlMs: nonnegative("DATA_AGENT_RESULT_CACHE_TTL_MS", 60_000),
+      preflight: (() => { const v = process.env.DATA_AGENT_PREFLIGHT ?? "warn"; if (!["off", "warn", "enforce"].includes(v)) throw new Error("DATA_AGENT_PREFLIGHT must be off|warn|enforce"); return v as "off" | "warn" | "enforce"; })(),
+      maxEstimatedScanRows: num("DATA_AGENT_MAX_ESTIMATED_SCAN_ROWS", 5_000_000),
+      maxEstimatedCost: num("DATA_AGENT_MAX_ESTIMATED_COST", 1_000_000),
+      maxLocalRows: num("DATA_AGENT_MAX_LOCAL_ROWS", 100_000),
+      maxLocalBytes: num("DATA_AGENT_MAX_LOCAL_BYTES", 64 * 1024 * 1024),
+      maxSessionBytes: num("DATA_AGENT_MAX_SESSION_BYTES", 1024 * 1024 * 1024),
+      retentionDays: nonnegative("DATA_AGENT_RETENTION_DAYS", 0),
+      maxSeries: num("DATA_AGENT_MAX_CHART_SERIES", 30),
+      masking: (() => {
+        const rules: unknown = JSON.parse(process.env.DATA_AGENT_COLUMN_MASKS ?? "[]");
+        if (!Array.isArray(rules) || rules.some(r => !r || typeof r.column !== "string" || !/^[\\p{L}\\p{N}_ .-]{1,128}$/u.test(r.column) || !["partial", "hash", "deny"].includes(r.mode))) throw new Error("Invalid DATA_AGENT_COLUMN_MASKS");
+        return rules;
+      })(),
     },
     budgets: {
       maxTurns: num("DATA_AGENT_MAX_TURNS", 40),

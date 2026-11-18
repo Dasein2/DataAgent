@@ -448,6 +448,7 @@
   @media (max-width: 900px) { .mm-layout { grid-template-columns: 190px minmax(0, 1fr); gap: 16px; } .mm-test { grid-template-columns: 1fr 1fr; } }
   @media (max-width: 650px) { #system { right: 8px; width: calc(100% - 16px); max-width: calc(100% - 16px); padding: 16px; } .mm-layout { grid-template-columns: 1fr; } .mm-sidebar { position: static; } #mmList { max-height: 160px; } .mm-heading { align-items: start; } .mm-heading p { max-width: 210px; } .mm-active > .hint { margin-left: 0; } }
 </style>
+<link rel="stylesheet" href="/workbench.css" />
 </head>
 <body>
 <header>
@@ -466,6 +467,8 @@
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></svg>
     工具<span class="tab-tag" id="toolCount">—</span>
   </button>
+  <button class="ghost" id="btnCommands" title="命令面板 Ctrl / ⌘ K">⌘ K</button>
+  <button class="ghost" id="btnTheme" title="切换明暗主题" aria-label="切换明暗主题">◐</button>
   <button class="ghost" id="btnHealth" title="检查服务"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4" /></svg>检查服务</button>
   </div>
 </header>
@@ -660,7 +663,7 @@
       </div>
     </div>
     <div id="composer">
-      <div id="taskbar"><span class="taskbar-label">分析任务</span><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span></div>
+      <div id="taskbar"><span class="taskbar-label">分析任务</span><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span><span id="taskActivity" role="status" aria-live="polite"></span></div>
       <div class="prompt-editor">
         <label for="goal" class="sr-only">分析目标</label>
         <textarea id="goal" rows="3" placeholder="你想从数据中了解什么？例如：分析最近一年的月度 GMV，找出增长与异常。"></textarea>
@@ -755,6 +758,9 @@
 
 <script type="module">
 import { followTask } from "/task-stream.js";
+import { createExplorer } from "/explore.js";
+import { initWorkbench } from "/workbench.js";
+import { createCharts } from "/charts.js";
 const $ = (id) => document.getElementById(id);
 const state = {
   token: sessionStorage.getItem("data-agent-token") || "",
@@ -776,8 +782,10 @@ const state = {
   segmentText: "",
   lastSegmentText: "",
 };
+const { downloadFile, artifactTable, buildChartCard, renderArtifactInto } = createCharts({ api, state, escapeHtml, cellToString, openRef, refreshContext: () => workbench.refreshContext() });
+const exploreResult = createExplorer({ api, downloadFile, refreshContext: () => workbench.refreshContext() });
+const workbench = initWorkbench({ api, state, openResult, buildChartCard, loadHistory });
 $("token").value = state.token;
-if (state.token) $("advancedConnection").open = true;
 
 // Example questions only prepare a draft; submitting still requires an established session.
 document.querySelectorAll("[data-prompt]").forEach((button) => {
@@ -787,6 +795,10 @@ document.querySelectorAll("[data-prompt]").forEach((button) => {
   });
 });
 
+setInterval(() => {
+  const since = Number($("taskActivity").dataset.since);
+  if (since) { const label = $("taskActivity").textContent.split(" · ")[0]; $("taskActivity").textContent = label + " · " + Math.floor((Date.now() - since) / 1000) + "s"; }
+}, 1000);
 void initProfiles();
 void loadHistory();
 void loadModel();
@@ -1404,6 +1416,7 @@ function applySession(session) {
   for (const note of caps.notes || []) {
     $("sessionInfo").innerHTML += '<span class="k">warning</span><span>' + escapeHtml(note) + "</span>";
   }
+  if (typeof workbench !== "undefined") workbench.sessionChanged();
 }
 
 function setChatTitle(title) {
@@ -1579,22 +1592,15 @@ $("messages").addEventListener("click", async (event) => {
   }
   const button = event.target.closest("[data-value-ref]");
   if (!button) return;
-  const ref = button.dataset.valueRef;
-  $("drawerTitle").textContent = "数值来源";
-  $("drawerBody").textContent = "加载…";
-  $("drawer").classList.add("open");
-  try {
-    const resolved = await api("/v1/artifacts/" + ref.split("#")[0] + "/ref?ref=" + encodeURIComponent(ref));
-    const info = document.createElement("pre");
-    info.textContent = ref + "\n\n值: " + cellToString(resolved.value) +
-      (resolved.row === null ? "（缺失组合）" : "") + "\n执行时间: " + resolved.source.executed_at +
-      "\n结果: " + resolved.source.result_id + "\n\n" + resolved.source.sql;
-    $("drawerBody").replaceChildren(info);
-    if (resolved.row) $("drawerBody").appendChild(artifactTable({ data: { columns: resolved.columns, rows: [resolved.row] } }));
-  } catch (error) {
-    $("drawerBody").textContent = "引用读取失败: " + error.message;
-  }
+  await openRef(button.dataset.valueRef);
 });
+
+async function openRef(ref) {
+  const dialog = document.createElement("dialog"); dialog.className = "object-dialog"; dialog.setAttribute("aria-label", "数值来源");
+  const head = document.createElement("header"); const title = document.createElement("h2"); title.textContent = "数值来源"; const close = document.createElement("button"); close.textContent = "关闭"; close.onclick = () => dialog.close(); head.append(title, close);
+  const content = document.createElement("div"); content.textContent = "加载…"; dialog.append(head, content); document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove(), { once: true }); dialog.showModal();
+  try { const resolved = await api("/v1/artifacts/" + ref.split("#")[0] + "/ref?ref=" + encodeURIComponent(ref)); const pre = document.createElement("pre"); pre.className = "sql-code"; pre.textContent = ref + "\n\n精确值: " + cellToString(resolved.value) + "\n执行于: " + resolved.source.executed_at + "\n查询时间不等于数据更新时间\n\n" + resolved.source.sql; content.replaceChildren(pre); if(resolved.row)content.appendChild(artifactTable({data:{columns:resolved.columns,rows:[resolved.row]}})); } catch(error) {content.textContent = error.message;}
+}
 
 /** Minimal but practical markdown: fences, headings, tables, lists, bold/inline code, rules. */
 function renderMarkdown(text) {
@@ -1766,6 +1772,9 @@ function handleEvent(event) {
     case "reasoning_delta":
       break;
     case "tool_started": {
+      workbench.toolEvent("tool_started", data);
+      $("taskActivity").textContent = "正在执行 " + data.tool;
+      $("taskActivity").dataset.since = String(Date.now());
       ensureAssistant();
       const body = state.assistantEl;
       // Tool cards are appended after the current text node; start a fresh text segment so later
@@ -1796,6 +1805,10 @@ function handleEvent(event) {
       break;
     }
     case "tool_finished": {
+      workbench.toolEvent("tool_finished", data);
+      $("taskActivity").textContent = "整理分析证据…";
+      delete $("taskActivity").dataset.since;
+      if (data.details?.budget) workbench.updateBudget(data.details.budget);
       const el = document.querySelector('.tool[data-call="' + data.call_id + '"]');
       if (el) {
         el.classList.toggle("error", Boolean(data.is_error));
@@ -1834,7 +1847,14 @@ function handleEvent(event) {
       }
       break;
     }
+    case "usage":
+      workbench.updateUsage(data);
+      break;
     case "task_finished": {
+      if (data.usage) workbench.updateUsage(data.usage);
+      $("taskActivity").textContent = "";
+      delete $("taskActivity").dataset.since;
+      void workbench.refreshContext();
       state.taskId = null;
       closeSegment();
       const finalAnswer = typeof data.answer === "string" ? data.answer.trim() : "";
@@ -1922,258 +1942,8 @@ function ensureAssistant() {
  * That is what keeps the picture in the console, the downloaded SVG and any later snapshot identical,
  * and it means clicking "switch to line" needs no model round trip (the alternate option is stored).
  */
-const echartsLoader = { promise: null };
-function ensureEcharts() {
-  if (window.echarts) return Promise.resolve(window.echarts);
-  if (echartsLoader.promise) return echartsLoader.promise;
-  echartsLoader.promise = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "/vendor/echarts.min.js";
-    script.onload = () => resolve(window.echarts);
-    script.onerror = () => {
-      echartsLoader.promise = null;
-      script.remove();
-      reject(new Error("ECharts 加载失败（/vendor/echarts.min.js）"));
-    };
-    document.head.appendChild(script);
-  });
-  return echartsLoader.promise;
-}
-
-async function downloadFile(path, fallbackName) {
-  const headers = {};
-  if (state.token) headers["authorization"] = "Bearer " + state.token;
-  const res = await fetch(path, { headers });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  // The server names the file (it carries the artifact id and title); fall back to our guess.
-  const disposition = res.headers.get("content-disposition") || "";
-  const match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
-  const name = match ? decodeURIComponent(match[1]) : fallbackName;
-  const blob = await res.blob();
-  saveBlob(blob, name);
-}
-
-function saveBlob(blob, name) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = name;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
-}
-
-function artifactTitle(artifact) {
-  const spec = artifact.spec || {};
-  if (spec.title) return spec.title;
-  const summary = artifact.summary || {};
-  return (summary.type || spec.type || "chart") + " · " + String((spec.result_id || "").slice(0, 12));
-}
-
-async function renderArtifactInto(host, artifactId) {
-  if (host.querySelector('[data-artifact="' + artifactId + '"]')) return;
-  const holder = document.createElement("div");
-  holder.className = "cc-note";
-  holder.dataset.artifact = artifactId;
-  holder.textContent = "加载图表 " + artifactId + "…";
-  host.appendChild(holder);
-  try {
-    const { artifact } = await api("/v1/artifacts/" + artifactId);
-    if (!host.isConnected) return;
-    holder.replaceWith(buildChartCard(artifact));
-  } catch (error) {
-    holder.textContent = "图表加载失败: " + (error.message || String(error));
-  }
-}
-
-function artifactTable(artifact) {
-  const data = artifact.data || { columns: [], rows: [] };
-  const table = document.createElement("table");
-  const thead = document.createElement("thead");
-  thead.innerHTML = "<tr>" + data.columns.map((column) => "<th>" + escapeHtml(column.name) + "</th>").join("") + "</tr>";
-  table.appendChild(thead);
-  const tbody = document.createElement("tbody");
-  for (const row of data.rows || []) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = row.map((cell) => "<td>" + escapeHtml(cellToString(cell)) + "</td>").join("");
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  return table;
-}
-
-function buildChartCard(artifact) {
-  const spec = artifact.spec || {};
-  const summary = artifact.summary || {};
-  const compiled = artifact.compiled || {};
-  const card = document.createElement("div");
-  card.className = "chart-card";
-  card.dataset.artifact = artifact.id;
-
-  const head = document.createElement("div");
-  head.className = "cc-head";
-  const meta = [artifact.id, summary.shape, summary.cells != null ? summary.cells + " points" : null].filter(Boolean).join(" · ");
-  head.innerHTML = '<span class="cc-title">' + escapeHtml(artifactTitle(artifact)) + '</span>' +
-    '<span class="cc-meta">' + escapeHtml(meta) + '</span>';
-  card.appendChild(head);
-
-  const plot = document.createElement("div");
-  plot.className = "cc-plot";
-  card.appendChild(plot);
-
-  const actions = document.createElement("div");
-  actions.className = "cc-actions";
-  card.appendChild(actions);
-
-  const notes = [];
-  if (summary.missing > 0) notes.push(summary.missing + " 个空格未画（缺失不是 0）");
-  if (summary.clip) notes.push("颜色截断 " + summary.clip.kind + " = " + summary.clip.at);
-  for (const warning of compiled.warnings || []) notes.push(warning);
-  if (notes.length) {
-    const note = document.createElement("div");
-    note.className = "cc-note";
-    note.textContent = notes.join(" · ");
-    card.appendChild(note);
-  }
-
-  const csv = document.createElement("button");
-  csv.className = "ghost";
-  csv.textContent = "下载 CSV";
-  csv.onclick = () => downloadFile("/v1/artifacts/" + artifact.id + "/data.csv", artifact.id + ".csv").catch((error) => alert(error.message));
-
-  if (compiled.renderer === "table") {
-    plot.style.display = "none";
-    const wrap = document.createElement("div");
-    wrap.className = "cc-table";
-    wrap.style.display = "block";
-    wrap.appendChild(artifactTable(artifact));
-    card.appendChild(wrap);
-    actions.appendChild(csv);
-    return card;
-  }
-
-  const tableButton = document.createElement("button");
-  tableButton.className = "ghost";
-  tableButton.textContent = "数据";
-  tableButton.onclick = () => {
-    if (!tablePane.firstChild) tablePane.appendChild(artifactTable(artifact));
-    card.classList.toggle("show-table");
-  };
-  const tablePane = document.createElement("div");
-  tablePane.className = "cc-table";
-  card.appendChild(tablePane);
-  actions.appendChild(tableButton);
-  actions.appendChild(csv);
-
-  const option = compiled.option || {};
-  const yCount = option.yAxis && Array.isArray(option.yAxis.data) ? option.yAxis.data.length : 0;
-  plot.style.height = (yCount > 6 ? Math.max(320, Math.min(620, yCount * 26 + 110)) : 300) + "px";
-
-  ensureEcharts().then((echarts) => {
-    if (!card.isConnected) return;
-    let currentOption = option;
-    const chart = echarts.init(plot, null, { renderer: "svg" });
-    chart.setOption(structuredClone(currentOption), true);
-    const resize = new ResizeObserver(() => chart.resize());
-    resize.observe(plot);
-    const removal = new MutationObserver(() => {
-      if (card.isConnected) return;
-      resize.disconnect();
-      removal.disconnect();
-      chart.dispose();
-    });
-    removal.observe($("messages"), { childList: true, subtree: true });
-
-    const svg = document.createElement("button");
-    svg.className = "ghost";
-    svg.textContent = "下载 SVG";
-    svg.onclick = () => {
-      // Vector export, so a printed/reviewed copy stays sharp at any size.
-      const url = chart.getDataURL({ type: "svg", backgroundColor: "#ffffff" });
-      const svgText = decodeURIComponent(url.replace(/^data:image\/svg\+xml;charset=UTF-8,/, ""));
-      saveBlob(new Blob([svgText], { type: "image/svg+xml;charset=utf-8" }), artifact.id + ".svg");
-    };
-    const png = document.createElement("button");
-    png.className = "ghost";
-    png.textContent = "下载 PNG";
-    png.onclick = () => pngFromOption(currentOption, artifact.id, chart.getWidth(), chart.getHeight()).catch((error) => alert(error.message));
-    actions.appendChild(svg);
-    actions.appendChild(png);
-
-    // Stored alternates: switching figure type is a UI action, not another model/tool call.
-    const usable = [{ type: spec.type, option }].concat(artifact.alternates || []);
-    const toggle = document.createElement("span");
-    toggle.style.display = "contents";
-    for (const alternate of usable) {
-      const button = document.createElement("button");
-      button.className = "ghost" + (alternate.type === spec.type ? " active" : "");
-      button.textContent = alternate.type === "bar" ? "柱状" : alternate.type === "line" ? "折线" : alternate.type;
-      button.onclick = () => {
-        currentOption = alternate.option;
-        chart.setOption(structuredClone(currentOption), true);
-        for (const other of toggle.querySelectorAll("button")) other.classList.toggle("active", other === button);
-      };
-      toggle.appendChild(button);
-    }
-    if (toggle.childElementCount > 1) actions.insertBefore(toggle, actions.firstChild);
-  }).catch((error) => {
-    plot.innerHTML = '<div class="cc-note">' + escapeHtml(error.message) + '</div>';
-  });
-
-  return card;
-}
-
-/** PNG needs the canvas renderer, so it is drawn off-screen from the same stored option. */
-async function pngFromOption(option, id, width, height) {
-  const echarts = await ensureEcharts();
-  const holder = document.createElement("div");
-  holder.style.cssText = "position:absolute;left:-99999px;top:0";
-  document.body.appendChild(holder);
-  let chart;
-  try {
-    chart = echarts.init(holder, null, { renderer: "canvas", width, height });
-    chart.setOption({ ...structuredClone(option), animation: false }, true);
-    const url = chart.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: "#ffffff" });
-    const blob = await (await fetch(url)).blob();
-    saveBlob(blob, id + ".png");
-  } finally {
-    chart?.dispose();
-    holder.remove();
-  }
-}
-
 async function openResult(resultId) {
-  $("drawerTitle").textContent = "result " + resultId;
-  $("drawerBody").innerHTML = '<div class="hint">loading…</div>';
-  $("drawer").classList.add("open");
-  try {
-    const page = await api("/v1/results/" + resultId + "?limit=200");
-    const head = '<div class="kv">' +
-      '<span class="k">rows</span><span>' + page.rows.length + " / " + page.rowCount + '</span>' +
-      '<span class="k">next_offset</span><span>' + (page.nextOffset == null ? "null" : page.nextOffset) + '</span>' +
-      '<span class="k">truncated</span><span>' + page.truncated + '</span>' +
-      '<span class="k">sql</span><span>' + escapeHtml((page.sql || "").slice(0, 600)) + '</span>' +
-      '</div>';
-    const table = document.createElement("table");
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr>" + page.columns.map((c) => "<th>" + escapeHtml(c.name) + "<br><span style='color:var(--muted)'>" + escapeHtml(c.type) + "</span></th>").join("") + "</tr>";
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
-    for (const row of page.rows) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = row.map((cell) => "<td>" + escapeHtml(cellToString(cell)) + "</td>").join("");
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    $("drawerBody").innerHTML = head;
-    const download = document.createElement("button");
-    download.textContent = page.truncated === "none" ? "下载 CSV" : "下载 CSV（不完整结果）";
-    download.onclick = () => downloadFile("/v1/results/" + resultId + "/data.csv", resultId + ".csv").catch((error) => alert(error.message));
-    $("drawerBody").append(download, table);
-  } catch (error) {
-    $("drawerBody").innerHTML = '<div class="status err">' + escapeHtml(String(error.message || error)) + "</div>";
-  }
+  return exploreResult(resultId);
 }
 
 function cellToString(cell) {
@@ -2575,6 +2345,7 @@ async function loadHistory() {
       '<option value="' + escapeHtml(item.session_id) + '" title="' + escapeHtml(item.session_id) + '">' + escapeHtml((item.title ? item.title + " · " : "") + item.database + " · " + item.status) + '</option>').join("");
     if (selected) $("historySelect").value = selected;
     syncHistoryDelete();
+    workbench.updateHistory(sessions.slice().reverse());
   } catch (error) { console.warn(error); }
 }
 

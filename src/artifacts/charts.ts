@@ -3,6 +3,7 @@ import type { ColumnMeta } from "../db/engines/base.js";
 import { cellText } from "../db/engines/base.js";
 import { AppError } from "../errors.js";
 import { cellRef } from "./refs.js";
+import { compileSpecialChart } from "./special.js";
 import {
   CHART_TYPES,
   COMPILER_VERSION,
@@ -257,7 +258,8 @@ export function compileChart(input: ChartCompileInput): CompiledArtifact {
   if (spec.type === "heatmap") {
     return compileHeatmap(input, summaryBase);
   }
-  return compileCartesian(input, summaryBase, spec.type);
+  if (["pie", "donut", "scatter", "kpi"].includes(spec.type)) return compileSpecialChart(input, { number: toNumber, hash: specHash, compiler: COMPILER_VERSION, version: SPEC_VERSION, echarts: ECHARTS_VERSION });
+  return compileCartesian(input, summaryBase, spec.type as "bar" | "line" | "area");
 }
 
 function compileTable(
@@ -499,7 +501,7 @@ function compileHeatmap(
 function compileCartesian(
   input: ChartCompileInput,
   base: { chart_id: string; type: ChartType; source: ChartCompileInput["source"] },
-  type: "bar" | "line",
+  type: "bar" | "line" | "area",
 ): CompiledArtifact {
   const { spec, columns, rows, limits } = input;
   if (!spec.x || !spec.value) invalid(`${type} requires x and value (each with a "field")`);
@@ -512,6 +514,13 @@ function compileCartesian(
   const seenX = uniqueInOrder(rows.map((row) => label(row[xi])));
   const x = resolveAxis(spec.x, seenX, "x", false);
   const seriesNames = si === undefined ? ["value"] : uniqueInOrder(rows.map((row) => label(row[si])));
+  if (seriesNames.length > (limits.maxSeries ?? 30)) invalid(`Too many series (${seriesNames.length}); cap at ${limits.maxSeries ?? 30} using source SQL or result_transform.`);
+  if (spec.value_sort) {
+    if (si !== undefined) invalid("value_sort requires a single series; sort multi-series results explicitly in SQL");
+    if (spec.x.order || spec.x.sort) invalid("value_sort conflicts with x.order/x.sort");
+    const values = new Map(rows.map(row => [label(row[xi]), toNumber(row[vi], spec.value!.field, [])]));
+    x.labels.sort((a, b) => (values.get(a)! - values.get(b)!) * (spec.value_sort === "asc" ? 1 : -1));
+  }
 
   const points = x.labels.length * seriesNames.length;
   if (points > limits.maxCells) {
@@ -554,9 +563,15 @@ function compileCartesian(
     const series = seriesNames.map((name) => ({
       name,
       type: chartType,
-      data: x.labels.map((xLabel) => matrix.get(`${xLabel}\u0000${name}`)?.value ?? null),
+      data: x.labels.map((xLabel) => {
+        const value = matrix.get(`${xLabel}\u0000${name}`)?.value ?? null;
+        if (spec.series?.stack !== "percent" || value === null) return value;
+        const total = seriesNames.reduce((n, s) => n + (matrix.get(`${xLabel}\u0000${s}`)?.value ?? 0), 0);
+        return total === 0 ? null : value / total * 100;
+      }),
       ...(chartType === "line" ? { connectNulls: false, showSymbol: x.labels.length <= 60 } : {}),
-      ...(seriesNames.length > 1 ? { stack: chartType === "bar" ? "total" : undefined } : {}),
+      ...(type === "area" && chartType === "line" ? { areaStyle: {} } : {}),
+      ...(spec.series?.stack && spec.series.stack !== "none" ? { stack: "total" } : {}),
     }));
     const option: Record<string, unknown> = {
       title: spec.title ? { text: spec.title, left: "center" } : undefined,
@@ -570,14 +585,15 @@ function compileCartesian(
         containLabel: true,
       },
       xAxis: { type: "category", data: x.labels, name: spec.x!.title ?? spec.x!.field, nameLocation: "middle", nameGap: 30 },
-      yAxis: { type: "value", name: spec.value!.title ?? spec.value!.field },
+      yAxis: { type: "value", name: spec.unit ?? spec.value!.title ?? spec.value!.field, ...(spec.series?.stack === "percent" ? { min: 0, max: 100 } : {}) },
       series,
     };
     stripUndefined(option);
     return option;
   };
 
-  const warnings = [...x.warnings];
+  if (spec.series?.stack === "percent" && values.some(v => v < 0)) invalid("Percent stacking requires non-negative values; raw signed values cannot be normalized implicitly");
+  const warnings = [...x.warnings, ...(spec.series?.stack === "percent" ? ["Coordinates explicitly normalized per category; raw snapshot values and refs remain unchanged; zero totals render as gaps."] : [])];
   const missing = points - matrix.size;
 
   const top: ChartTop[] = [...matrix.entries()]
@@ -606,7 +622,7 @@ function compileCartesian(
     engine: "echarts",
     engine_version: ECHARTS_VERSION,
     renderer: "echarts",
-    option: buildOption(type),
+    option: buildOption(type === "area" ? "line" : type),
     warnings,
   };
   const alternateType: "bar" | "line" = type === "bar" ? "line" : "bar";

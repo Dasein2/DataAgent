@@ -295,7 +295,7 @@ it("describes every agent tool from metadata alone and stays in sync with the fa
   const catalog = toolCatalog();
   const built = createDatabaseTools({ db: {}, budgets: {} } as never).map((tool) => tool.name);
   assert.deepEqual(catalog.map((tool) => tool.name), built);
-  assert.equal(catalog.length, 13);
+  assert.equal(catalog.length, 24);
 
   const chart = catalog.find((tool) => tool.name === "chart_create")!;
   assert.equal(chart.readOnly, false);
@@ -306,6 +306,8 @@ it("describes every agent tool from metadata alone and stays in sync with the fa
     "result_id",
     "type",
     "title",
+    "value_sort",
+    "unit",
     "x",
     "y",
     "series",
@@ -317,7 +319,7 @@ it("describes every agent tool from metadata alone and stays in sync with the fa
   assert.match(sql.description, /SELECT/);
   assert.equal(sql.readOnly, true);
   assert.equal(sql.sequential, true);
-  assert.deepEqual(sql.parameters.map((param) => param.name), ["sql", "label", "max_rows"]);
+  assert.deepEqual(sql.parameters.map((param) => param.name), ["sql", "label", "max_rows", "dry_run", "reuse"]);
   assert.equal(sql.parameters.find((param) => param.name === "sql")!.required, true);
   assert.equal(sql.parameters.find((param) => param.name === "label")!.required, false);
   assert.equal(sql.parameters.find((param) => param.name === "label")!.type, "string");

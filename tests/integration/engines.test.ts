@@ -189,6 +189,21 @@ for (const [label, engine, dsn] of suites) {
       }
     });
 
+    it("searches columns/comments, batches metadata and returns a bounded overview", async () => {
+      await withSession(engine, dsn!, async (session) => {
+        const objects = await session.catalogSearch({ search: "region", searchColumns: true });
+        assert.ok(objects.some(o => o.name === "sales"));
+        const batch = await session.describeMany([{ name: "sales" }]);
+        assert.ok("description" in batch[0]!);
+        const sales = batch[0]!.description!;
+        assert.deepEqual(sales.primaryKey, ["id"]);
+        assert.ok(sales.indexes.some(i => i.columns.includes("id") && i.unique));
+        const overview = await session.catalogOverview(undefined, 5);
+        assert.ok(overview.tables.length > 0);
+        assert.match(overview.scope, /bounded/);
+      });
+    });
+
     it("explains a query", async () => {
       await withSession(engine, dsn!, async (session) => {
         const { plan } = await session.explain("SELECT * FROM sales WHERE region = 'EU'");
@@ -239,7 +254,7 @@ for (const [label, engine, dsn] of suites) {
       await withSession(engine, dsn!, async (session) => {
         for (let index = 0; index < 3; index += 1) await session.query("SELECT 1");
         const snapshot = session.snapshot();
-        assert.equal(snapshot.queries.used, 3);
+        assert.equal(snapshot.queries.used, session.capabilitiesView.features.explain ? 6 : 3);
         assert.equal(snapshot.queries.limit, 20);
       });
     });

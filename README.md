@@ -14,6 +14,14 @@ and can persist intermediate views — while source data stays read-only.
   read-only transaction (or, on engines that have none, by analysing the account's grants); the SQL
   guard is defence in depth, never the only boundary.
 
+## Read-only BI workbench
+
+The console includes searchable history/schema panels, query/turn budgets, a paged result explorer,
+local SQL and named snapshots, an evidence dashboard, keyboard commands (`Ctrl/⌘ K`) and light/dark themes.
+Source data remains read-only; local analysis does not open another source extraction channel.
+See [使用与配置说明](docs/readonly-bi-workbench.md) and [实施/验收记录](docs/readonly-bi-roadmap.md)
+for safety boundaries, API examples, defaults and test limitations.
+
 ## Quick start
 
 ```bash
@@ -144,12 +152,17 @@ historical session also resumes an active task's progress.
 
 ## Agent tools
 
-`session_info`, `catalog_search`, `object_describe`, `data_profile`, `query_explain`,
-`query_execute`, `job_get`, `job_cancel`, `result_read`, `dataset_create`, `dataset_list`,
-`dataset_drop`, `chart_create`.
+24 tool definitions (unsupported `query_explain` is omitted for engines with no plan capability):
 
-Models never write DDL and never see credentials. `dataset_create(name, select_sql, kind)` is the
-only write path; the service generates `CREATE [SQL SECURITY INVOKER] VIEW` or `CREATE TABLE AS` in
+- Discover: `session_info`, `catalog_search`, `catalog_overview`, `object_describe`, `object_describe_batch`, `data_profile`.
+- Source read: `query_explain`, `query_execute` (`dry_run`, opt-in `reuse`), `job_get`, `job_cancel`.
+- Saved rows: `result_read` (projection/summary), `result_summary`, `result_transform`.
+- Local snapshots: `snapshot_create`, `snapshot_list`, `snapshot_query`, `snapshot_drop`.
+- Controlled workspace: `dataset_create`, `dataset_list`, `dataset_drop`.
+- BI evidence: `chart_create`, `chart_list`, `chart_archive`, `chart_revise`.
+
+Models never write source DDL/DML and never see credentials. `dataset_create(name, select_sql, kind)` is the
+only source-connected write path (local results/snapshots/artifacts are separate); the service generates `CREATE [SQL SECURITY INVOKER] VIEW` or `CREATE TABLE AS` in
 the pre-provisioned workspace. Results are always handle-based: `query_execute` returns a preview and
 a `result_id`; `result_read` pages the full NDJSON on disk.
 
@@ -157,8 +170,9 @@ a `result_id`; `result_read` pages the full NDJSON on disk.
 
 `chart_create(result_id, type, …)` turns an executed result into an immutable artifact. It does not
 run SQL and it cannot aggregate: the numbers must already be grouped by the query (`GROUP BY`), so the
-snapshot and the SQL that produced it stay the same evidence. Types are `bar`, `line`, `heatmap` and
-`table`; `series` splits a cartesian chart into grouped series, and a bar/line artifact also stores
+snapshot and the SQL that produced it stay the same evidence. Types are `bar`, `line`, `area`,
+`heatmap`, `table`, `pie`, `donut`, `scatter` and `kpi`. `series` splits a cartesian chart into
+grouped series; stacking/percentage mode and value sorting must be explicit. A bar/line artifact also stores
 the alternative figure type so the console can switch between them without another model call.
 
 An artifact is a record, not a cache of the UI state:
@@ -183,7 +197,8 @@ Downloads and figure-type switching are console actions on the stored artifact: 
 streamed result export requests are audited to `data/audit/exports.ndjson`, SVG comes from the ECharts
 instance, and PNG is drawn off-screen with the canvas renderer from the currently selected stored
 option. The audit records export requests, not proof that the client finished downloading. SVG/PNG
-exports run locally in the browser and are not in the server CSV audit.
+exports run locally in the browser; the console first records an authenticated export-action request
+in the same audit (not proof of successful file delivery).
 
 ## Security model
 

@@ -7,6 +7,7 @@ import { AppError, isAppError } from "../errors.js";
 import type { ColumnMeta } from "../db/engines/base.js";
 import { cellText } from "../db/engines/base.js";
 import type { DbSession } from "../db/session.js";
+import { analysisTools, recoveryHint } from "./analysis-tools.js";
 
 const TOOL_TEXT_BUDGET = 12_000;
 
@@ -31,9 +32,9 @@ function textOutput(text: string, structured?: Record<string, unknown>) {
 function errorOutput(error: unknown) {
   if (isAppError(error)) {
     return {
-      content: [{ type: "text" as const, text: `Error ${error.code}: ${error.message}` }],
-      details: { code: error.code },
-      structuredContent: { code: error.code, message: error.message } as never,
+      content: [{ type: "text" as const, text: `Error ${error.code}: ${error.message}\nHint: ${recoveryHint(error)}\n${JSON.stringify(error.details ?? {})}` }],
+      details: { code: error.code, hint: recoveryHint(error), ...error.details },
+      structuredContent: { code: error.code, message: error.message, hint: recoveryHint(error), details: error.details } as never,
       isError: true,
     };
   }
@@ -87,36 +88,44 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     label: "Execute read-only SQL",
     description:
       "Execute one read-only SQL statement and return a preview plus a result handle. " +
-      "SQL is validated before execution: only SELECT/WITH/SHOW/DESCRIBE/EXPLAIN are accepted, source writes are rejected. " +
+      "SQL is validated before execution: only SELECT/WITH/SHOW/DESCRIBE are accepted; use query_explain for EXPLAIN (ANALYZE is explicit), source writes are rejected. " +
       "The full result is stored and can be paged with result_read.",
     promptSnippet: "Run one read-only SQL statement and get a result_id for paging",
     promptGuidelines: [
       "Send exactly one statement per call; multiple statements are rejected.",
       "Add a LIMIT to exploratory queries over large tables.",
-      "If the output says truncated, use result_read instead of assuming the data ends there.",
+      "result_read pages stored rows only. A truncated result is incomplete; rerun a reduced or aggregated source query.",
+      "LIMIT bounds returned rows, not scan cost. Prefer selective date/partition filters.",
     ],
     parameters: Type.Object({
       sql: Type.String({ description: "One read-only SQL statement" }),
       label: Type.Optional(Type.String({ description: "Short label for the result, e.g. 'monthly revenue'" })),
-      max_rows: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000, description: "Row cap for this call" })),
+      max_rows: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000, description: "Stored row cap; does not limit source scan cost" })),
+      dry_run: Type.Optional(Type.Boolean({ description: "Return cost estimates without executing SELECT. Preflight consumes a query budget slot." })),
+      reuse: Type.Optional(Type.Boolean({ description: "Opt in to recent exact-SQL session result reuse; reports original execution time and age. Off by default." })),
     }),
     executionMode: "sequential",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     execute: async (_id, params, signal) => {
       try {
+        if (params.dry_run) { const inspection = await db.preflight(params.sql, signal); return textOutput(JSON.stringify(inspection), inspection); }
         const meta = await db.query(params.sql, {
           label: params.label,
           taskId: runtime.currentTaskId(),
           maxRows: params.max_rows,
           signal,
+          reuse: params.reuse,
         });
-        const preview = renderTable(meta.columns, meta.preview, cellChars);
+        const preview = renderTable(meta.columns, meta.preview.slice(0, 5), cellChars);
         const text = [
           `result_id=${meta.id}`,
           `stored_rows=${meta.rowCount} truncated=${meta.truncated} duration_ms=${meta.durationMs} bytes=${meta.bytes}`,
           meta.truncated !== "none"
-            ? `NOTE: the stored result was capped (${meta.truncated}). Use result_read(result_id="${meta.id}", offset=...) for more rows.`
+            ? `INCOMPLETE: stored result capped (${meta.truncated}). result_read cannot recover unstored rows; rerun a reduced/aggregated query.`
             : "",
+          `executed_at=${meta.createdAt} timezone=${meta.timezone ?? "unspecified"} cached=${Boolean(meta.cached)} cache_age_ms=${meta.cacheAgeMs ?? 0}`,
+          ...(meta.warnings ?? []),
+          "Query completion time is not source-data freshness or a cross-query snapshot.",
           "",
           preview,
         ]
@@ -127,7 +136,8 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
           row_count: meta.rowCount,
           truncated: meta.truncated,
           columns: meta.columns,
-          next_offset: meta.truncated === "none" ? null : meta.previewRows,
+          next_offset: meta.rowCount > Math.min(meta.preview.length, 5) ? Math.min(meta.preview.length, 5) : null,
+          warnings: meta.warnings, cached: Boolean(meta.cached), executed_at: meta.createdAt, cache_age_ms: meta.cacheAgeMs ?? 0,
         });
       } catch (error) {
         return errorOutput(error);
@@ -141,9 +151,11 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     description:
       "Page through the full rows of a previous query_execute result. Returns rows plus next_offset (null at the end).",
     promptSnippet: "Page through a stored query result by result_id",
-    promptGuidelines: ["Start with offset 0 and follow next_offset until it is null."],
+    promptGuidelines: ["Prefer result_summary or result_transform for large results; never read all pages to compute statistics in model context."],
     parameters: Type.Object({
       result_id: Type.String({ description: "result_id returned by query_execute or query_explain" }),
+      columns: Type.Optional(Type.Array(Type.String(), { maxItems: 50 })),
+      mode: Type.Optional(Type.Union([Type.Literal("rows"), Type.Literal("summary")])),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "Row offset, default 0" })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000, description: "Rows to return, default 50" })),
     }),
@@ -151,7 +163,12 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     execute: async (_id, params) => {
       try {
+        if (params.mode === "summary") { const summary = await db.resultSummary(params.result_id); return textOutput(clampText(JSON.stringify(summary)), summary); }
         const page = await db.readResult(params.result_id, params.offset ?? 0, params.limit ?? 50);
+        if (params.columns) {
+          const indexes = params.columns.map(name => { const matches = page.columns.map((c, i) => c.name === name ? i : -1).filter(i => i >= 0); if (matches.length !== 1) throw new AppError("INVALID_INPUT", `Column ${name} is missing or ambiguous`); return matches[0]!; });
+          page.columns = indexes.map(i => page.columns[i]!); page.rows = page.rows.map(row => indexes.map(i => row[i]));
+        }
         const text = [
           `result_id=${page.id} rows=${page.rows.length} offset=${page.offset} total_rows=${page.rowCount} next_offset=${page.nextOffset ?? "null"}`,
           "",
@@ -188,6 +205,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
           `engine=${snapshot.engine} (${capabilities.engineLabel}) environment=${snapshot.environment} database=${snapshot.database}`,
           `server_version=${capabilities.serverVersion || "unknown"}`,
           `source_access=${capabilities.sourceAccess} read_only_proof=${capabilities.readOnlyProof}`,
+          `timezone=${capabilities.timezone ?? "unspecified"} ${capabilities.timezoneNote ?? ""}`,
           `features=${Object.entries(capabilities.features)
             .map(([name, enabled]) => `${name}:${enabled ? "yes" : "no"}`)
             .join(" ")}`,
@@ -215,7 +233,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     name: "catalog_search",
     label: "Search catalog",
     description:
-      "Search tables, views and other relations by name or schema. Returns qualified names, kind and an estimated row count. This searches names only; use object_describe for columns.",
+      "Search tables/views by name, schema or comments, optionally matching column names/comments. Returns candidate objects, not content matches. Use object_describe_batch to inspect columns.",
     promptSnippet: "Find tables/views by name or schema",
     promptGuidelines: [
       "Start with broad search terms (e.g. 'order', 'customer'); refine with schema when names collide.",
@@ -224,6 +242,8 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     parameters: Type.Object({
       search: Type.Optional(Type.String({ description: "Substring to match against object or schema name" })),
       schema: Type.Optional(Type.String({ description: "Restrict to this schema/database" })),
+      search_columns: Type.Optional(Type.Boolean()),
+      refresh: Type.Optional(Type.Boolean({ description: "Bypass metadata TTL cache" })),
       kinds: Type.Optional(
         Type.Array(Type.Union([Type.Literal("table"), Type.Literal("view"), Type.Literal("materialized_view"), Type.Literal("foreign_table"), Type.Literal("sequence")]), {
           description: "Restrict by relation kind",
@@ -237,13 +257,15 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
       try {
         const objects = await db.catalogSearch({
           search: params.search,
+          searchColumns: params.search_columns,
+          refresh: params.refresh,
           schema: params.schema,
           kinds: params.kinds as never,
           limit: params.limit ?? 100,
         });
         const lines = objects.map(
           (object) =>
-            `${object.schema}.${object.name} [${object.kind}]${object.rowEstimate !== null && object.rowEstimate !== undefined ? ` ~${object.rowEstimate} rows` : ""}${object.comment ? ` — ${object.comment}` : ""}`,
+            `${object.schema}.${object.name} [${object.kind}]${object.rowEstimate !== null && object.rowEstimate !== undefined ? ` ~${object.rowEstimate} rows` : ""}${object.comment ? ` — ${object.comment}` : ""}${(object.rowEstimate ?? 0) > 1_000_000 ? " [LARGE: use selective filters; LIMIT does not cap scans]" : ""}${object.matchedColumns?.length ? " columns=" + object.matchedColumns.map(c => c.name + ":" + c.type + (c.comment ? "(" + c.comment + ")" : "")).join(", ") : ""}`,
         );
         return textOutput(clampText(lines.length ? lines.join("\n") : "No matching relations."), { objects });
       } catch (error) {
@@ -271,6 +293,8 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
         const lines = [
           `${described.object.schema}.${described.object.name} (${described.object.kind})${described.object.rowEstimate !== null ? ` ~${described.object.rowEstimate} rows` : ""}${described.object.comment ? ` — ${described.object.comment}` : ""}`,
           `primary_key: ${described.primaryKey.length ? described.primaryKey.join(", ") : "(none)"}`,
+          `partition_key: ${described.partitionKey ?? "unknown/not partitioned"}`,
+          ...(described.object.rowEstimate && described.object.rowEstimate > 1_000_000 ? ["LARGE TABLE: use selective date/partition filters; LIMIT does not bound aggregate scan cost."] : []),
           "",
           "columns:",
           ...described.columns.map(
@@ -302,14 +326,15 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
       name: Type.String({ description: "Relation name" }),
       schema: Type.Optional(Type.String({ description: "Schema or database" })),
       sample_rows: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: "Rows to sample, default 50" })),
+      sampling: Type.Optional(Type.Union([Type.Literal("head"), Type.Literal("random")], { description: "head is cheap but biased; random can scan/sort the full table and is disabled in production" })),
     }),
     executionMode: "sequential",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     execute: async (_id, params) => {
       try {
-        const profile = await db.profile(params.schema ?? null, params.name, params.sample_rows ?? 50);
+        const profile = await db.profile(params.schema ?? null, params.name, params.sample_rows ?? 50, undefined, params.sampling);
         const lines = [
-          `${profile.object.schema}.${profile.object.name} estimated_rows=${profile.rowCount ?? "unknown"} sampled=${profile.sampled}`,
+          `${profile.object.schema}.${profile.object.name} estimated_rows=${profile.rowCount ?? "unknown"} sampled=${profile.sampled} method=${profile.sampleMethod ?? "head"} sample_rows=${profile.sampleRows ?? "unknown"}`,
           "column\ttype\tnulls\tdistinct\tmin\tmax\tsamples",
           ...profile.columns.map((column) =>
             [
@@ -338,16 +363,17 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
       "Return the database's execution plan for a read-only SQL statement. Use it to check row estimates and scans before running an expensive query. Cost numbers are engine estimates, not measured resource use.",
     promptSnippet: "Inspect the execution plan for a read-only query",
     parameters: Type.Object({
-      sql: Type.String({ description: "One read-only SQL statement" }),
+      sql: Type.String({ description: "One SELECT statement; EXPLAIN is added by the service" }),
+      analyze: Type.Optional(Type.Boolean({ description: "Explicitly execute PostgreSQL EXPLAIN ANALYZE under read-only timeout; consumes budget and may be expensive" })),
     }),
     executionMode: "sequential",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    execute: async (_id, params) => {
+    execute: async (_id, params, signal) => {
       try {
-        const { result, plan } = await db.explain(params.sql);
+        const { result, plan } = await db.explain(params.sql, { analyze: params.analyze, signal });
         const text = [
           `result_id=${result.id}`,
-          `estimated_cost=${plan.estimatedCost ?? "n/a"} estimated_rows=${plan.estimatedRows ?? "n/a"}`,
+          `estimated_cost=${plan.estimatedCost ?? "n/a"} estimated_rows=${plan.estimatedRows ?? "n/a"} scan_rows=${plan.estimatedScanRows ?? "n/a"} analyzed=${Boolean(plan.analyzed)}`,
           plan.warnings.length ? `warnings: ${plan.warnings.join("; ")}` : "",
           "",
           plan.planText,
@@ -518,7 +544,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     description:
       "Turn a result_id into an immutable chart artifact that the console renders. The result must already be " +
       "the shape of the chart (one row per point): this layer never aggregates, never sorts strings implicitly " +
-      "and never invents missing points. Types: bar, line, heatmap (x, y, value), table (all columns).",
+      "and never invents missing points. Types: bar, line, area, pie/donut (x,value), scatter (numeric x,y,value), kpi (one value row), heatmap (x,y,value), table. Value sorting and stack modes must be explicit. Use result_transform for TopN+Other; chart_create never aggregates.",
     promptSnippet: "Chart a result as bar | line | heatmap | table and return the artifact id plus refs",
     promptGuidelines: [
       "Aggregate in SQL first (GROUP BY the axes). Duplicate points are rejected, not summed.",
@@ -531,15 +557,18 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
           Type.Literal("bar"),
           Type.Literal("line"),
           Type.Literal("heatmap"),
-          Type.Literal("table"),
+          Type.Literal("table"), Type.Literal("area"), Type.Literal("pie"), Type.Literal("donut"), Type.Literal("scatter"), Type.Literal("kpi"),
         ]),
         title: Type.Optional(Type.String({ description: "Chart title" })),
+        value_sort: Type.Optional(Type.Union([Type.Literal("asc"), Type.Literal("desc")])),
+        unit: Type.Optional(Type.String({ maxLength: 40 })),
         x: Type.Optional(axisParams("x (category)")),
         y: Type.Optional(axisParams("y (category, heatmap only)")),
         series: Type.Optional(
           Type.Object(
             {
               field: Type.String({ description: "Column that splits rows into series (long format, not a pivot)" }),
+              stack: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("stacked"), Type.Literal("percent")])),
               title: Type.Optional(Type.String()),
             },
             { additionalProperties: false },
@@ -592,6 +621,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
           series: params.series,
           value: params.value,
           color: params.color,
+          value_sort: params.value_sort, unit: params.unit,
         });
         const { artifact, reused } = await runtime.artifacts.createChart({
           sessionId: db.id,
@@ -629,7 +659,8 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     },
   });
 
-  return [
+  const tools: ToolDefinition[] = [
+    ...analysisTools(runtime),
     sessionInfo,
     catalogSearch,
     objectDescribe,
@@ -644,6 +675,21 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     datasetList,
     datasetDrop,
   ];
+  const parallel = new Set(["session_info", "catalog_search", "object_describe", "result_read", "job_get", "job_cancel"]);
+  return tools.filter(tool => tool.name !== "query_explain" || db.capabilitiesView?.features?.explain !== false).map(tool => {
+    const execute = tool.execute;
+    return { ...tool, executionMode: parallel.has(tool.name) ? "parallel" : tool.executionMode,
+      execute: async (...args: Parameters<typeof execute>) => {
+        let result;
+        try { result = await execute(...args); } catch (error) { result = errorOutput(error); }
+        let budget: Record<string, unknown> = {};
+        try { const snap = db.snapshot(); const task = runtime.taskStatus(); budget = { queries_remaining: Math.max(0, snap.queries.limit - snap.queries.used), turns_remaining: Math.max(0, Number(task.max_turns ?? budgets.maxTurns) - Number(task.turns ?? 0)) }; } catch { /* metadata-only catalog */ }
+        const warning = typeof budget.queries_remaining === "number" && budget.queries_remaining <= Math.ceil(budgets.maxQueries * .2) ? "Budget low: converge on findings using stored evidence." : "";
+        const content = [...result.content, { type: "text" as const, text: `budget=${JSON.stringify(budget)}${warning ? " " + warning : ""}` }];
+        return { ...result, content, details: { ...(result.details as object ?? {}), budget } };
+      },
+    } as ToolDefinition;
+  });
 }
 
 export interface ToolParameterInfo {

@@ -9,14 +9,14 @@ import type { ColumnMeta } from "../db/engines/base.js";
  */
 
 /** Bump when the stored spec shape changes; artifacts keep the version they were written with. */
-export const SPEC_VERSION = 1;
+export const SPEC_VERSION = 2;
 /** Bump when the compiler output changes, so old artifacts keep rendering as they did. */
-export const COMPILER_VERSION = "chartc-1";
+export const COMPILER_VERSION = "chartc-2";
 /** Version of the ECharts option dialect the compiled snapshots were produced for. */
 export const ECHARTS_VERSION = "5.5.1";
 
-export type ChartType = "bar" | "line" | "heatmap" | "table";
-export const CHART_TYPES: readonly ChartType[] = ["bar", "line", "heatmap", "table"];
+export type ChartType = "bar" | "line" | "area" | "heatmap" | "table" | "pie" | "donut" | "scatter" | "kpi";
+export const CHART_TYPES: readonly ChartType[] = ["bar", "line", "area", "heatmap", "table", "pie", "donut", "scatter", "kpi"];
 
 export type ValueFormat = "integer" | "decimal" | "percent" | "compact";
 
@@ -41,6 +41,7 @@ export interface ValueSpec {
 
 export interface SeriesSpec {
   field: string;
+  stack?: "none" | "stacked" | "percent";
 }
 
 export interface ColorSpec {
@@ -61,6 +62,8 @@ export interface ChartSpec {
   series?: SeriesSpec;
   value?: ValueSpec;
   color?: ColorSpec;
+  value_sort?: "asc" | "desc";
+  unit?: string;
 }
 
 export type ColumnRole = "x" | "y" | "value" | "series" | "column";
@@ -86,6 +89,8 @@ export interface ArtifactSource {
   session_id: string;
   task_id?: string;
   executed_at: string;
+  timezone?: string;
+  lineage?: { parent_result_id: string; operation: string; parameters?: unknown };
   row_count: number;
   truncated: "none" | "rows" | "bytes";
 }
@@ -143,11 +148,13 @@ export interface Artifact {
   source: ArtifactSource;
   created_at: string;
   error?: string;
+  archived?: boolean;
 }
 
 export interface ChartCompileLimits {
   maxCells: number;
   maxRows: number;
+  maxSeries?: number;
 }
 
 export interface ChartCompileInput {

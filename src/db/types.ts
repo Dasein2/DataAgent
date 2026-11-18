@@ -58,6 +58,7 @@ export const ConnectionConfig = z.object({
   allowWeakReadOnly: z.boolean().default(false),
   workspace: WorkspaceConfig.optional(),
   label: z.string().max(120).optional(),
+  timezone: z.string().max(80).refine(v => { try { new Intl.DateTimeFormat("en", { timeZone: v }); return true; } catch { return false; } }, "Invalid IANA timezone").optional(),
 });
 
 export type ConnectionConfig = z.infer<typeof ConnectionConfig>;
@@ -81,6 +82,8 @@ export interface SessionCapabilities {
   /** Anything the operator should know: degraded capabilities, engine mismatch, weak read-only. */
   notes: string[];
   sourceAccess: "read_only";
+  timezone?: string;
+  timezoneNote?: string;
   workspaceAccess: WorkspaceAccess;
   workspaceName?: string;
   workspaceMode?: "schema" | "database";
@@ -110,6 +113,7 @@ export interface ObjectRef {
   kind: string;
   rowEstimate?: number | null;
   comment?: string | null;
+  matchedColumns?: Array<{ name: string; type: string; comment?: string | null }>;
 }
 
 export interface ObjectDescription {
@@ -117,8 +121,9 @@ export interface ObjectDescription {
   columns: ColumnInfo[];
   primaryKey: string[];
   indexes: Array<{ name: string; columns: string[]; unique: boolean }>;
-  foreignKeys: Array<{ name: string; columns: string[]; references: string }>;
+  foreignKeys: Array<{ name: string; columns: string[]; references: string; referencedColumns?: string[] }>;
   views?: string[];
+  partitionKey?: string | null;
 }
 
 export interface ExplainResult {
@@ -126,6 +131,8 @@ export interface ExplainResult {
   estimatedCost?: number | null;
   estimatedRows?: number | null;
   warnings: string[];
+  estimatedScanRows?: number | null;
+  analyzed?: boolean;
 }
 
 export interface ProfileColumn {
@@ -144,4 +151,7 @@ export interface ProfileResult {
   columns: ProfileColumn[];
   /** True when values were read from the source rather than catalog statistics alone. */
   sampled: boolean;
+  sampleMethod?: "head" | "random";
+  sampleRows?: number;
+  warnings?: string[];
 }

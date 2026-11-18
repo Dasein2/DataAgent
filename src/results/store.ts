@@ -21,6 +21,12 @@ export interface ResultMeta {
   preview: unknown[][];
   previewRows: number;
   error?: string;
+  warnings?: string[];
+  cached?: boolean;
+  cacheAgeMs?: number;
+  timezone?: string;
+  lineage?: { parent_result_id: string; operation: string; parameters?: unknown };
+  privacy?: { masked_columns: string[]; boundary: "output-name-defense-in-depth" };
 }
 
 export interface ResultPage {
@@ -136,7 +142,18 @@ export class ResultWriter {
 }
 
 export class ResultStore {
+  private static readonly writes = new Map<string, Promise<unknown>>();
+  /** Coordinates source and local writers in this single-process service so quotas cannot race. */
+  serializeWrite<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const key = this.root + ":" + sessionId;
+    const previous = ResultStore.writes.get(key) ?? Promise.resolve();
+    const next = previous.then(operation, operation), settled = next.then(() => undefined, () => undefined);
+    ResultStore.writes.set(key, settled);
+    void settled.then(() => { if (ResultStore.writes.get(key) === settled) ResultStore.writes.delete(key); });
+    return next;
+  }
   constructor(private readonly root: string) {}
+  get directory() { return this.root; }
 
   dataPath(id: string): string {
     return join(this.root, `${id}${DATA_SUFFIX}`);
@@ -147,6 +164,8 @@ export class ResultStore {
   }
 
   async create(options: {
+    /** Internal preallocation lets a terminated local worker clean up partial output. */
+    id?: string;
     sessionId: string;
     sql: string;
     previewRows: number;
@@ -154,7 +173,8 @@ export class ResultStore {
     label?: string;
   }): Promise<ResultWriter> {
     await mkdir(this.root, { recursive: true });
-    const id = `res_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const id = options.id ?? `res_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    if (!/^res_[a-z0-9]{8,32}$/.test(id)) throw new Error("Invalid result id");
     return new ResultWriter(this, id, options.sessionId, options.sql, options.previewRows, options.taskId, options.label);
   }
 
@@ -182,7 +202,8 @@ export class ResultStore {
     const max = Math.max(1, Math.min(1_000, limit));
     let index = 0;
     let nextOffset: number | null = null;
-    const reader = createInterface({ input: createReadStream(this.dataPath(id)), crlfDelay: Infinity });
+    const input = createReadStream(this.dataPath(id));
+    const reader = createInterface({ input, crlfDelay: Infinity });
     try {
       for await (const line of reader) {
         if (!line) continue;
@@ -200,6 +221,7 @@ export class ResultStore {
       if (nextOffset === null && rows.length < max) nextOffset = null;
     } finally {
       reader.close();
+      input.destroy();
     }
     return {
       id,
