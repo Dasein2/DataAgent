@@ -1,5 +1,82 @@
+function categoryAxis(option, axis) {
+  const config = Array.isArray(option[axis]) ? option[axis][0] : option[axis];
+  return config?.type === "category" && Array.isArray(config.data) ? config : null;
+}
+
+/** Add a viewport to a stored figure, without changing its data, scales or category order. */
+export function chartViewport(option, width, height, dark = false) {
+  const grid = option.grid;
+  if (!grid || Array.isArray(grid) || option.dataZoom) return option;
+  const x = categoryAxis(option, "xAxis");
+  const y = categoryAxis(option, "yAxis");
+  const denseScatter = option.series?.some((series) => series.type === "scatter" && series.data?.length > 80);
+  const xSlot = (x?.data ?? []).reduce(
+    (slot, label) => Math.min(108, Math.max(slot, String(label).length * 9 + 8)),
+    44,
+  );
+  const sliderBottomSpace = 30;
+  const sliderRightSpace = 26;
+  const yLabelWidth = y ? 88 : 42;
+  const ySlot = 22;
+  const xCapacity = (hasYSlider) => Math.max(2, Math.floor(
+    (width - grid.left - grid.right - yLabelWidth - (hasYSlider ? sliderRightSpace : 0)) / xSlot,
+  ));
+  const yCapacity = (hasXSlider) => Math.max(2, Math.floor(
+    (height - grid.top - grid.bottom - ySlot - (hasXSlider ? sliderBottomSpace : 0)) / ySlot,
+  ));
+  const xCount = x?.data.length ?? 0;
+  const yCount = y?.data.length ?? 0;
+  const hasY = denseScatter || yCount > yCapacity(xCount > xCapacity(false));
+  const hasX = denseScatter || xCount > xCapacity(hasY);
+  if (!hasX && !hasY) return option;
+
+  const bottom = option.visualMap ? 48 : option.legend ? 32 : 8;
+  const view = {
+    ...option,
+    grid: {
+      ...grid,
+      bottom: grid.bottom + (hasX ? sliderBottomSpace : 0),
+      right: grid.right + (hasY ? sliderRightSpace : 0),
+    },
+    dataZoom: [],
+  };
+  for (const [axis, category, active, capacity] of [
+    ["xAxis", x, hasX, xCapacity(hasY)],
+    ["yAxis", y, hasY, yCapacity(hasX)],
+  ]) {
+    if (!active) continue;
+    const horizontal = axis === "xAxis";
+    view.dataZoom.push({
+      id: "viewport-" + axis,
+      type: "slider",
+      [axis + "Index"]: 0,
+      orient: horizontal ? "horizontal" : "vertical",
+      ...(horizontal ? { bottom, height: 18 } : { right: 8, width: 18 }),
+      // Clip in the renderer, not by filtering series; panning must not rescale the opposite axis.
+      filterMode: "none",
+      showDataShadow: false,
+      showDetail: false,
+      brushSelect: false,
+      borderColor: dark ? "#647685" : "#a1acae",
+      backgroundColor: dark ? "#202a33" : "#eeefec",
+      fillerColor: dark ? "rgba(121, 172, 177, 0.55)" : "rgba(98, 143, 145, 0.38)",
+      ...(category
+        ? { startValue: 0, endValue: Math.min(category.data.length, capacity) - 1, minValueSpan: 1 }
+        : { start: 0, end: 100 }),
+    });
+  }
+  for (const [key, axis, labelWidth] of [["xAxis", x, xSlot - 8], ["yAxis", y, yLabelWidth]]) {
+    if (!axis) continue;
+    const config = { ...axis, axisLabel: { ...axis.axisLabel, width: labelWidth, overflow: "truncate" } };
+    view[key] = Array.isArray(option[key]) ? [config, ...option[key].slice(1)] : config;
+  }
+  // Keep the reserved legend row bounded even with many series.
+  if (hasX && option.legend && !Array.isArray(option.legend)) view.legend = { ...option.legend, type: "scroll" };
+  return view;
+}
+
 /** Chart UI is a rendering of immutable server artifacts. No client aggregation. */
-export function createCharts({ api, state, escapeHtml, cellToString, openRef, refreshContext }) {
+export function createCharts({ api, state, authHeaders, escapeHtml, cellToString, openRef, refreshContext }) {
   const $ = (id) => document.getElementById(id);
   const echartsLoader = { promise: null };
   function ensureEcharts() {
@@ -20,8 +97,7 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
   }
 
   async function downloadFile(path, fallbackName) {
-    const headers = {};
-    if (state.token) headers["authorization"] = "Bearer " + state.token;
+    const headers = authHeaders?.() ?? (state.token ? { authorization: "Bearer " + state.token } : {});
     const res = await fetch(path, { headers });
     if (!res.ok) throw new Error("HTTP " + res.status);
     // The server names the file (it carries the artifact id and title); fall back to our guess.
@@ -60,7 +136,12 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
     try {
       const { artifact } = await api("/v1/artifacts/" + artifactId);
       if (!host.isConnected) return;
+      const messages = host.closest("#messages");
+      const follow = messages && messages.scrollHeight - messages.clientHeight - messages.scrollTop < 80;
       holder.replaceWith(buildChartCard(artifact));
+      // History charts arrive asynchronously: stay at the newest turn only if the user
+      // is still at the bottom, rather than pulling them away from earlier messages.
+      if (follow) messages.scrollTop = messages.scrollHeight;
     } catch (error) {
       holder.textContent = "图表加载失败: " + (error.message || String(error));
     }
@@ -186,8 +267,12 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
       }
     };
     actions.appendChild(archive);
-    const yCount = option.yAxis && Array.isArray(option.yAxis.data) ? option.yAxis.data.length : 0;
-    plot.style.height = (yCount > 6 ? Math.max(320, Math.min(620, yCount * 26 + 110)) : 300) + "px";
+    const yCount = categoryAxis(option, "yAxis")?.data.length ?? 0;
+    plot.style.height = (yCount > 6 ? Math.max(320, Math.min(460, yCount * 26 + 110)) : 300) + "px";
+    const scrollHint = document.createElement("div");
+    scrollHint.className = "cc-note";
+    scrollHint.hidden = true;
+    card.insertBefore(scrollHint, actions);
 
     ensureEcharts()
       .then((echarts) => {
@@ -214,7 +299,38 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
           },
         };
         const chart = echarts.init(plot, theme, { renderer: "svg" });
-        chart.setOption(structuredClone(currentOption), true);
+        let viewportKey;
+        const chosenRanges = new Map();
+        chart.on("datazoom", (event) => {
+          for (const { dataZoomId, start, end } of event.batch ?? [event]) {
+            if (dataZoomId && Number.isFinite(start) && Number.isFinite(end)) {
+              chosenRanges.set(dataZoomId, { start, end });
+            }
+          }
+        });
+        function applyViewport(force = false) {
+          const view = chartViewport(currentOption, chart.getWidth(), chart.getHeight(), dark);
+          const sliders = view.dataZoom?.filter((slider) => slider.id?.startsWith("viewport-")) ?? [];
+          const key = JSON.stringify(sliders);
+          if (!force && key === viewportKey) return;
+          viewportKey = key;
+
+          const next = structuredClone(view);
+          for (const slider of next.dataZoom ?? []) {
+            const range = chosenRanges.get(slider.id);
+            if (!range) continue;
+            delete slider.startValue;
+            delete slider.endValue;
+            Object.assign(slider, range);
+          }
+          chart.setOption(next, true);
+          scrollHint.hidden = sliders.length === 0;
+          if (sliders.length) {
+            const direction = sliders.length === 2 ? "下方和右侧" : sliders[0].orient === "vertical" ? "右侧" : "下方";
+            scrollHint.textContent = `拖动${direction}滑条浏览数据，拖动滑条两端可调整显示范围。`;
+          }
+        }
+        applyViewport();
         for (const chip of refs.children) {
           chip.onmouseenter = () => {
             const match = chip.dataset.ref.match(/#cell\[(.*)\]/);
@@ -226,10 +342,17 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
               }),
             );
             const option = chart.getOption();
-            const categories = option.xAxis?.[0]?.data ?? [];
+            const xIndex = option.xAxis?.[0]?.data?.indexOf(pairs[spec.x?.field]) ?? -1;
+            const yIndex = option.yAxis?.[0]?.data?.indexOf(pairs[spec.y?.field]) ?? -1;
+            const outsideWindow = (axis, index) => option.dataZoom?.some(({ id, startValue, endValue }) =>
+              id === "viewport-" + axis && (index < startValue || index > endValue),
+            );
+            if (xIndex < 0 || outsideWindow("xAxis", xIndex) || (yIndex >= 0 && outsideWindow("yAxis", yIndex))) return;
             const seriesNames = option.series?.map((s) => s.name) ?? [];
-            const dataIndex = categories.indexOf(pairs[spec.x?.field]);
             const seriesIndex = spec.series ? seriesNames.indexOf(pairs[spec.series.field]) : 0;
+            const dataIndex = spec.type === "heatmap"
+              ? option.series[0].data.findIndex(([x, y]) => x === xIndex && y === yIndex)
+              : xIndex;
             if (dataIndex >= 0 && seriesIndex >= 0) {
               chart.dispatchAction({
                 type: "highlight",
@@ -244,7 +367,10 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
             chart.dispatchAction({ type: "hideTip" });
           };
         }
-        const resize = new ResizeObserver(() => chart.resize());
+        const resize = new ResizeObserver(() => {
+          chart.resize();
+          applyViewport();
+        });
         resize.observe(plot);
         const removal = new MutationObserver(() => {
           if (card.isConnected) return;
@@ -274,10 +400,14 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
         const png = document.createElement("button");
         png.className = "ghost";
         png.textContent = "下载 PNG";
-        png.onclick = () =>
-          api("/v1/artifacts/" + artifact.id + "/export-action", { method: "POST", body: { format: "png" } })
-            .then(() => pngFromOption(currentOption, artifact.id, chart.getWidth(), chart.getHeight()))
+        png.onclick = () => {
+          const snapshot = chart.getOption();
+          const width = chart.getWidth();
+          const height = chart.getHeight();
+          return api("/v1/artifacts/" + artifact.id + "/export-action", { method: "POST", body: { format: "png" } })
+            .then(() => pngFromOption(snapshot, theme, artifact.id, width, height))
             .catch((error) => alert(error.message));
+        };
         actions.appendChild(svg);
         actions.appendChild(png);
 
@@ -290,8 +420,8 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
           button.className = "ghost" + (alternate.type === spec.type ? " active" : "");
           button.textContent = alternate.type === "bar" ? "柱状" : alternate.type === "line" ? "折线" : alternate.type;
           button.onclick = () => {
-            currentOption = alternate.option;
-            chart.setOption(structuredClone(currentOption), true);
+            currentOption = alternate.option ?? {};
+            applyViewport(true);
             for (const other of toggle.querySelectorAll("button")) other.classList.toggle("active", other === button);
           };
           toggle.appendChild(button);
@@ -305,15 +435,15 @@ export function createCharts({ api, state, escapeHtml, cellToString, openRef, re
     return card;
   }
 
-  /** PNG needs the canvas renderer, so it is drawn off-screen from the same stored option. */
-  async function pngFromOption(option, id, width, height) {
+  /** Draw the current figure and its visible range with the canvas renderer for PNG. */
+  async function pngFromOption(option, theme, id, width, height) {
     const echarts = await ensureEcharts();
     const holder = document.createElement("div");
     holder.style.cssText = "position:absolute;left:-99999px;top:0";
     document.body.appendChild(holder);
     let chart;
     try {
-      chart = echarts.init(holder, null, { renderer: "canvas", width, height });
+      chart = echarts.init(holder, theme, { renderer: "canvas", width, height });
       chart.setOption({ ...structuredClone(option), animation: false }, true);
       const url = chart.getDataURL({
         type: "png",

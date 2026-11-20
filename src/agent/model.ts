@@ -112,14 +112,15 @@ export function modelsFileFor(
  * `consoleKey` is the key the operator saved in the console for this provider; it wins over `.env`
  * and over the provider's own pi credential.
  */
-export async function createModelHandle(app: AppConfig, consoleKey?: string, managed?: ManagedRuntimeConfig): Promise<ModelHandle> {
-  const dir = join(app.dataDir, "pi");
+export async function createModelHandle(app: AppConfig, consoleKey?: string, managed?: ManagedRuntimeConfig, runtimeDir?: string): Promise<ModelHandle> {
+  // Session catalogues must not overwrite the global default's models.json.
+  const dir = runtimeDir ?? join(app.dataDir, "pi");
   await mkdir(dir, { recursive: true });
   const modelsPath = join(dir, "models.json");
   // An operator can point at an existing pi credential store instead of exporting a key; secrets are
   // still only read, never written, and never logged.
   const owned = managed && Object.hasOwn(managed.providers, app.model.provider) ? managed.providers[app.model.provider] : undefined;
-  const authPath = owned ? join(dir, "managed-auth.json") : app.model.authPath ?? join(dir, "auth.json");
+  const authPath = owned ? join(dir, "managed-auth.json") : app.model.authPath ?? join(app.dataDir, "pi", "auth.json");
   // Channels the operator already configured in pi; keys stay in memory (see `pi-config.ts`).
   const pi = readPiConfig(app.piModelsPath, app.piSettingsPath);
 

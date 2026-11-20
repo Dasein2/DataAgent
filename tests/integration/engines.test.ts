@@ -204,6 +204,42 @@ for (const [label, engine, dsn] of suites) {
       });
     });
 
+    it("browses scopes and paginates filtered objects with column match details", async () => {
+      await withSession(engine, dsn!, async (session) => {
+        const catalog = await session.catalogScopes();
+        assert.ok(catalog.scopes.includes(catalog.default_scope));
+        assert.ok(catalog.scopes.includes("analysis_ws"));
+        const options = { schema: catalog.default_scope, limit: 1, offset: 0, refresh: false };
+        assert.equal(catalog.table_counts?.[catalog.default_scope], 1, "only sales, not the view or sequence");
+        const workspaceTables = catalog.table_counts?.analysis_ws;
+        assert.equal(typeof workspaceTables, "number");
+        assert.equal(catalog.table_counts?.information_schema, undefined);
+        const first = await session.catalogPage(options);
+        assert.equal(first.nextOffset, 1);
+        const second = await session.catalogPage({ ...options, offset: first.nextOffset! });
+        assert.notEqual(first.objects[0]?.name, second.objects[0]?.name);
+        const views = await session.catalogPage({ ...options, kinds: ["view"] });
+        assert.equal(views.objects[0]?.name, "sales_by_region");
+        assert.equal(views.nextOffset, null);
+        const name = "ds_catalog_count";
+        await session.createDataset(name, "SELECT 1 AS n", "table");
+        try {
+          const updated = await session.catalogScopes(true);
+          assert.equal(updated.table_counts?.analysis_ws, workspaceTables! + 1);
+          assert.equal((await session.catalogScopes()).table_counts?.analysis_ws, workspaceTables! + 1);
+        } finally {
+          await session.dropDataset(name);
+        }
+        const searched = await session.catalogPage({ search: "region", searchColumns: true, limit: 100, offset: 0, refresh: false });
+        assert.equal(searched.objects[0]?.name, "sales_by_region", "name match before column hit");
+        assert.deepEqual(searched.objects.find((o) => o.name === "sales")?.columnMatch, { name: "region", count: 1 });
+        const literal = await session.catalogPage({ ...options, search: "sales%", searchColumns: true });
+        assert.deepEqual(literal.objects, [], "percent is a literal substring, not a wildcard");
+        const blocked = await session.catalogPage({ ...options, schema: "information_schema" });
+        assert.deepEqual(blocked, { objects: [], nextOffset: null });
+      });
+    });
+
     it("explains a query", async () => {
       await withSession(engine, dsn!, async (session) => {
         const { plan } = await session.explain("SELECT * FROM sales WHERE region = 'EU'");

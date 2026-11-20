@@ -4,29 +4,44 @@
 
 ## 1. 日常工作流
 
-1. 使用数据库只读账号建立会话。在高级设置中可记录 IANA 分析时区（如 `Asia/Shanghai`）；它不会偷偷修改数据库 session timezone。
-2. 右侧“目录”搜索表名、列名或注释，展开 schema，查看字段、主键和分区键。`catalog_overview` 提供有限目录概览和关系候选，不声称覆盖整个数据库。
+1. 在左侧「数据库资产」点击 ＋ 添加连接，填写分组并保存，同一分组的连接会集中展示。用连接下的「新会话」建立分析会话。侧栏支持搜索和收起，收起状态保存在当前浏览器。在高级设置中可记录 IANA 分析时区（如 `Asia/Shanghai`）；它不会偷偷修改数据库 session timezone。
+2. 右侧「目录」按数据库（Doris、MySQL、StarRocks）或 Schema（PostgreSQL）分组，默认只展开当前库或默认 Schema。组名旁显示当前连接账号可见的表数（含外部表，不含视图和序列），与展开状态、分页和类型筛选无关；点「刷新目录」重新统计。展开后分批加载对象，可筛选表或视图。搜索会查询连接允许访问的范围，不受已展开目录限制；结果标明名称、注释或字段命中。点击对象可查看字段、概览和已声明的出向外键。断开后，同一页面内已经加载的内容可作为该会话的临时目录快照查看；刷新页面不会保留快照。
 3. 提问后查看紧凑工具证据、耗时和剩余查询/轮次。大表优先明确日期/分区过滤和指标口径，`LIMIT` 只限制返回行，不是扫描成本保证。
 4. 在“结果”或报告的结果链接中打开宽屏工作台：50/100/200/500 行分页、跳行、显示列、列类型、页内排序/过滤、完整 SQL 和复制。页内操作**不是全结果计算**。
 5. 列统计扫描已保存结果，不再读源库。其范围为已保存行，不是源表统计。去重有封顶、数值统计有近似标记，候选频次不是准确全局 top-K。
 6. 使用“本地 SQL 分析”对表 `data` 显式聚合、过滤、排序或 TopN。它生成新结果，不修改原结果或源数据。完整且有界结果可以固定为本地快照。
 7. 图表存入不可变 artifact；“图表工作台”集中展示。报告引用可点击查看准确值、来源行、SQL、执行时间。归档只隐藏工作清单，不破坏引用；修改标题生成新版本。
-8. 历史会话无需连接数据库也能读取保存的报告、结果和图表。恢复分析建立新连接，不重放中断 SQL，不承诺与旧查询同一事务快照。
+8. 点击连接下的会话即可查看保存的报告、结果和图表。找不到对应连接的会话仍可在「未关联历史」查看。需要继续查询时，在聊天顶部点击「恢复分析」建立连接。恢复后接续原会话，旧查询的事务快照与中断任务不会恢复。
 
 快捷键：`Ctrl/⌘ K` 打开命令面板，方向键/Enter 选择，Esc 关闭 dialog。页头支持明暗主题；窄屏自动重排。前端采用同源原生 ES modules，无 CDN、额外前端构建或运行时 UI 框架。
 
+### 业务资料与会话上下文
+
+- 建立连接后，打开右侧 **业务资料**，新建、编辑或删除 Markdown 文档，例如 GMV 计算规则、事件字段含义或业务过滤条件。
+- 点击输入框旁的 **业务上下文**，勾选文档并 **应用到会话**。后续问题继续使用这份选用快照，无需重复上传或勾选。运行中的任务不会切换版本。
+- **设为连接默认**只影响同一连接的新会话。新会话读取未删除默认文档的最新版；**恢复分析**则恢复原会话选用的版本（包括空选用）。连接范围按调用方、数据库目标、登录账号和连接路径区分。
+- 编辑或删除文档不会改动已有快照，工作台会标注「有新版」或「库中已删除」。重新应用时加载当前勾选项的最新版，并移除未选用项。删除资料库文档不等于删除历史会话中的文档快照、回答或结果。
+- 单篇约 2,000 tokens，选用合计约 8,000 tokens（按 UTF-8 大小粗估，实际用量由模型分词决定）。正文会随分析请求发给已配置的模型；不要保存凭证或不应发送给模型的敏感资料。业务资料只提供分析参考，不改变工具授权和数据库只读策略。
+
+**API**：以 `/v1/sessions/{id}/business-context` 为基路径，需要归属当前调用方的活跃会话。`GET` 返回文档摘要、会话选用项、默认 ID 和预算；`POST` 用 `{name, content}` 新建；`GET/PUT/DELETE /{fileId}` 读取、替换或删除文档。`PUT /selection` 用 `{ids:[...]}` 替换本会话选用（`[]` 清空），`PUT /defaults` 保存同一连接的默认 ID。共享 bearer token 的部署应让可信网关覆盖客户端的 `X-Caller-Id`，不要将自报调用方 ID 当作独立鉴权。
+
 ## 2. 工具与只读边界
 
-共 24 个工具定义；不支持计划的引擎不注入 `query_explain`：
+服务目录共 21 个工具。支持执行计划的会话提供 18 个，有可写工作区时加 3 个；不支持执行计划时不提供 `query_explain`。工具集在建立或恢复会话时按实际能力确定，不用切换模式。
 
 | 范围 | 工具 |
 | --- | --- |
-| 发现 | `session_info`, `catalog_search`, `catalog_overview`, `object_describe`, `object_describe_batch`, `data_profile` |
-| 源查询 | `query_execute`, `query_explain`, `job_get`, `job_cancel` |
-| 保存结果 | `result_read`, `result_summary`, `result_transform` |
-| 本地快照 | `snapshot_create`, `snapshot_list`, `snapshot_query`, `snapshot_drop` |
+| 发现 | `session_info`, `catalog_search`, `catalog_overview`, `object_describe`（`objects` 数组，1–20 个表/视图）, `data_profile` |
+| 源查询 | `query_execute`, `query_explain` |
+| 保存结果 | `result_read`（`mode=rows` 读行，`mode=summary` 看统计）, `result_transform` |
+| 本地快照 | `snapshot_create`, `snapshot_list`, `snapshot_drop` |
 | 受控工作区 | `dataset_create`, `dataset_list`, `dataset_drop` |
-| BI | `chart_create`, `chart_list`, `chart_archive`, `chart_revise` |
+| BI | `chart_create` |
+| 任务与图表管理 | `job_get`, `job_cancel`, `chart_list`, `chart_archive`, `chart_revise` |
+
+已经保存的行和列足以回答，就在本地继续分析；存量不足或需要新鲜数据才重新查源。只有后续源库 SQL 需要引用中间对象时才创建工作区数据集。管理工具始终可用；模型只在用户要求时取消 SQL、改名或归档/恢复图表。工具可见性不授予权限：工作区访问、会话归属和只读检查不变。
+
+`GET /v1/tools` 返回服务目录；加 `?session_id=…` 则返回当前调用方活跃会话实际给模型的工具。工作台按当前会话显示。已有的任务、快照和图表 HTTP 接口不变。
 
 - 模型没有 Bash、任意文件或系统操作工具，也看不到连接凭证。
 - 源 SQL 在固定连接上串行；只有元数据使用独立完成只读验证的连接。有界并发不等于复用一个连接并行查询。
@@ -87,7 +102,7 @@ ORDER BY total DESC;
 
 numeric/int8 解码保留十进制字符串，测试覆盖 `9007199254740993.30`，不会经 JS number 二次计算。但源库 float/double 的固有误差不会被修复。图表坐标可用浮点，引用/CSV 保持原快照文本。派生结果含 `lineage.parent_result_id`、操作 SQL 和完整性；artifact source 也保留父链及分析时区。逐级读取父结果可追溯到源 SQL。
 
-快照仅是对已保存结果的命名固定，不触发源抽取、不刷新数据；每会话最多 20 个。取消固定不删除原结果。查询执行时间不等于源数据水位，不提供跨查询一致性快照保证。
+快照仅是对已保存结果的命名固定，不触发源抽取、不刷新数据；每会话最多 20 个。模型统一用 `result_transform` 跑本地 SQL：`source: {kind: "result", id: "res_…"}` 或 `source: {kind: "snapshot", id: "snp_…"}`。快照必须完整，不支持 `allow_partial=true`。取消固定不删除原结果。查询执行时间不等于源数据水位，不提供跨查询一致性快照保证。
 
 ## 5. 图表约束
 
@@ -107,7 +122,9 @@ numeric/int8 解码保留十进制字符串，测试覆盖 `9007199254740993.30`
 
 | Method | Path | 说明 |
 | --- | --- | --- |
-| GET | `/v1/sessions/{sid}/catalog?search=amount&columns=true&refresh=true` | 目录/字段搜索，最多 200 对象 |
+| GET | `/v1/sessions/{sid}/catalog/scopes?refresh=true` | 当前会话允许的库/Schema、默认分组及每组可见表数；统计失败时 `table_counts` 为 `null`，目录仍可浏览 |
+| GET | `/v1/sessions/{sid}/catalog/objects?schema=public&type=table&limit=50&offset=0` | 分页浏览；也可省略 `schema`、用 `search` 跨可访问范围搜索名称、字段或注释。`nextOffset` 为 `null` 表示无下一页 |
+| GET | `/v1/sessions/{sid}/catalog?search=amount&columns=true&refresh=true` | 兼容旧客户端：目录/字段搜索，最多 200 对象 |
 | GET | `/v1/sessions/{sid}/object?schema=public&name=sales` | 对象、字段、键和索引 |
 | GET | `/v1/sessions/{sid}/datasets` | 会话拥有的工作区数据集 |
 | GET | `/v1/results/{rid}?offset=200&limit=100&columns=category,amount` | 已保存结果分页和唯一列名投影 |

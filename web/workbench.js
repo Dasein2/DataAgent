@@ -1,3 +1,6 @@
+import { initBusinessContext } from "/business-context.js";
+import { initCatalog } from "/catalog.js";
+
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -5,21 +8,26 @@ const el = (tag, cls, text) => {
   return n;
 };
 
-export function initWorkbench({ api, state, openResult, buildChartCard, loadHistory }) {
-  let request = 0,
-    histories = [],
-    results = [],
+export function initWorkbench({ api, state, openResult, buildChartCard, openSession }) {
+  let results = [],
     artifacts = [];
   const context = el("aside", "context-panel");
   context.id = "analysisContext";
   context.setAttribute("aria-label", "分析上下文");
   const tabs = el("div", "context-tabs");
   const sections = {};
+  const tabButtons = {};
+  function activateTab(key) {
+    for (const [name, section] of Object.entries(sections)) section.hidden = name !== key;
+    for (const [name, button] of Object.entries(tabButtons)) button.setAttribute("aria-pressed", String(name === key));
+    if (key !== "catalog") catalog.close();
+  }
   for (const [key, title] of [
     ["catalog", "目录"],
     ["results", "结果"],
     ["charts", "图表"],
     ["session", "上下文"],
+    ["business", "业务资料"],
   ]) {
     const button = el("button", "ghost", title);
     button.setAttribute("aria-controls", "context-" + key);
@@ -28,32 +36,18 @@ export function initWorkbench({ api, state, openResult, buildChartCard, loadHist
     section.id = "context-" + key;
     section.hidden = key !== "catalog";
     sections[key] = section;
-    button.onclick = () => {
-      for (const [k, s] of Object.entries(sections)) s.hidden = k !== key;
-      for (const b of tabs.children) b.setAttribute("aria-pressed", String(b === button));
-    };
+    button.onclick = () => activateTab(key);
+    tabButtons[key] = button;
     tabs.append(button);
   }
   context.append(tabs, ...Object.values(sections));
   document.querySelector("main").append(context);
+  const businessContext = initBusinessContext({ api, state, panel: sections.business, trigger: document.querySelector("#btnBusinessContext") });
   const budget = el("div", "budget-strip");
   budget.setAttribute("role", "status");
   document.querySelector("#taskbar").after(budget);
-  const history = el("section", "panel history-panel");
-  history.append(el("h2", "", "分析记录"));
-  const search = el("input");
-  search.placeholder = "搜索会话 / 数据库";
-  search.setAttribute("aria-label", "搜索历史会话");
-  const historyList = el("div", "history-list");
-  history.append(search, historyList);
-  document.querySelector(".sidebar").prepend(history);
-  const catalogSearch = el("input");
-  catalogSearch.placeholder = "搜索表、字段和注释";
-  catalogSearch.setAttribute("aria-label", "搜索数据目录");
-  const catalogStatus = el("p", "muted", "连接后查看目录。历史结果可离线浏览。");
-  const catalog = el("div", "catalog-tree");
-  const refresh = el("button", "ghost", "刷新目录");
-  sections.catalog.append(catalogSearch, refresh, catalogStatus, catalog);
+  const catalog = initCatalog({ api, state, panel: sections.catalog, reveal: () => activateTab("catalog") });
+  catalog.sessionChanged();
   const sessionDetails = el("div", "session-context"),
     datasets = el("div", "result-list"),
     snapshots = el("div", "result-list"),
@@ -74,127 +68,8 @@ export function initWorkbench({ api, state, openResult, buildChartCard, loadHist
   const dashboard = el("button", "ghost", "打开图表工作台");
   const chartList = el("div", "result-list");
   sections.charts.append(dashboard, chartList);
-  let debounce;
-  const browseCatalog = async (force = false) => {
-    if (!state.sessionId || !state.sessionReady) {
-      catalog.replaceChildren();
-      return;
-    }
-    const id = state.sessionId,
-      token = ++request;
-    catalogStatus.textContent = "读取目录…";
-    try {
-      const r = await api(
-        `/v1/sessions/${id}/catalog?columns=true&search=${encodeURIComponent(catalogSearch.value)}${force ? "&refresh=true" : ""}`,
-      );
-      if (token !== request || state.sessionId !== id) return;
-      catalog.replaceChildren();
-      catalogStatus.textContent = `显示 ${r.objects.length} 个候选对象（最多 200）。元数据按会话缓存。`;
-      const groups = new Map();
-      for (const object of r.objects) {
-        if (!groups.has(object.schema)) {
-          const d = el("details");
-          d.open = true;
-          d.append(el("summary", "", object.schema));
-          groups.set(object.schema, d);
-          catalog.append(d);
-        }
-        const b = el("button", "catalog-object", object.name);
-        b.title = [
-          object.kind,
-          object.rowEstimate == null ? "行数未知" : "~" + object.rowEstimate.toLocaleString() + " 行",
-          object.comment,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-        b.onclick = () => describe(object);
-        groups.get(object.schema).append(b);
-      }
-    } catch (e) {
-      if (token === request) catalogStatus.textContent = e.message;
-    }
-  };
-  refresh.onclick = () => void browseCatalog(true);
-  catalogSearch.oninput = () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => void browseCatalog(), 350);
-  };
-  async function describe(object) {
-    const id = state.sessionId;
-    try {
-      const d = await api(
-        `/v1/sessions/${id}/object?schema=${encodeURIComponent(object.schema)}&name=${encodeURIComponent(object.name)}`,
-      );
-      if (state.sessionId !== id) return;
-      const dialog = el("dialog", "object-dialog");
-      const h = el("h2", "", object.schema + "." + object.name);
-      const close = el("button", "ghost", "关闭");
-      close.onclick = () => dialog.close();
-      const note = el(
-        "p",
-        "muted",
-        [
-          object.comment,
-          "主键: " + (d.primaryKey.join(", ") || "未声明"),
-          "估算行数: " + (object.rowEstimate ?? "未知"),
-          "分区键: " + (d.partitionKey ?? "未知/未分区"),
-        ]
-          .filter(Boolean)
-          .join(" · "),
-      );
-      const table = el("table", "data-grid");
-      for (const c of d.columns) {
-        const row = el("tr");
-        row.append(
-          el("th", "", c.name),
-          el("td", "mono", c.type),
-          el("td", "", c.nullable ? "可空" : "NOT NULL"),
-          el("td", "", c.comment ?? ""),
-        );
-        table.append(row);
-      }
-      const ask = el("button", "primary", "针对这张表提问");
-      ask.onclick = () => {
-        document.querySelector("#goal").value = `请分析 ${object.schema}.${object.name}：`;
-        dialog.close();
-        document.querySelector("#goal").focus();
-      };
-      dialog.append(h, close, note, table, ask);
-      document.body.append(dialog);
-      dialog.addEventListener("close", () => dialog.remove(), { once: true });
-      dialog.showModal();
-    } catch (e) {
-      catalogStatus.textContent = e.message;
-    }
-  }
-  function drawHistory() {
-    historyList.replaceChildren();
-    for (const s of histories.filter((s) =>
-      [s.title, s.database, s.session_id].join(" ").toLowerCase().includes(search.value.toLowerCase()),
-    )) {
-      const b = el("button", "history-item" + (s.session_id === state.sessionId ? " selected" : ""));
-      b.append(
-        el("strong", "", s.title || s.tasks?.[0]?.goal?.slice(0, 50) || s.database),
-        el("small", "muted", `${s.database} · ${s.status} · ${(s.last_used_at ?? s.created_at ?? "").slice(0, 10)}`),
-      );
-      b.onclick = () => {
-        const select = document.querySelector("#historySelect");
-        select.value = s.session_id;
-        select.dispatchEvent(new Event("change"));
-        document.querySelector("#btnHistory").click();
-      };
-      historyList.append(b);
-    }
-    if (!histories.length) historyList.append(el("p", "muted", "尚无分析记录"));
-  }
-  search.oninput = drawHistory;
-  async function updateHistory(items) {
-    histories = items;
-    drawHistory();
-  }
   async function refreshContext() {
     const id = state.sessionId;
-    drawHistory();
     if (!id) {
       results = [];
       artifacts = [];
@@ -318,8 +193,8 @@ export function initWorkbench({ api, state, openResult, buildChartCard, loadHist
   }
   let displayedSession = null;
   function sessionChanged() {
-    request++;
-    catalogSearch.value = "";
+    businessContext.sessionChanged();
+    catalog.sessionChanged();
     if (displayedSession !== state.sessionId) {
       timeline.replaceChildren();
       displayedSession = state.sessionId;
@@ -347,7 +222,6 @@ export function initWorkbench({ api, state, openResult, buildChartCard, loadHist
       for (const note of [...(c.notes ?? []), ...(c.workspaceNote ? [c.workspaceNote] : [])])
         sessionDetails.append(el("p", "muted", note));
     }
-    void browseCatalog();
     void refreshContext();
     if (state.session?.queries)
       updateBudget({
@@ -374,11 +248,17 @@ export function initWorkbench({ api, state, openResult, buildChartCard, loadHist
   }
   const command = el("dialog", "command-dialog");
   command.setAttribute("aria-label", "命令面板");
+  const header = el("header");
+  const title = el("h2", "", "命令面板");
+  const closeBtn = el("button", "ghost", "关闭");
+  closeBtn.type = "button";
+  closeBtn.onclick = () => command.close();
+  header.append(title, closeBtn);
   const input = el("input");
-  input.placeholder = "搜索会话、结果，或输入命令";
+  input.placeholder = "搜索会话、结果，或输入命令 (ESC 关闭)";
   input.setAttribute("aria-label", "搜索命令");
   const choices = el("div", "command-list");
-  command.append(input, choices);
+  command.append(header, input, choices);
   document.body.append(command);
   let commands = [];
   function showChoices() {
@@ -405,12 +285,9 @@ export function initWorkbench({ api, state, openResult, buildChartCard, loadHist
         name: "结果 · " + (r.label || r.id),
         run: () => openResult(r.id),
       })),
-      ...histories.map((s) => ({
+      ...state.sessions.map((s) => ({
         name: "会话 · " + (s.title || s.database),
-        run: () => {
-          document.querySelector("#historySelect").value = s.session_id;
-          document.querySelector("#btnHistory").click();
-        },
+        run: () => void openSession(s.session_id),
       })),
     ];
     input.value = "";
@@ -453,7 +330,6 @@ export function initWorkbench({ api, state, openResult, buildChartCard, loadHist
   return {
     sessionChanged,
     refreshContext,
-    updateHistory,
     updateBudget,
     updateUsage,
     toolEvent,

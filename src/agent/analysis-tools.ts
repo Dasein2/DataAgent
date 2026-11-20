@@ -46,50 +46,33 @@ export function analysisTools(runtime: ToolRuntime): ToolDefinition[] {
       execute: async (_id, p) => output(await db.catalogOverview(p.schema, p.limit ?? 12)),
     }),
     defineTool({
-      name: "object_describe_batch",
-      label: "Describe multiple tables",
-      description:
-        "Describe up to 20 named tables in one call using cached bounded metadata workers. Each item may report its own error.",
-      parameters: Type.Object({
-        objects: Type.Array(
-          Type.Object({
-            name: Type.String(),
-            schema: Type.Optional(Type.String()),
-          }),
-          { minItems: 1, maxItems: 20 },
-        ),
-      }),
-      executionMode: "parallel",
-      annotations,
-      execute: async (_id, p) => output(await db.describeMany(p.objects)),
-    }),
-    defineTool({
-      name: "result_summary",
-      label: "Summarize stored result",
-      description:
-        "Bounded streaming statistics over stored rows only: nulls, capped distinct counts, candidate frequencies and approximate numeric ranges. Not source-table statistics. Does not rescan source.",
-      parameters: Type.Object({ result_id: id }),
-      executionMode: "parallel",
-      annotations,
-      execute: async (_id, p) => output(await db.resultSummary(p.result_id)),
-    }),
-    defineTool({
       name: "result_transform",
       label: "Analyze stored rows with SQL",
       description:
-        "Execute safe PostgreSQL SELECT on local table data. Aggregate, pivot, sort or TopN+Other explicitly; creates an immutable derived result_id with parent lineage. Decimal text precision is preserved. Incomplete input is rejected unless explicitly accepted.",
+        "Run PostgreSQL SELECT on a stored result or named snapshot as local table data, without querying the source. " +
+        "Use for aggregation, filtering, sorting or TopN+Other. Returns a new result_id with parent lineage and preserves decimal precision. Snapshots must be complete.",
       parameters: Type.Object({
-        result_id: id,
+        source: Type.Object({
+          kind: Type.Union([Type.Literal("result"), Type.Literal("snapshot")]),
+          id,
+        }, { description: "A result_id (kind=result) or snapshot_id (kind=snapshot)", additionalProperties: false }),
         sql,
-        allow_partial: Type.Optional(Type.Boolean()),
-      }),
+        allow_partial: Type.Optional(Type.Boolean({ description: "Allow an incomplete result only with kind=result; default false" })),
+      }, { additionalProperties: false }),
       executionMode: "sequential",
       annotations: { ...annotations, readOnlyHint: false },
       execute: async (_id, p) => {
-        const m = await db.resultSql(p.result_id, p.sql, p.allow_partial, runtime.currentTaskId());
+        if (p.source.kind === "snapshot" && p.allow_partial) {
+          throw new AppError("INVALID_INPUT", "allow_partial is only supported for a result source; snapshots must be complete");
+        }
+        const taskId = runtime.currentTaskId();
+        const m = p.source.kind === "snapshot"
+          ? await db.snapshotQuery(p.source.id, p.sql, taskId)
+          : await db.resultSql(p.source.id, p.sql, p.allow_partial ?? false, taskId);
         return output({
           result_id: m.id,
           rows: m.rowCount,
+          truncated: m.truncated,
           preview: m.preview,
           columns: m.columns,
           lineage: m.lineage,
@@ -101,7 +84,7 @@ export function analysisTools(runtime: ToolRuntime): ToolDefinition[] {
       name: "snapshot_create",
       label: "Pin local snapshot",
       description:
-        "Pin an already stored complete result under a local snapshot name. Does not extract source data. Only bounded inputs are accepted. Query with snapshot_query using table data.",
+        "Name a complete, bounded stored result for repeated use in this session. Does not copy or refresh source data. Query with result_transform using kind=snapshot.",
       parameters: Type.Object({
         result_id: id,
         name: Type.String({ minLength: 1, maxLength: 120 }),
@@ -132,24 +115,6 @@ export function analysisTools(runtime: ToolRuntime): ToolDefinition[] {
       },
     }),
     defineTool({
-      name: "snapshot_query",
-      label: "Query local snapshot",
-      description:
-        "Read-only analytical SQL over a pinned local snapshot as table data. Creates a derived result with lineage and no source queries.",
-      parameters: Type.Object({ snapshot_id: id, sql }),
-      executionMode: "sequential",
-      annotations: { ...annotations, readOnlyHint: false },
-      execute: async (_id, p) => {
-        const m = await db.snapshotQuery(p.snapshot_id, p.sql, runtime.currentTaskId());
-        return output({
-          result_id: m.id,
-          columns: m.columns,
-          preview: m.preview,
-          lineage: m.lineage,
-        });
-      },
-    }),
-    defineTool({
       name: "chart_list",
       label: "List charts",
       description: "List chart artifacts in this session; immutable evidence survives archival.",
@@ -164,7 +129,7 @@ export function analysisTools(runtime: ToolRuntime): ToolDefinition[] {
       name: "chart_archive",
       label: "Archive a chart",
       description:
-        "Hide an obsolete chart from the working list without deleting immutable evidence or breaking report refs. Does not reset the per-task artifact budget.",
+        "When requested by the user, archive or restore a chart in the working list without breaking report refs. Does not reset the per-task artifact budget.",
       parameters: Type.Object({
         chart_id: id,
         archived: Type.Optional(Type.Boolean()),
@@ -180,7 +145,7 @@ export function analysisTools(runtime: ToolRuntime): ToolDefinition[] {
       name: "chart_revise",
       label: "Revise chart title",
       description:
-        "Create an immutable chart revision with a new title; old chart ids/refs remain valid. This is not an in-place mutation.",
+        "When the user asks to rename a chart, create a revision with a new title. The original chart and its refs remain valid.",
       parameters: Type.Object({
         chart_id: id,
         title: Type.String({ minLength: 1, maxLength: 200 }),

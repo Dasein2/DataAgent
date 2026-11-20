@@ -12,7 +12,7 @@ import type { AppConfig, BudgetConfig } from "../config.js";
 import { AppError } from "../errors.js";
 import type { ResultMeta, ResultStore } from "../results/store.js";
 import { createEngine } from "./engines/index.js";
-import type { Engine, QueryStats } from "./engines/base.js";
+import type { Engine, ObjectFilter, QueryStats } from "./engines/base.js";
 import { describeEngine, getProfile, type EngineProfile } from "./engines/profiles.js";
 import { guardSql, type GuardResult } from "./guard.js";
 import type {
@@ -75,6 +75,7 @@ export class DbSession {
   private engine!: Engine;
   private capabilities!: SessionCapabilities;
   private allowedScopes: string[] = [];
+  private defaultCatalogScope = "";
   private readonly datasets = new Map<string, DatasetRecord>();
   private tail: Promise<unknown> = Promise.resolve();
   private queryCount = 0;
@@ -152,6 +153,7 @@ export class DbSession {
     const readOnly = this.engine.readOnlyStatus();
     this.allowedScopes = await this.engine.listScopes().catch(() => []);
     const defaultScope = await this.engine.defaultScope().catch(() => this.config.database);
+    this.defaultCatalogScope = defaultScope;
     if (!this.allowedScopes.includes(defaultScope)) this.allowedScopes.unshift(defaultScope);
 
     const environment = this.config.environment;
@@ -504,6 +506,42 @@ export class DbSession {
     );
   }
 
+  private catalogScopeNames(): string[] {
+    return [...new Set([...this.allowedScopes, this.capabilities.workspaceName].filter((scope): scope is string => Boolean(scope)))];
+  }
+
+  async catalogScopes(refresh = false) {
+    if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+    const scopes = this.catalogScopeNames();
+    // Counts are advisory UI metadata: an engine error must not make the tree inaccessible
+    // or turn an unknown count into zero. Cache only successful counts.
+    const table_counts = await this.metadataCache.get("catalog-table-counts", () =>
+      this.metadata((engine) => engine.catalogTableCounts(scopes)), refresh).catch(() => null);
+    return { scopes, default_scope: this.defaultCatalogScope, table_counts };
+  }
+
+  async catalogPage(options: Omit<ObjectFilter, "scopes" | "includeMatchDetails" | "limit" | "offset"> & {
+    limit: number;
+    offset: number;
+    refresh: boolean;
+  }) {
+    if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+    const { refresh, limit, offset, ...filter } = options;
+    const scopes = this.catalogScopeNames();
+    const allowed = filter.schema === undefined ? scopes : scopes.filter((scope) => scope === filter.schema);
+    const objects = await this.metadataCache.get(`catalog-page:${JSON.stringify({ filter, limit, offset })}`, () =>
+      this.metadata(async (engine) => {
+        const listed = allowed.length ? await engine.listObjects({
+          ...filter, scopes: allowed, limit: limit + 1, offset, includeMatchDetails: true,
+        }) : [];
+        const visible = listed.filter((object) => allowed.includes(object.schema));
+        await this.audit({ action: "catalog_search", outcome: "ok",
+          detail: JSON.stringify({ schema: filter.schema, search: filter.search, offset, returned: Math.min(limit, visible.length) }) });
+        return visible;
+      }), refresh);
+    return { objects: objects.slice(0, limit), nextOffset: objects.length > limit ? offset + limit : null };
+  }
+
   async catalogSearch(options: {
     search?: string;
     searchColumns?: boolean;
@@ -554,7 +592,7 @@ export class DbSession {
   async describe(schema: string | null, name: string, refresh = false): Promise<ObjectDescription> {
     if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
     return this.metadataCache.get(
-      `describe:${schema ?? ""}:${name}`,
+      `describe:${JSON.stringify([schema, name])}`,
       () =>
         this.metadata(async (engine) => {
           const described = await engine.describeObject(schema, name);

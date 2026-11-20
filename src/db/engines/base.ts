@@ -40,8 +40,48 @@ export interface ObjectFilter {
   search?: string;
   searchColumns?: boolean;
   schema?: string;
+  /** Apply the session allowlist before sorting and paginating. */
+  scopes?: string[];
   kinds?: Array<"table" | "view" | "materialized_view" | "foreign_table" | "sequence">;
   limit: number;
+  offset?: number;
+  includeMatchDetails?: boolean;
+}
+
+/** Attach one representative column and the actual match count, without describing each table. */
+export function attachColumnMatches(objects: ObjectRef[], rows: unknown[][]): void {
+  const byName = new Map(objects.map((object) => [JSON.stringify([object.schema, object.name]), object]));
+  for (const [schema, name, column, count] of rows) {
+    const object = byName.get(JSON.stringify([schema, name]));
+    if (object) object.columnMatch = { name: String(column), count: Number(count) };
+  }
+}
+
+export const CATALOG_MATCHES = ["name", "schema", "comment", "column"] as const;
+export const CATALOG_TABLE_KINDS = ["table", "foreign_table"] as const;
+/** Keep empty scopes as zero, and never expose counts outside the session allowlist. */
+export function tableCountsByScope(scopes: string[], rows: unknown[][]): Record<string, number> {
+  const counts = new Map(scopes.map((scope) => [scope, 0]));
+  for (const [scope, rawCount] of rows) {
+    if (!counts.has(String(scope))) continue;
+    const count = Number(rawCount);
+    if (rawCount == null || !Number.isSafeInteger(count) || count < 0) throw new Error("Invalid catalog table count");
+    counts.set(String(scope), count);
+  }
+  return Object.fromEntries(counts);
+}
+
+// Rank text matches before column-only matches. Put the engine-specific column
+// predicate in WHERE so the rank expression does not have to evaluate a subquery.
+export function catalogMatch(filter: ObjectFilter, name: string, schema: string, comment: string, column: string) {
+  return filter.search ? {
+    rank: `CASE WHEN ${name} THEN 1 WHEN ${schema} THEN 2 WHEN ${comment} THEN 3 ELSE 4 END`,
+    where: `AND (${name} OR ${schema} OR ${comment}${filter.searchColumns ? " OR " + column : ""})`,
+  } : { rank: "0", where: "" };
+}
+
+export function catalogLimit(filter: ObjectFilter): string {
+  return `LIMIT ${Math.max(1, Math.min(2_000, Math.trunc(filter.limit)))} OFFSET ${Math.max(0, Math.trunc(filter.offset ?? 0))}`;
 }
 
 export interface DatasetObject {
@@ -125,6 +165,7 @@ export interface Engine {
   endReadOnly(): Promise<void>;
   explain(sql: string, limits: QueryLimits, analyze?: boolean): Promise<ExplainResult>;
   listScopes(): Promise<string[]>;
+  catalogTableCounts(scopes: string[]): Promise<Record<string, number>>;
   listObjects(filter: ObjectFilter): Promise<ObjectRef[]>;
   describeObject(schema: string | null, name: string): Promise<ObjectDescription>;
   profileObject(schema: string | null, name: string, sampleRows: number, timeoutMs: number, method?: "head" | "random"): Promise<ProfileResult>;

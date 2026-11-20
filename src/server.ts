@@ -13,7 +13,7 @@ async function main(): Promise<void> {
     console.log(`data-agent listening on http://${where}`);
     console.log(`  model:    ${config.model.provider}/${config.model.modelId}`);
     console.log(`  data dir: ${config.dataDir}`);
-    console.log(`  auth:     ${config.apiToken ? "bearer token required" : "OPEN (no DATA_AGENT_API_TOKEN set)"}`);
+    console.log(`  auth:     ${config.requireAuth ? "account login required (use HTTPS on a network)" : config.apiToken ? "bearer token required" : "OPEN (no DATA_AGENT_API_TOKEN set)"}`);
     if (!service.modelReady) {
       console.warn(
         `  WARNING:  no API key resolved for "${config.model.provider}" — analysis tasks will fail with\n` +

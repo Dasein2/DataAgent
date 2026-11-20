@@ -13,6 +13,11 @@ import type {
 import { SshTunnel } from "../ssh-tunnel.js";
 import { analyzeGrantRows, summarizeWrites } from "../grants.js";
 import {
+  CATALOG_TABLE_KINDS,
+  tableCountsByScope,
+  catalogLimit,
+  catalogMatch,
+  CATALOG_MATCHES,
   cellText,
   quoteBacktick,
   sampleSql,
@@ -410,31 +415,70 @@ export class MysqlEngine implements Engine {
     return ["mysql", "information_schema", "performance_schema", "sys"].includes(name.toLowerCase());
   }
 
-  async listObjects(filter: ObjectFilter): Promise<ObjectRef[]> {
-    const search = filter.search ?? null;
-    const estimateExpr = this.profile.rowEstimate === "table_rows" ? "TABLE_ROWS" : "NULL";
+  private catalogScopeWhere(field: string, scopes?: string[], schema?: string) {
+    return `${field} NOT IN ('mysql','information_schema','performance_schema','sys')
+      ${schema === undefined ? "" : `AND ${field} = ${this.literal(schema)}`}
+      ${scopes ? `AND ${field} IN (${scopes.map((scope) => this.literal(scope)).join(",")})` : ""}`;
+  }
+
+  async catalogTableCounts(scopes: string[]) {
+    const visible = scopes.filter((name) => !this.hiddenScope(name));
+    if (!visible.length) return tableCountsByScope(scopes, []);
+    const kinds = CATALOG_TABLE_KINDS.map((kind) => this.literal(kind)).join(",");
     const { rows } = await this.buffered(
-      `SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE, ${estimateExpr}, TABLE_COMMENT
-       FROM information_schema.TABLES
-       WHERE TABLE_SCHEMA NOT IN ('mysql','information_schema','performance_schema','sys')
-         AND (${this.literal(search)} IS NULL OR TABLE_NAME LIKE ${this.like(search)} OR TABLE_SCHEMA LIKE ${this.like(search)} OR TABLE_COMMENT LIKE ${this.like(search)}
-           ${filter.searchColumns ? `OR EXISTS (SELECT 1 FROM information_schema.COLUMNS mc WHERE mc.TABLE_SCHEMA=TABLES.TABLE_SCHEMA AND mc.TABLE_NAME=TABLES.TABLE_NAME AND (mc.COLUMN_NAME LIKE ${this.like(search)} OR mc.COLUMN_COMMENT LIKE ${this.like(search)}))` : ""})
-         AND (${this.literal(filter.schema ?? null)} IS NULL OR TABLE_SCHEMA = ${this.literal(filter.schema ?? null)})
-       ORDER BY TABLE_SCHEMA, TABLE_NAME
-       LIMIT ${Math.max(1, Math.min(2_000, filter.limit))}`,
+      `SELECT TABLE_SCHEMA, COUNT(*) FROM information_schema.TABLES
+       WHERE ${this.catalogScopeWhere("TABLE_SCHEMA", visible)}
+         AND ${this.objectKind("TABLE_TYPE")} IN (${kinds}) GROUP BY TABLE_SCHEMA`,
       20_000,
     );
-    const kinds = filter.kinds ? new Set<string>(filter.kinds) : undefined;
-    return rows
-      .map((row) => ({
-        schema: String(row[0]),
-        name: String(row[1]),
-        kind: String(row[2]).toUpperCase().includes("VIEW") ? "view" : "table",
-        rowEstimate: row[3] === null || row[3] === undefined ? null : Number(row[3]),
-        comment: row[4] ? String(row[4]) : null,
-      }))
-      .filter((object) => !kinds || kinds.has(object.kind))
-      .filter((object) => !this.hiddenScope(object.schema));
+    return tableCountsByScope(scopes, rows);
+  }
+
+  async listObjects(filter: ObjectFilter): Promise<ObjectRef[]> {
+    const scopes = filter.scopes?.filter((name) => !this.hiddenScope(name));
+    if (scopes?.length === 0 || filter.kinds?.length === 0) return [];
+    const contains = (field: string) => `LOCATE(LOWER(${this.literal(filter.search ?? null)}), LOWER(${field})) > 0`;
+    const scopeWhere = (field: string) => this.catalogScopeWhere(field, scopes, filter.schema);
+    const estimateExpr = this.profile.rowEstimate === "table_rows" ? "t.TABLE_ROWS" : "NULL";
+    const searchColumns = Boolean(filter.search && filter.searchColumns);
+    // Group matching columns once. This also avoids a correlated subquery inside an OR,
+    // which is not supported consistently by MySQL-compatible analytical engines.
+    const columnJoin = searchColumns ? `LEFT JOIN (
+      SELECT TABLE_SCHEMA, TABLE_NAME, MIN(COLUMN_NAME) AS match_column, COUNT(*) AS match_count
+      FROM information_schema.COLUMNS
+      WHERE ${scopeWhere("TABLE_SCHEMA")} AND (${contains("COLUMN_NAME")} OR ${contains("COLUMN_COMMENT")})
+      GROUP BY TABLE_SCHEMA, TABLE_NAME
+    ) mc ON mc.TABLE_SCHEMA = t.TABLE_SCHEMA AND mc.TABLE_NAME = t.TABLE_NAME` : "";
+    const match = catalogMatch(filter, contains("t.TABLE_NAME"), contains("t.TABLE_SCHEMA"), contains("t.TABLE_COMMENT"),
+      "mc.match_count IS NOT NULL");
+    const { rows } = await this.buffered(
+      `SELECT * FROM (
+        SELECT t.TABLE_SCHEMA, t.TABLE_NAME, ${this.objectKind("t.TABLE_TYPE")} AS object_kind,
+               ${estimateExpr} AS row_estimate, t.TABLE_COMMENT, ${match.rank} AS match_rank
+               ${searchColumns && filter.includeMatchDetails ? ", mc.match_column, mc.match_count" : ""}
+        FROM information_schema.TABLES t ${columnJoin}
+        WHERE ${scopeWhere("t.TABLE_SCHEMA")} ${match.where}
+      ) catalog
+      ${filter.kinds ? `WHERE object_kind IN (${filter.kinds.map((value) => this.literal(value)).join(",")})` : ""}
+      ORDER BY match_rank, TABLE_SCHEMA, TABLE_NAME ${catalogLimit(filter)}`,
+      20_000,
+    );
+    return rows.map((row) => ({
+      schema: String(row[0]), name: String(row[1]), kind: String(row[2]),
+      rowEstimate: row[3] == null ? null : Number(row[3]),
+      comment: row[4] ? String(row[4]) : null,
+      match: CATALOG_MATCHES[Number(row[5]) - 1],
+      ...(Number(row[5]) === 4 && row[6] != null ? { columnMatch: { name: String(row[6]), count: Number(row[7]) } } : {}),
+    })).filter((object) => !this.hiddenScope(object.schema));
+  }
+
+  private objectKind(field: string): string {
+    return `CASE
+      WHEN UPPER(${field}) = 'MATERIALIZED VIEW' THEN 'materialized_view'
+      WHEN UPPER(${field}) LIKE '%VIEW%' THEN 'view'
+      WHEN UPPER(${field}) = 'EXTERNAL TABLE' THEN 'foreign_table'
+      WHEN UPPER(${field}) = 'SEQUENCE' THEN 'sequence'
+      ELSE 'table' END`;
   }
 
   private literal(value: string | null): string {
@@ -442,16 +486,11 @@ export class MysqlEngine implements Engine {
     return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
   }
 
-  private like(value: string | null): string {
-    if (value === null) return "NULL";
-    return `'%${value.replace(/\\/g, "\\\\").replace(/'/g, "''").replace(/%/g, "\\%").replace(/_/g, "\\_")}%'`;
-  }
-
   async describeObject(schema: string | null, name: string): Promise<ObjectDescription> {
     const scope = schema ?? (await this.defaultScope());
     const estimateExpr = this.profile.rowEstimate === "table_rows" ? "TABLE_ROWS" : "NULL";
     const { rows: tableRows } = await this.buffered(
-      `SELECT TABLE_TYPE, ${estimateExpr}, TABLE_COMMENT
+      `SELECT ${this.objectKind("TABLE_TYPE")}, ${estimateExpr}, TABLE_COMMENT
        FROM information_schema.TABLES
        WHERE TABLE_SCHEMA = ${this.literal(scope)} AND TABLE_NAME = ${this.literal(name)}`,
       15_000,
@@ -530,7 +569,7 @@ export class MysqlEngine implements Engine {
       object: {
         schema: scope,
         name,
-        kind: String(tableType).toUpperCase().includes("VIEW") ? "view" : "table",
+        kind: String(tableType),
         rowEstimate: estimate === null || estimate === undefined ? null : Number(estimate),
         comment: comment ? String(comment) : null,
       },

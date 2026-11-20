@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
@@ -9,15 +9,15 @@ import { ConnectionConfig } from "./types.js";
  * Saved connection profiles live on the service, not in a browser, so the console and any API
  * caller share the same set.
  *
- * Secrets are the one thing the rest of the service never persists (credentials are held in memory
- * per session). A profile may opt in to keeping them, and only when DATA_AGENT_PROFILE_SECRET_KEY
- * is set: they are then encrypted with AES-256-GCM under a key derived from that value. Without the
- * key the store refuses the write instead of silently dropping the secret.
+ * Account profiles encrypt the entire connection using a per-owner key derived from
+ * DATA_AGENT_PROFILE_SECRET_KEY. Legacy profiles keep public fields and opt in to encrypting
+ * just the credentials. Writes requiring encryption fail if the key is missing.
  */
 export const PROFILE_NAME = /^[A-Za-z0-9._:-]{1,60}$/;
 
 export const SaveProfileRequest = z.object({
   connection: ConnectionConfig,
+  group: z.string().trim().max(60).optional(),
   /** Keep password / SSH credentials with the profile. Requires DATA_AGENT_PROFILE_SECRET_KEY. */
   rememberSecret: z.boolean().optional().default(false),
 });
@@ -25,7 +25,9 @@ export type SaveProfileRequest = z.infer<typeof SaveProfileRequest>;
 
 /** What the API returns: never includes secrets, only whether some are stored. */
 export interface ProfileView {
+  id: string;
   name: string;
+  group?: string;
   config: Record<string, unknown>;
   hasSecret: boolean;
   updatedAt: string;
@@ -37,10 +39,12 @@ interface Secrets {
 }
 
 interface StoredProfile {
+  id: string;
   name: string;
   owner: string;
-  config: Record<string, unknown>;
-  /** `v1:<iv>:<tag>:<ciphertext>`, base64 segments. */
+  group?: string;
+  config?: Record<string, unknown>;
+  /** `v1:<iv>:<tag>:<ciphertext>` for legacy secrets; v2 for the entire account connection. */
   secret?: string;
   updatedAt: string;
 }
@@ -133,10 +137,12 @@ export class ProfileStore {
     return profile ? this.view(profile) : undefined;
   }
 
-  /**
-   * Creates or replaces a profile. Passing `rememberSecret` without a configured key is refused:
-   * silently discarding the secret would leave a profile that looks complete but cannot connect.
-   */
+  connectionById(owner: string, id: string): ConnectionConfig | undefined {
+    const record = this.profiles.find((profile) => profile.owner === owner && profile.id === id);
+    return record && (this.isAccount(record) || record.secret
+      ? ConnectionConfig.parse(this.readConnection(record)) : undefined);
+  }
+
   /**
    * Stores a confirmed host key without touching the rest of the profile. Pinning is a separate
    * action from saving: it must not rewrite the connection or drop the encrypted credentials that
@@ -145,28 +151,33 @@ export class ProfileStore {
   pinHostKey(owner: string, name: string, hopIndex: number, fingerprint: string): ProfileView {
     const existing = this.find(owner, name);
     if (!existing) throw new AppError("NOT_FOUND", `Connection profile "${name}" not found`);
-    const ssh = existing.config.ssh as { hops: Array<{ hostFingerprint?: string; host: string }> } | undefined;
+    const config = this.isAccount(existing) ? this.readConnection(existing) : structuredClone(existing.config!);
+    const ssh = config.ssh as { hops: Array<{ hostFingerprint?: string; host: string }> } | undefined;
     const hop = ssh?.hops[hopIndex];
     if (!hop) {
       throw new AppError("INVALID_INPUT", `Connection profile "${name}" has no SSH hop ${hopIndex + 1}`);
     }
     hop.hostFingerprint = fingerprint;
-    existing.updatedAt = new Date().toISOString();
-    this.persist();
-    return this.view(existing);
+    const next = { ...existing, updatedAt: new Date().toISOString() };
+    if (this.isAccount(next)) next.secret = this.encrypt(JSON.stringify(config), next);
+    else next.config = config;
+    this.replace(existing, next);
+    return this.view(next);
   }
 
-  save(owner: string, name: string, connection: ConnectionConfig, rememberSecret: boolean): ProfileView {
+  /** Saves or replaces a profile. `rememberSecret` controls legacy profiles only. */
+  save(owner: string, name: string, connection: ConnectionConfig, rememberSecret: boolean, group?: string): ProfileView {
     if (!PROFILE_NAME.test(name)) {
       throw new AppError("PROFILE_NAME_INVALID", 'Profile name must match [A-Za-z0-9._:-]{1,60}');
     }
+    const account = owner.startsWith("account/");
     const { config, secrets } = splitSecrets(connection);
     const keepSecret = rememberSecret && hasSecrets(secrets);
-    if (keepSecret && !this.key) {
+    if ((account || keepSecret) && !this.key) {
       throw new AppError(
         "PROFILE_SECRET_STORAGE_DISABLED",
         "This deployment cannot store profile secrets: set DATA_AGENT_PROFILE_SECRET_KEY and restart, " +
-          "or save the profile without the password.",
+          (account ? "then try again." : "or save the profile without the password."),
       );
     }
 
@@ -178,45 +189,61 @@ export class ProfileStore {
       );
     }
 
-    const record: StoredProfile = {
-      name,
-      owner,
-      config,
-      updatedAt: new Date().toISOString(),
-    };
-    const secret = keepSecret ? this.encrypt(JSON.stringify(secrets)) : undefined;
-    if (secret) record.secret = secret;
-
-    if (existing) this.profiles[this.profiles.indexOf(existing)] = record;
-    else this.profiles.push(record);
-    this.persist();
+    const record: StoredProfile = { id: existing?.id ?? randomUUID(), name, owner, updatedAt: new Date().toISOString() };
+    const nextGroup = group === undefined ? existing?.group : group;
+    if (nextGroup) record.group = nextGroup;
+    if (account) record.secret = this.encrypt(JSON.stringify(connection), record);
+    else {
+      record.config = config;
+      if (keepSecret) record.secret = this.encrypt(JSON.stringify(secrets));
+    }
+    this.replace(existing, record);
     return this.view(record);
   }
 
   remove(owner: string, name: string): void {
     const profile = this.find(owner, name);
     if (!profile) throw new AppError("NOT_FOUND", `Connection profile "${name}" not found`);
-    this.profiles.splice(this.profiles.indexOf(profile), 1);
-    this.persist();
+    this.commit(this.profiles.filter((entry) => entry !== profile));
+  }
+
+  /** Rename the caller's group without touching profile IDs or encrypted credentials. */
+  renameGroup(owner: string, from: string, to: string): number {
+    const members = this.profiles.filter((entry) => entry.owner === owner && (entry.group ?? "") === from);
+    if (!members.length) throw new AppError("NOT_FOUND", "找不到该连接分组");
+    if (from === to) return members.length;
+    if (this.profiles.some((entry) => entry.owner === owner && entry.group === to)) {
+      throw new AppError("INVALID_INPUT", "已存在同名分组");
+    }
+    const updatedAt = new Date().toISOString();
+    this.commit(this.profiles.map((entry) => members.includes(entry) ? { ...entry, group: to, updatedAt } : entry));
+    return members.length;
   }
 
   /** Full connection for a session/test call, with stored secrets merged back in. */
   reveal(owner: string, name: string): Record<string, unknown> {
     const profile = this.find(owner, name);
     if (!profile) throw new AppError("NOT_FOUND", `Connection profile "${name}" not found`);
-    let secrets: Secrets | undefined;
-    if (profile.secret) {
-      try {
-        secrets = JSON.parse(this.decrypt(profile.secret)) as Secrets;
-      } catch (error) {
-        throw new AppError(
-          "PROFILE_SECRET_STORAGE_DISABLED",
-          `Stored secret for profile "${name}" cannot be decrypted: ${(error as Error).message}. ` +
-            "DATA_AGENT_PROFILE_SECRET_KEY probably changed; re-save the profile.",
-        );
-      }
+    return this.readConnection(profile);
+  }
+
+  private isAccount(profile: StoredProfile): boolean {
+    return profile.owner.startsWith("account/");
+  }
+
+  private readConnection(profile: StoredProfile): Record<string, unknown> {
+    try {
+      if (this.isAccount(profile)) return JSON.parse(this.decrypt(profile.secret!, profile));
+      const secrets = profile.secret ? JSON.parse(this.decrypt(profile.secret)) as Secrets : undefined;
+      return mergeSecrets(profile.config!, secrets);
+    } catch {
+      throw new AppError("PROFILE_SECRET_STORAGE_DISABLED",
+        `Stored secret for profile "${profile.name}" cannot be decrypted. Restore DATA_AGENT_PROFILE_SECRET_KEY or re-save the profile.`);
     }
-    return mergeSecrets(profile.config, secrets);
+  }
+
+  private replace(existing: StoredProfile | undefined, next: StoredProfile): void {
+    this.commit(existing ? this.profiles.map((entry) => entry === existing ? next : entry) : [...this.profiles, next]);
   }
 
   private find(owner: string, name: string): StoredProfile | undefined {
@@ -225,28 +252,39 @@ export class ProfileStore {
 
   private view(profile: StoredProfile): ProfileView {
     return {
+      id: profile.id,
       name: profile.name,
-      config: structuredClone(profile.config),
+      group: profile.group,
+      config: this.isAccount(profile) ? splitSecrets(ConnectionConfig.parse(this.readConnection(profile))).config : structuredClone(profile.config!),
       hasSecret: Boolean(profile.secret),
       updatedAt: profile.updatedAt,
     };
   }
 
-  private encrypt(plain: string): string {
-    const key = this.key;
-    if (!key) throw new AppError("PROFILE_SECRET_STORAGE_DISABLED", "No profile secret key configured");
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", key, iv);
-    const ciphertext = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
-    return ["v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), ciphertext.toString("base64")].join(":");
+  private aad(profile: StoredProfile): Buffer {
+    return Buffer.from(JSON.stringify([profile.owner, profile.id, profile.name]));
   }
 
-  private decrypt(encoded: string): string {
-    const key = this.key;
-    if (!key) throw new Error("no profile secret key configured");
+  private keyFor(profile?: StoredProfile): Buffer {
+    if (!this.key) throw new AppError("PROFILE_SECRET_STORAGE_DISABLED", "No profile secret key configured");
+    return profile ? createHmac("sha256", this.key).update("data-agent-profile-v2:").update(profile.owner).digest() : this.key;
+  }
+
+  private encrypt(plain: string, profile?: StoredProfile): string {
+    const key = this.keyFor(profile);
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    if (profile) cipher.setAAD(this.aad(profile));
+    const ciphertext = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+    return [profile ? "v2" : "v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), ciphertext.toString("base64")].join(":");
+  }
+
+  private decrypt(encoded: string, profile?: StoredProfile): string {
+    const key = this.keyFor(profile);
     const [version, iv, tag, ciphertext] = encoded.split(":");
-    if (version !== "v1" || !iv || !tag || !ciphertext) throw new Error("unsupported secret format");
+    if (version !== (profile ? "v2" : "v1") || !iv || !tag || !ciphertext) throw new Error("unsupported secret format");
     const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64"));
+    if (profile) decipher.setAAD(this.aad(profile));
     decipher.setAuthTag(Buffer.from(tag, "base64"));
     return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64")), decipher.final()]).toString("utf8");
   }
@@ -255,19 +293,22 @@ export class ProfileStore {
     if (!existsSync(this.file)) return;
     const parsed = JSON.parse(readFileSync(this.file, "utf8")) as StoreFile;
     if (parsed?.version !== 1 || !Array.isArray(parsed.profiles) || parsed.profiles.some(
-      (profile) => !profile || typeof profile.name !== "string" || typeof profile.owner !== "string" || !profile.config,
+      (profile) => !profile || typeof profile.name !== "string" || typeof profile.owner !== "string" ||
+        (this.isAccount(profile) ? typeof profile.id !== "string" || typeof profile.secret !== "string" : !profile.config),
     )) {
       throw new Error("Invalid connection profile store; restore or repair connections.json before starting the service");
     }
-    this.profiles = parsed.profiles;
+    // Legacy profiles had no ID. Keep a deterministic ID until the next normal store write.
+    this.profiles = parsed.profiles.map((p) => ({ ...p, id: p.id ?? createHash("sha256").update(JSON.stringify([p.owner, p.name])).digest("hex") }));
   }
 
-  private persist(): void {
-    const payload: StoreFile = { version: 1, profiles: this.profiles };
+  private commit(profiles: StoredProfile[]): void {
+    const payload: StoreFile = { version: 1, profiles };
     mkdirSync(dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
     writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(tmp, this.file);
+    this.profiles = profiles;
     try {
       chmodSync(this.file, 0o600);
     } catch {

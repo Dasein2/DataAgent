@@ -8,18 +8,20 @@ import {
   SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import type { AppConfig } from "../config.js";
+import type { AppConfig, ThinkingLevel } from "../config.js";
 import type { ConnectionConfig } from "../db/types.js";
 import { DbSession } from "../db/session.js";
 import { AppError, isAppError } from "../errors.js";
 import type { ResultStore } from "../results/store.js";
 import type { ArtifactService } from "../artifacts/service.js";
 import { buildSystemPrompt } from "./prompts.js";
-import { createDatabaseTools, type ToolRuntime } from "./tools.js";
+import { createDatabaseTools, selectTools, toolCatalog, type ToolInfo, type ToolRuntime } from "./tools.js";
 import { EventBroker, type TaskEvent } from "./events.js";
 import type { ModelHandle } from "./model.js";
 import type { HistoryStore } from "./history.js";
 import { generateSessionTitle, type GeneratedSessionTitle } from "./session-title.js";
+import { businessContextPrompt, contextSummary } from "../business-context/store.js";
+import type { BusinessContextFile } from "../business-context/types.js";
 
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "incomplete";
 
@@ -75,10 +77,13 @@ export class AnalysisSession {
     readonly ownerKey: string,
     readonly db: DbSession,
     private readonly agent: AgentSession,
+    readonly tools: readonly ToolInfo[],
     private readonly broker: EventBroker,
     private readonly app: AppConfig,
     private readonly sessionRef: { current?: TaskRecord },
     private readonly artifacts: ArtifactService,
+    readonly businessContextScope: string,
+    private readonly contextRef: { files: BusinessContextFile[]; prompt: string },
     private readonly history?: HistoryStore,
   ) {}
 
@@ -86,6 +91,8 @@ export class AnalysisSession {
   private lastUsedAt = new Date();
   private closed = false;
   private draining = false;
+  private changingModel = false;
+  private modelSelection?: { provider: string; modelId: string; thinkingLevel?: ThinkingLevel };
   private current?: TaskRecord;
   private readonly queue: QueueItem[] = [];
   private readonly tasks = new Map<string, TaskRecord>();
@@ -111,29 +118,19 @@ export class AnalysisSession {
     history?: HistoryStore;
     sessionId?: string;
     title?: string;
+    modelSelection?: { provider: string; modelId: string; thinkingLevel?: ThinkingLevel };
+    businessContext: { scope: string; files: BusinessContextFile[] };
   }): Promise<AnalysisSession> {
     const { app, config, broker } = options;
     const db = await DbSession.open({ config, app, results: options.results, sessionId: options.sessionId });
     const cwd = join(app.dataDir, "workspaces", db.id);
-    await mkdir(cwd, { recursive: true });
-
-    const settingsManager = SettingsManager.inMemory();
-    const resourceLoader = new DefaultResourceLoader({
-      cwd,
-      agentDir: join(app.dataDir, "pi", "agent"),
-      settingsManager,
-      noExtensions: true,
-      noSkills: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      noContextFiles: true,
-      systemPrompt: buildSystemPrompt(db.capabilitiesView, app.budgets),
-    });
-    await resourceLoader.reload();
-
+    const files = options.businessContext.files;
+    const contextRef = { files, prompt: businessContextPrompt(files) };
     const sessionRef: { current?: TaskRecord } = {};
     let session: AgentSession;
+    let tools: ToolInfo[];
     try {
+      await mkdir(cwd, { recursive: true });
       const toolRuntime: ToolRuntime = {
         db,
         budgets: app.budgets,
@@ -142,7 +139,30 @@ export class AnalysisSession {
         taskStatus: () => (sessionRef.current ? { ...sessionRef.current, max_turns: sessionRef.current.max_turns ?? app.budgets.maxTurns } : { status: "idle" }),
         cancelActive: () => db.cancel(),
       };
-      const customTools = createDatabaseTools(toolRuntime);
+      const caps = db.capabilitiesView;
+      const customTools = selectTools(createDatabaseTools(toolRuntime), caps);
+      tools = toolCatalog(customTools);
+      const settingsManager = SettingsManager.inMemory();
+      const resourceLoader = new DefaultResourceLoader({
+        cwd,
+        agentDir: join(app.dataDir, "pi", "agent"),
+        settingsManager,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        systemPrompt: buildSystemPrompt(caps, app.budgets, new Set(customTools.map((tool) => tool.name))),
+        extensionFactories: [(pi) => {
+          pi.on("before_agent_start", (event) => {
+            if (contextRef.files.length) {
+              // Provider-only projection. Don't keep obsolete reference bodies in Pi's transcript.
+              return { systemPrompt: event.systemPrompt + "\n\n## Business Context\n" + contextRef.prompt };
+            }
+          });
+        }],
+      });
+      await resourceLoader.reload();
       const created = await createAgentSession({
         cwd,
         agentDir: join(app.dataDir, "pi", "agent"),
@@ -166,16 +186,20 @@ export class AnalysisSession {
       options.ownerKey,
       db,
       session,
+      tools,
       broker,
       app,
       sessionRef,
       options.artifacts,
+      options.businessContext.scope,
+      contextRef,
       options.history,
     );
     if (options.sessionId) {
       for (const task of options.history?.listTasks(db.id, options.ownerKey) ?? []) analysis.tasks.set(task.id, task);
     }
     analysis.title = options.title;
+    analysis.modelSelection = options.modelSelection;
     analysis.agent.subscribe((event) => {
       analysis.mapEvent(event);
     });
@@ -189,7 +213,65 @@ export class AnalysisSession {
   }
 
   get isBusy(): boolean {
-    return this.current !== undefined;
+    return this.changingModel || this.draining || !this.agent.isIdle;
+  }
+
+  /** Reserve the session before any asynchronous credential/catalogue work. */
+  async changeModel(resolve: () => Promise<ModelHandle>, thinkingLevel?: ThinkingLevel): Promise<void> {
+    if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+    if (this.isBusy) throw new AppError("SESSION_BUSY", "请等待当前任务结束后再切换模型。");
+    this.changingModel = true;
+    try {
+      const handle = await resolve();
+      if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+      if (!handle.hasAuth) throw new AppError("MODEL_NOT_CONFIGURED", "目标渠道未配置凭证，请先在模型管理中配置。");
+      const runtime = this.agent.modelRuntime;
+      const model = handle.model;
+      // Register only the destination on this session's isolated runtime. New channels work
+      // immediately; no refresh of another session's pinned catalogue or credentials occurs.
+      const source = handle.runtime.getProvider(model.provider);
+      if (!source) throw new AppError("INVALID_INPUT", "目标渠道不存在。");
+      const previousProvider = runtime.getProvider(model.provider);
+      const previousAuth = await runtime.getAuth(model.provider);
+      const previousModel = this.agent.model;
+      const previousThinking = this.agent.thinkingLevel;
+      const previousSelection = this.modelSelection;
+      const auth = await handle.runtime.getAuth(model);
+      try {
+        runtime.registerNativeProvider(source);
+        if (auth?.auth.apiKey) await runtime.setRuntimeApiKey(model.provider, auth.auth.apiKey);
+        await this.agent.setModel(model, { persist: false });
+        if (thinkingLevel !== undefined) this.agent.setThinkingLevel(thinkingLevel, { persist: false });
+        this.modelSelection = { provider: model.provider, modelId: model.id, thinkingLevel: this.agent.thinkingLevel as ThinkingLevel };
+        this.history?.saveSession(this.ownerKey, this.snapshot());
+      } catch (error) {
+        // A rejected credential/model/persistence update must leave a usable old selection.
+        if (previousProvider) runtime.registerNativeProvider(previousProvider);
+        else runtime.unregisterProvider(model.provider);
+        if (previousAuth?.auth.apiKey) await runtime.setRuntimeApiKey(model.provider, previousAuth.auth.apiKey);
+        else await runtime.removeRuntimeApiKey(model.provider);
+        if (previousModel && this.agent.model !== previousModel) await this.agent.setModel(previousModel, { persist: false });
+        this.agent.setThinkingLevel(previousThinking, { persist: false });
+        this.modelSelection = previousSelection;
+        throw error;
+      }
+    } finally { this.changingModel = false; }
+  }
+
+  businessContextSelection() {
+    return this.contextRef.files.map(contextSummary);
+  }
+
+  setBusinessContext(files: BusinessContextFile[]): void {
+    if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+    if (this.isBusy) throw new AppError("SESSION_BUSY", "请等待当前任务结束后再应用业务上下文。");
+    const before = this.contextRef.files;
+    if (before.length === files.length && before.every((f, i) => f.revision === files[i]?.revision)) return;
+    const active = files.map(contextSummary);
+    this.history?.saveSession(this.ownerKey, { ...this.snapshot(), business_context: active }, undefined,
+      { scope: this.businessContextScope, files });
+    this.contextRef.files = files;
+    this.contextRef.prompt = businessContextPrompt(files);
   }
 
   get expiresAt(): Date {
@@ -212,10 +294,15 @@ export class AnalysisSession {
         created_at: task.created_at,
         finished_at: task.finished_at,
       })),
-      current_task_id: this.current?.id ?? null,
+      current_task_id: this.current && ["queued", "running"].includes(this.current.status) ? this.current.id : null,
       queued_tasks: this.queue.length,
+      business_context: this.businessContextSelection(),
       agent: {
         model: String((this.agent.model as { id?: string } | undefined)?.id ?? "unknown"),
+        provider: this.agent.model?.provider ?? null,
+        thinking_level: this.agent.thinkingLevel,
+        context_window: this.agent.model?.contextWindow ?? null,
+        selection: this.modelSelection ?? null,
         turns: this.turns,
         context_usage: safeContextUsage(this.agent),
       },
@@ -249,6 +336,7 @@ export class AnalysisSession {
 
   submit(goal: string, options: { maxTurns?: number } = {}): TaskRecord {
     if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+    if (this.changingModel) throw new AppError("SESSION_BUSY", "正在切换模型，请稍后发送。");
     const snapshot = this.db.snapshot();
     if (snapshot.status === "unavailable") throw new AppError("SESSION_UNAVAILABLE", snapshot.unavailable_reason ?? "Open a new session");
     const maxTurns = Math.min(options.maxTurns ?? this.app.budgets.maxTurns, this.app.budgets.maxTurns);
@@ -476,7 +564,7 @@ export class AnalysisSession {
       this.finishTask(item.record);
     }
     await this.cancelTask();
-    while (this.draining) await new Promise((resolve) => setTimeout(resolve, 10));
+    while (this.draining || this.changingModel) await new Promise((resolve) => setTimeout(resolve, 10));
     this.agent.dispose();
     await this.db.close().catch(() => undefined);
     this.history?.saveSession(this.ownerKey, this.snapshot());

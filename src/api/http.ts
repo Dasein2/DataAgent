@@ -5,6 +5,7 @@ import { pipeline } from "node:stream/promises";
 import type { Request, RequestHandler, Response } from "express";
 import express from "express";
 import { ConnectionConfig } from "../db/types.js";
+import { CATALOG_TABLE_KINDS } from "../db/engines/base.js";
 import { ENGINE_IDS, describeEngine, getProfile } from "../db/engines/profiles.js";
 import { AppError, isAppError } from "../errors.js";
 import { AnalysisService, callerKey } from "../agent/service.js";
@@ -13,7 +14,10 @@ import { ModelPatch } from "../agent/model-settings.js";
 import { ChannelSelection } from "../agent/channels.js";
 import { toolCatalog } from "../agent/tools.js";
 import { z } from "zod";
+import { BusinessContextDraft, BusinessContextIds } from "../business-context/types.js";
+import { DOCUMENT_TOKEN_LIMIT, SELECTION_TOKEN_LIMIT } from "../business-context/store.js";
 import { ProviderWrite, ProviderId } from "../agent/provider-store.js";
+import { accountAuth } from "./account-auth.js";
 
 interface RequestIdentity {
   ownerKey: string;
@@ -94,26 +98,63 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   const app = express();
   const config = service.config;
 
+  // Unset means Express uses the socket peer for `req.ip`; only an operator who knows every client
+  // arrives through their own proxy may widen it.
+  if (config.trustProxy !== undefined) app.set("trust proxy", config.trustProxy);
+
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "2mb" }));
   app.use((req, res, next) => {
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("referrer-policy", "no-referrer");
-    if (req.path.startsWith("/v1/")) res.setHeader("cache-control", "no-store");
+    if (/^\/v1(?:\/|$)/i.test(req.path)) res.setHeader("cache-control", "no-store");
     next();
   });
 
+  // Liveness: the process serves HTTP. It says nothing about whether a task can run, because in
+  // account mode the model may still be configured from the console after startup.
   app.get("/healthz", (_req, res) => {
     res.json({
       ok: true,
       model: `${config.model.provider}/${config.model.modelId}`,
       model_ready: service.modelReady,
-      api_token_required: Boolean(config.apiToken),
+      api_token_required: !service.accounts && Boolean(config.apiToken),
+      account_login_required: Boolean(service.accounts),
       env: config.env,
     });
   });
 
-  app.use("/v1", authMiddleware(config.apiToken));
+  // Readiness: a load balancer should stop sending work here while no model credential resolves,
+  // because every analysis task would fail. Separate from /healthz so `docker` does not kill a
+  // container the operator is about to configure through the console.
+  app.get("/readyz", (_req, res) => {
+    const ready = service.modelReady;
+    res.status(ready ? 200 : 503).json({ ok: ready, model_ready: ready, env: config.env });
+  });
+
+  const auth = accountAuth(service.accounts, config.secureAuthCookie ?? config.env === "production");
+  app.use("/v1/auth", express.json({ limit: "4kb" }), auth.router);
+  const legacyAuth = authMiddleware(config.apiToken);
+  app.use("/v1", (req, res, next) => {
+    if (!service.accounts) return legacyAuth(req, res, next);
+    const account = auth.account(req);
+    const expected = req.header("x-data-agent-account");
+    if (!account || (expected !== undefined && account.username !== expected)) {
+      throw new AppError("UNAUTHORIZED", "Account login required");
+    }
+    if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) auth.assertSameOrigin(req);
+    req.identity = { ownerKey: account.ownerKey };
+    next();
+  });
+  // Model administration is global: regular accounts may analyze data but cannot redirect
+  // another account’s future queries to a different model provider.
+  app.use("/v1/model", (req, _res, next) => {
+    if (service.accounts && auth.account(req)?.role !== "admin") {
+      throw new AppError("FORBIDDEN", "Model configuration requires an administrator");
+    }
+    next();
+  });
+
+  app.use("/v1", express.json({ limit: "2mb" }));
 
   const requestConnection = (req: Request): ConnectionConfig => {
     if (typeof req.body?.profile === "string") {
@@ -136,12 +177,22 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     return parseConnection(req.body?.connection ?? req.body);
   };
 
-  app.get("/v1/connections/profiles", (req, res) => {
+  const listProfiles: RequestHandler = (req, res) => {
     res.json({ profiles: service.profiles.list(ownerOf(req)), secret_storage_enabled: service.profiles.secretStorageEnabled });
-  });
+  };
+  app.get(["/v1/connections", "/v1/connections/profiles"], listProfiles);
   app.put("/v1/connections/profiles/:name", (req, res) => {
-    const body = SaveProfileRequest.parse({ connection: requestConnection(req), rememberSecret: req.body?.rememberSecret });
-    res.json({ profile: service.profiles.save(ownerOf(req), req.params.name, body.connection, body.rememberSecret) });
+    const owner = ownerOf(req);
+    const sessionId = z.string().regex(/^sess_[a-z0-9]+$/).optional().parse(req.body?.session_id);
+    if (sessionId) service.history.getSession(sessionId, owner);
+    const body = SaveProfileRequest.parse({ connection: requestConnection(req), rememberSecret: req.body?.rememberSecret, group: req.body?.group });
+    const profile = service.profiles.save(owner, req.params.name, body.connection, body.rememberSecret, body.group);
+    if (sessionId) service.bindProfile(sessionId, owner, body.connection, profile.id);
+    res.json({ profile });
+  });
+  app.patch("/v1/connections/groups", (req, res) => {
+    const { from, to } = z.object({ from: z.string().trim().max(60), to: z.string().trim().min(1).max(60) }).parse(req.body);
+    res.json({ updated: service.profiles.renameGroup(ownerOf(req), from, to) });
   });
   app.delete("/v1/connections/profiles/:name", (req, res) => {
     service.profiles.remove(ownerOf(req), req.params.name);
@@ -217,8 +268,11 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.json(await service.testModel());
   });
 
-  app.get("/v1/tools", (_req, res) => {
-    res.json({ tools });
+  // With no session, this is a discovery catalogue, not the model's effective toolset.
+  app.get("/v1/tools", (req, res) => {
+    const sessionId = z.string().regex(/^sess_[a-z0-9]+$/).optional().parse(req.query.session_id);
+    const selected = sessionId ? service.getSession(sessionId, ownerOf(req)).tools : tools;
+    res.json({ tools: selected });
   });
 
   app.get("/v1/capabilities", (_req, res) => {
@@ -264,9 +318,12 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.json(await service.testConnection(connection));
   });
 
+  const requestProfileId = (req: Request) => typeof req.body?.profile === "string"
+    ? service.profiles.get(ownerOf(req), req.body.profile)?.id : undefined;
+
   app.post("/v1/sessions", async (req, res) => {
     const connection = requestConnection(req);
-    const session = await service.createSession(connection, ownerOf(req));
+    const session = await service.createSession(connection, ownerOf(req), undefined, requestProfileId(req));
     res.status(201).json({ session: session.snapshot() });
   });
 
@@ -279,7 +336,12 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   });
 
   app.post("/v1/sessions/:id/reconnect", async (req, res) => {
-    const session = await service.createSession(requestConnection(req), ownerOf(req), req.params.id);
+    const owner = ownerOf(req);
+    service.history.getSession(req.params.id, owner);
+    const resolved = req.body === undefined || (req.body && Object.keys(req.body).length === 0)
+      ? service.connectionForResume(req.params.id, owner)
+      : { connection: requestConnection(req), profileId: requestProfileId(req) };
+    const session = await service.createSession(resolved.connection, owner, req.params.id, resolved.profileId);
     res.json({ session: session.snapshot() });
   });
 
@@ -288,6 +350,26 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   app.post("/v1/sessions/:id/title", async (req, res) => {
     const { title, usage } = await service.generateTitle(req.params.id, ownerOf(req));
     res.json({ title, usage: usage ?? null });
+  });
+
+  app.patch("/v1/sessions/:id", (req, res) => {
+    const { title } = z.object({ title: z.string().trim().min(1).max(80) }).parse(req.body);
+    service.renameSession(req.params.id, ownerOf(req), title);
+    res.json({ title });
+  });
+
+  // Authenticated session owners can choose configured models, not administer providers.
+  // Do not expose operator paths, endpoint definitions or credential-source metadata.
+  app.get("/v1/sessions/:id/models", (req, res) => {
+    const session = service.getSession(req.params.id, ownerOf(req));
+    res.json({ channels: service.channels().channels.map(({ id, name, source, ready, models }) =>
+      ({ id, name, source, ready, models })), active: session.snapshot().agent });
+  });
+
+  // Session-scoped selection uses configured channels, never mutates operator defaults.
+  app.post("/v1/sessions/:id/model", async (req, res) => {
+    const selection = ChannelSelection.parse(req.body ?? {});
+    res.json({ session: await service.setSessionModel(req.params.id, ownerOf(req), selection) });
   });
 
   app.get("/v1/sessions/:id/tasks", (req, res) => {
@@ -362,6 +444,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.write("retry: 3000\n\n");
 
     const write = (event: { seq: number; id: string; type: string; data: unknown; at: string; task_id: string }) => {
+      if (service.accounts && !auth.account(req)) { res.end(); return; }
       if (!res.writableEnded) {
         res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       }
@@ -376,7 +459,9 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     }
 
     const heartbeat = setInterval(() => {
-      if (!res.writableEnded) res.write(": ping\n\n");
+      if (res.writableEnded) return;
+      if (service.accounts && !auth.account(req)) res.end();
+      else res.write(": ping\n\n");
     }, 15_000);
     heartbeat.unref?.();
 
@@ -395,10 +480,29 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     const search = typeof req.query.search === "string" ? req.query.search.slice(0, 120) : undefined;
     res.json({ objects: await session.db.catalogSearch({ search, searchColumns: req.query.columns === "true", limit: 200, refresh: req.query.refresh === "true" }) });
   });
+  app.get("/v1/sessions/:id/catalog/scopes", async (req, res) => {
+    const session = service.getSession(req.params.id, ownerOf(req));
+    res.json(await session.db.catalogScopes(req.query.refresh === "true"));
+  });
+  app.get("/v1/sessions/:id/catalog/objects", async (req, res) => {
+    const session = service.getSession(req.params.id, ownerOf(req));
+    const q = z.object({
+      schema: z.string().min(1).max(256).optional(),
+      search: z.string().trim().max(120).optional(),
+      type: z.enum(["table", "view"]).optional(),
+    }).parse(req.query);
+    const limit = intParam(req.query.limit, q.search ? 100 : 50, 1, 100, "limit");
+    const offset = intParam(req.query.offset, 0, 0, 1_000_000, "offset");
+    res.json(await session.db.catalogPage({
+      schema: q.schema, search: q.search, searchColumns: Boolean(q.search), limit, offset,
+      kinds: q.type === "table" ? [...CATALOG_TABLE_KINDS] : q.type === "view" ? ["view", "materialized_view"] : undefined,
+      refresh: req.query.refresh === "true",
+    }));
+  });
   app.get("/v1/sessions/:id/object", async (req, res) => {
     const session = service.getSession(req.params.id, ownerOf(req));
     const q = z.object({ name: z.string().min(1).max(256), schema: z.string().max(256).optional() }).parse(req.query);
-    res.json(await session.db.describe(q.schema ?? null, q.name));
+    res.json(await session.db.describe(q.schema ?? null, q.name, req.query.refresh === "true"));
   });
   app.get("/v1/sessions/:id/datasets", async (req, res) => res.json({ datasets: await service.getSession(req.params.id, ownerOf(req)).db.listDatasets() }));
   app.get("/v1/sessions/:id/snapshots", async (req, res) => res.json({ snapshots: await service.snapshots(req.params.id, ownerOf(req)) }));
@@ -472,6 +576,49 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.send(body);
   });
 
+  // Resolve the library only through the authenticated caller's live session. Neither a raw
+  // connection digest nor a path supplied by the client can select the storage directory.
+  app.get("/v1/sessions/:id/business-context", (req, res) => {
+    const session = service.getSession(req.params.id, ownerOf(req));
+    const scope = session.businessContextScope;
+    res.json({
+      files: service.businessContext.list(scope),
+      active: session.businessContextSelection(),
+      default_ids: service.businessContext.getDefaults(scope),
+      limits: { document_tokens: DOCUMENT_TOKEN_LIMIT, selection_tokens: SELECTION_TOKEN_LIMIT },
+    });
+  });
+  app.post("/v1/sessions/:id/business-context", (req, res) => {
+    const { businessContextScope } = service.getSession(req.params.id, ownerOf(req));
+    const file = service.businessContext.create(businessContextScope, BusinessContextDraft.parse(req.body));
+    res.status(201).json({ file });
+  });
+  const selectionBody = z.object({ ids: BusinessContextIds });
+  app.put("/v1/sessions/:id/business-context/selection", (req, res) => {
+    const session = service.getSession(req.params.id, ownerOf(req));
+    const { ids } = selectionBody.parse(req.body);
+    session.setBusinessContext(service.businessContext.select(session.businessContextScope, ids));
+    res.json({ active: session.businessContextSelection() });
+  });
+  app.put("/v1/sessions/:id/business-context/defaults", (req, res) => {
+    const { businessContextScope } = service.getSession(req.params.id, ownerOf(req));
+    const { ids } = selectionBody.parse(req.body);
+    res.json({ default_ids: service.businessContext.setDefaults(businessContextScope, ids) });
+  });
+  app.get("/v1/sessions/:id/business-context/:fileId", (req, res) => {
+    const { businessContextScope } = service.getSession(req.params.id, ownerOf(req));
+    res.json({ file: service.businessContext.get(businessContextScope, req.params.fileId) });
+  });
+  app.put("/v1/sessions/:id/business-context/:fileId", (req, res) => {
+    const { businessContextScope } = service.getSession(req.params.id, ownerOf(req));
+    res.json({ file: service.businessContext.update(businessContextScope, req.params.fileId, BusinessContextDraft.parse(req.body)) });
+  });
+  app.delete("/v1/sessions/:id/business-context/:fileId", (req, res) => {
+    const { businessContextScope } = service.getSession(req.params.id, ownerOf(req));
+    service.businessContext.delete(businessContextScope, req.params.fileId);
+    res.status(204).end();
+  });
+
   // Lightweight console (same API, no build step).
   const webRoot = new URL("../../web/", import.meta.url);
   app.get("/task-stream.js", (_req, res) => {
@@ -486,13 +633,19 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       () => res.status(404).end(),
     );
   });
-  for (const file of ["explore.js", "charts.js", "workbench.js", "workbench.css"]) {
+  for (const file of ["chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js"]) {
     app.get("/" + file, (_req, res) => { void readFile(new URL(file, webRoot), "utf8").then(code => res.type(file.endsWith("css") ? "text/css" : "application/javascript").send(code), () => res.status(404).end()); });
   }
   // Vendored ECharts: served from this origin so the console needs no CDN and no build step.
   app.get("/vendor/echarts.min.js", (_req, res) => {
     void readFile(new URL("vendor/echarts.min.js", webRoot)).then(
       (code) => res.type("application/javascript").setHeader("cache-control", "public, max-age=604800").send(code),
+      () => res.status(404).end(),
+    );
+  });
+  app.get("/accounts", (_req, res) => {
+    void readFile(new URL("accounts.html", webRoot), "utf8").then(
+      (html) => res.type("html").send(html),
       () => res.status(404).end(),
     );
   });
@@ -518,6 +671,10 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     }
     if (error instanceof Error && error.name === "ZodError") {
       res.status(400).json({ error: { code: "INVALID_INPUT", message: error.message } });
+      return;
+    }
+    if (error instanceof Error && "type" in error && error.type === "entity.too.large") {
+      res.status(413).json({ error: { code: "INVALID_INPUT", message: "Request body too large" } });
       return;
     }
     if (error instanceof SyntaxError && "body" in error) {

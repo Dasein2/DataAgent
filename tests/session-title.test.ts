@@ -222,6 +222,19 @@ it("names a saved session over HTTP with the active model and persists it", asyn
     assert.equal((await (await request("/v1/sessions")).json() as any).sessions[0].title, "月度 GMV 增长分析");
     assert.equal(new HistoryStore(join(config.dataDir, "history")).getSession(sessionId, "alice").snapshot.title, "月度 GMV 增长分析");
 
+    const patch = (title: string, owner = "alice") => request(`/v1/sessions/${sessionId}`, owner, { method: "PATCH", body: JSON.stringify({ title }) });
+    assert.equal((await patch("不允许", "bob")).status, 404);
+    assert.equal((await patch("  ")).status, 400);
+    assert.equal((await patch("x".repeat(81))).status, 400);
+    const renamed = await patch("  手动标题  ");
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(await renamed.json(), { title: "手动标题" });
+    assert.equal((await (await request("/v1/sessions")).json() as any).sessions[0].title, "手动标题");
+    const record = new HistoryStore(join(config.dataDir, "history")).getSession(sessionId, "alice");
+    assert.equal(record.snapshot.title, "手动标题");
+    assert.equal(record.connectionKey, "connection-key");
+    assert.equal(endpoint.requests.length, 1, "manual rename does not use the model");
+
     const prompt = JSON.stringify(endpoint.requests[0]?.messages ?? []);
     assert.match(prompt, /分析最近一年的月度 GMV/);
     assert.match(prompt, /GMV 同比增长 18%/);
@@ -256,6 +269,11 @@ it("names a live session with the session's own handle and keeps the title in th
     assert.equal(new HistoryStore(join(config.dataDir, "history")).getSession(session.id, "alice").snapshot.title, "实时会话标题");
     assert.match(JSON.stringify(endpoint.requests.at(-1)?.messages ?? []), /统计订单数量/);
     assert.match(JSON.stringify(endpoint.requests.at(-1)?.messages ?? []), /12 rows/);
+
+    assert.throws(() => service!.renameSession(session.id, "bob", "不允许"), /not found/);
+    service.renameSession(session.id, "alice", "手动调整的实时标题");
+    assert.equal(service.sessionSnapshot(session.id, "alice").title, "手动调整的实时标题");
+    assert.equal(new HistoryStore(join(config.dataDir, "history")).getSession(session.id, "alice").snapshot.title, "手动调整的实时标题");
   } finally {
     restore();
     await service?.shutdown();

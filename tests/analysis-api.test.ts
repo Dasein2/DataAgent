@@ -127,10 +127,19 @@ it(
       assert.equal(pin.status, 201);
       const snapshot = (await pin.json()).snapshot;
       assert.equal((await request(`/v1/sessions/${m.sessionId}/snapshots`)).status, 200);
+      const snapshotQuery = await request(`/v1/sessions/${m.sessionId}/snapshots/${snapshot.id}/query`, "alice", "POST", {
+        sql: "SELECT SUM(amount) AS total FROM data",
+      });
+      assert.equal(snapshotQuery.status, 200);
+      const snapshotDerived = (await snapshotQuery.json()).result;
+      assert.equal(snapshotDerived.preview[0][0], "246.00");
+      assert.equal(snapshotDerived.lineage.parent_result_id, m.id);
       for (const [path, method, body] of [
         [`/v1/results/${m.id}/summary`, "GET", undefined],
         [`/v1/results/${m.id}/transform`, "POST", { sql: "SELECT * FROM data" }],
         [`/v1/sessions/${m.sessionId}/catalog`, "GET", undefined],
+        [`/v1/sessions/${m.sessionId}/catalog/scopes`, "GET", undefined],
+        [`/v1/sessions/${m.sessionId}/catalog/objects?schema=public`, "GET", undefined],
         [`/v1/sessions/${m.sessionId}/object?name=sales`, "GET", undefined],
         [`/v1/sessions/${m.sessionId}/datasets`, "GET", undefined],
         [`/v1/sessions/${m.sessionId}/snapshots/${snapshot.id}`, "DELETE", undefined],

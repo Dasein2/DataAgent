@@ -15,6 +15,7 @@ const MODEL_ENV = [
   "NODE_ENV",
   "DATA_AGENT_ENV_FILE",
   "DATA_AGENT_DATA_DIR",
+  "DATA_AGENT_TOOL_PROFILE",
 ];
 
 /** loadConfig reads process.env and writes to it via dotenv, so every test restores the keys it touched. */
@@ -116,6 +117,19 @@ test("can disable all pi imports for a standalone server", async () => {
       assert.equal(config.model.authPath, undefined); assert.equal(config.model.provider, "openai");
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("ignores the retired tool profile setting in existing deployments", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "data-agent-config-"));
+  try {
+    const env = join(dir, "test.env");
+    writeFileSync(env, "DATA_AGENT_TOOL_PROFILE=analysis\n");
+    await withEnv({ DATA_AGENT_ENV_FILE: env, DATA_AGENT_DATA_DIR: dir, DATA_AGENT_TOOL_PROFILE: undefined }, async () => {
+      assert.ok(!("toolProfile" in loadConfig()));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("falls back to the built-in baseline when neither pi nor .env names a model", async () => {

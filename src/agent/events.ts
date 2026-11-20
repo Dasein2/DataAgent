@@ -32,10 +32,34 @@ export class EventBroker {
   private readonly logs = new Map<string, TaskEvent[]>();
   private readonly listeners = new Set<{ taskId: string; fn: Listener }>();
 
-  constructor(private readonly maxEventsPerTask = 5_000, private readonly history?: {
-    appendEvent(event: TaskEvent): void;
-    listEvents(taskId: string): TaskEvent[];
-  }) {}
+  constructor(
+    private readonly maxEventsPerTask = 5_000,
+    private readonly history?: {
+      appendEvent(event: TaskEvent): void;
+      listEvents(taskId: string): TaskEvent[];
+    },
+    /**
+     * Ceiling on in-memory task logs. Only applied when a history store can reload an evicted log,
+     * because `seq` is then recovered from disk and stays monotonic. A task with live subscribers is
+     * never evicted.
+     */
+    private readonly maxTasks = 500,
+  ) {}
+
+  private hasSubscribers(taskId: string): boolean {
+    for (const listener of this.listeners) if (listener.taskId === taskId) return true;
+    return false;
+  }
+
+  /** Evict the oldest finished logs; the on-disk event log remains the authority. */
+  private evict(taskId: string): void {
+    if (!this.history || this.logs.size <= this.maxTasks) return;
+    for (const key of this.logs.keys()) {
+      if (this.logs.size <= this.maxTasks) return;
+      if (key === taskId || this.hasSubscribers(key)) continue;
+      this.logs.delete(key);
+    }
+  }
 
   private log(taskId: string): TaskEvent[] {
     let log = this.logs.get(taskId);
@@ -61,6 +85,7 @@ export class EventBroker {
     log.push(event);
     if (log.length > this.maxEventsPerTask) log.splice(0, log.length - this.maxEventsPerTask);
     this.logs.set(taskId, log);
+    this.evict(taskId);
     for (const listener of this.listeners) {
       if (listener.taskId !== taskId) continue;
       try {

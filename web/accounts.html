@@ -1,0 +1,1337 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>账户管理 - Data Agent</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f8f7f4;
+      --panel: #ffffff;
+      --panel-2: #f4f2ee;
+      --border: #e6e3dc;
+      --border-strong: #ccc8bf;
+      --text: #292a27;
+      --muted: #74756f;
+      --accent: #a65338;
+      --accent-hover: #8e422b;
+      --accent-soft: #f9eee7;
+      --ok: #34765b;
+      --warn: #946619;
+      --err: #b64040;
+      --shadow: 0 2px 8px rgba(42, 35, 24, .025), 0 1px 2px rgba(42, 35, 24, .025);
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.6 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::selection { background: #edd7c7; color: var(--text); }
+    a { color: inherit; text-decoration: none; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border: 0;
+    }
+    .icon {
+      width: 17px;
+      height: 17px;
+      flex: none;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.7;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    /* A small local icon set keeps the page usable without a third-party runtime dependency. */
+    .icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+    .app-header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, .96);
+      backdrop-filter: blur(12px);
+    }
+    .header-inner {
+      width: min(1240px, calc(100% - 48px));
+      min-height: 68px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: 0;
+    }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      flex: none;
+      border-radius: 10px;
+      background: var(--text);
+      color: #faf8f2;
+    }
+    .brand-mark .icon { width: 22px; height: 22px; stroke-width: 1.8; }
+    .brand-copy { min-width: 0; }
+    .brand-title {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.25;
+      font-weight: 650;
+      letter-spacing: -.2px;
+    }
+    .brand-subtitle {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.2;
+      letter-spacing: 1.6px;
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      min-width: 0;
+      margin-left: auto;
+    }
+    .identity-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+      min-height: 36px;
+      padding: 5px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #faf9f6;
+    }
+    .identity-dot {
+      width: 7px;
+      height: 7px;
+      flex: none;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 3px #e3f0e7;
+    }
+    .identity-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11.5px;
+      font-weight: 550;
+    }
+    .role-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid #ead6c8;
+      border-radius: 5px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 10.5px;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .role-badge.user {
+      border-color: #d8e2e5;
+      background: #f1f6f7;
+      color: #4d6d76;
+    }
+    .role-badge .icon { width: 13px; height: 13px; stroke-width: 1.8; }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-height: 36px;
+      padding: 7px 12px;
+      border: 1px solid #dcd9d1;
+      border-radius: 7px;
+      background: #fff;
+      color: var(--text);
+      box-shadow: 0 1px 2px rgba(40, 36, 28, .035);
+      font-size: 12px;
+      line-height: 1.5;
+      font-weight: 500;
+      transition: background .15s, border-color .15s, box-shadow .15s, color .15s, transform .15s;
+    }
+    .button:hover:not(:disabled) {
+      border-color: #bdb8ad;
+      background: #f8f7f4;
+      box-shadow: 0 2px 4px rgba(40, 36, 28, .06);
+    }
+    .button:active:not(:disabled) {
+      transform: translateY(1px);
+      background: #eeece7;
+      box-shadow: none;
+    }
+    .button:focus-visible,
+    input:focus-visible,
+    .role-option:has(input:focus-visible),
+    .modal-close:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+    .button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      box-shadow: 0 1px 2px rgba(105, 44, 24, .12), inset 0 1px 0 rgba(255, 255, 255, .10);
+    }
+    .button.primary:hover:not(:disabled) {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+      box-shadow: 0 3px 7px rgba(105, 44, 24, .16);
+    }
+    .button.ghost { background: transparent; box-shadow: none; }
+    .button.danger { color: var(--err); }
+    .button.danger:hover:not(:disabled) { border-color: #e7c5c2; background: #fdf2f1; }
+    .button.small { min-height: 32px; padding: 5px 9px; font-size: 11px; }
+    .button.icon-only { width: 36px; padding: 7px; }
+    .button:disabled { opacity: .55; box-shadow: none; }
+    .button.is-loading { pointer-events: none; }
+    .button.is-loading .button-icon { animation: spin .8s linear infinite; }
+    .button-icon { display: inline-flex; }
+
+    main {
+      width: min(1240px, calc(100% - 48px));
+      margin: 0 auto;
+      padding: 29px 0 52px;
+    }
+    .page-intro {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 28px;
+      padding: 0 2px 23px;
+    }
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font: 10px/1.2 var(--mono);
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+    }
+    h1, h2, p { margin-top: 0; }
+    h1 {
+      margin-bottom: 7px;
+      font-family: Georgia, "Noto Serif SC", "Songti SC", SimSun, serif;
+      font-size: 29px;
+      line-height: 1.25;
+      font-weight: 400;
+      letter-spacing: .2px;
+    }
+    .page-description {
+      max-width: 620px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .page-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      flex: none;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, .6);
+      color: var(--muted);
+      font: 10.5px var(--mono);
+      white-space: nowrap;
+    }
+    .page-state::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #aaa9a1;
+    }
+    .page-state[data-state="ready"] { border-color: #d4e5d9; background: #f0f7f2; color: var(--ok); }
+    .page-state[data-state="ready"]::before { background: var(--ok); }
+    .page-state[data-state="error"] { border-color: #ebceca; background: #fff1ef; color: var(--err); }
+    .page-state[data-state="error"]::before { background: var(--err); }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 20px;
+    }
+    .summary-item {
+      min-width: 0;
+      padding: 15px 20px 16px 0;
+    }
+    .summary-item + .summary-item { border-left: 1px solid var(--border); padding-left: 20px; }
+    .summary-label { color: var(--muted); font-size: 11px; }
+    .summary-value {
+      display: block;
+      margin-top: 2px;
+      font: 24px/1.2 var(--mono);
+      letter-spacing: -.8px;
+    }
+    .summary-note { color: var(--muted); font-size: 10px; }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(300px, 350px) minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+    }
+    .panel {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .panel-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 20px 20px 0;
+    }
+    .panel-heading { min-width: 0; flex: 1; }
+    .panel-icon {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      flex: none;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .panel-icon .icon { width: 16px; height: 16px; }
+    h2 {
+      margin-bottom: 3px;
+      font-size: 14px;
+      line-height: 1.35;
+      font-weight: 650;
+      letter-spacing: -.1px;
+    }
+    .panel-description { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .panel-body { padding: 18px 20px 20px; }
+
+    .field { margin-top: 14px; }
+    .field:first-child { margin-top: 0; }
+    .field-label {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+      color: #64665f;
+      font-size: 11.5px;
+      font-weight: 550;
+    }
+    .field-label span { color: var(--muted); font-size: 10px; font-weight: 400; }
+    input[type="text"], input[type="password"], input[type="search"] {
+      width: 100%;
+      min-height: 38px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: #fdfdfc;
+      color: var(--text);
+      font-size: 12px;
+      transition: border-color .15s, box-shadow .15s, background .15s;
+    }
+    input::placeholder { color: #a09f96; }
+    input:hover:not(:disabled) { border-color: var(--border-strong); }
+    input:focus { outline: none; border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(166, 83, 56, .10); }
+    .field-hint { margin: 5px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+    .field-hint[data-state="error"] { color: var(--err); }
+    .password-wrap { position: relative; }
+    .password-wrap input { padding-right: 42px; }
+    .password-toggle {
+      position: absolute;
+      top: 3px;
+      right: 3px;
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--muted);
+    }
+    .password-toggle:hover { background: var(--panel-2); color: var(--text); }
+    .password-meter { display: flex; gap: 4px; margin-top: 8px; }
+    .password-meter span { height: 3px; flex: 1; border-radius: 99px; background: #e8e5de; }
+    .password-meter[data-level="short"] span:nth-child(-n+1) { background: var(--err); }
+    .password-meter[data-level="medium"] span:nth-child(-n+2) { background: var(--warn); }
+    .password-meter[data-level="ready"] span:nth-child(-n+4) { background: var(--ok); }
+    .password-meter-label { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+    .password-meter-label[data-level="short"] { color: var(--err); }
+    .password-meter-label[data-level="medium"] { color: var(--warn); }
+    .password-meter-label[data-level="ready"] { color: var(--ok); }
+
+    .role-fieldset { margin: 15px 0 0; padding: 0; border: 0; }
+    .role-legend { display: block; margin-bottom: 6px; color: #64665f; font-size: 11.5px; font-weight: 550; }
+    .role-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .role-option {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      min-height: 48px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: #fdfdfc;
+      cursor: pointer;
+      transition: border-color .15s, background .15s, box-shadow .15s;
+    }
+    .role-option:hover { border-color: var(--border-strong); background: #fff; }
+    .role-option:has(input:checked) { border-color: #d7b19b; background: var(--accent-soft); box-shadow: inset 0 0 0 1px rgba(166, 83, 56, .08); }
+    .role-option input { position: absolute; opacity: 0; pointer-events: none; }
+    .role-option .icon { width: 17px; height: 17px; color: var(--muted); }
+    .role-option:has(input:checked) .icon { color: var(--accent); }
+    .role-option strong { display: block; font-size: 11.5px; font-weight: 600; }
+    .role-option small { display: block; color: var(--muted); font-size: 9.5px; line-height: 1.3; }
+    .role-option-check { display: none; margin-left: auto; color: var(--accent); }
+    .role-option:has(input:checked) .role-option-check { display: block; }
+    .role-option-check .icon { width: 14px; height: 14px; }
+
+    .form-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 20px; }
+    .form-status { min-height: 0; margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+    .form-status[data-state="error"] { color: var(--err); }
+    .form-status[data-state="success"] { color: var(--ok); }
+    .security-note {
+      display: flex;
+      gap: 8px;
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.55;
+    }
+    .security-note .icon { width: 14px; height: 14px; flex: none; color: var(--ok); margin-top: 2px; }
+
+    .directory-panel { overflow: hidden; }
+    .directory-header { align-items: center; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
+    .directory-header .panel-icon { background: #f1f4f1; color: var(--ok); }
+    .directory-actions { display: flex; gap: 7px; align-items: center; flex: none; }
+    .directory-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      background: #fdfcf9;
+    }
+    .search-box { position: relative; min-width: 180px; max-width: 290px; flex: 1; }
+    .search-box .icon { position: absolute; top: 10px; left: 10px; width: 15px; height: 15px; color: var(--muted); pointer-events: none; }
+    .search-box input { min-height: 34px; padding-left: 32px; background: #fff; }
+    .list-meta { color: var(--muted); font: 10.5px var(--mono); white-space: nowrap; }
+    .list-content { min-height: 216px; }
+    .loading-state, .empty-state, .error-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 216px;
+      padding: 34px 20px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .loading-state { gap: 10px; font-size: 11px; }
+    .spinner {
+      width: 21px;
+      height: 21px;
+      border: 2px solid #eadfd6;
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    .state-mark {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      margin-bottom: 10px;
+      border-radius: 12px;
+      background: var(--panel-2);
+      color: #9b9a91;
+    }
+    .state-mark .icon { width: 21px; height: 21px; }
+    .empty-state strong, .error-state strong { color: var(--text); font-size: 12px; font-weight: 600; }
+    .empty-state p, .error-state p { max-width: 300px; margin: 4px 0 13px; font-size: 10.5px; line-height: 1.6; }
+
+    .table-wrap { overflow-x: auto; }
+    .accounts-table { width: 100%; border-collapse: collapse; }
+    .accounts-table th, .accounts-table td { padding: 12px 14px; text-align: left; vertical-align: middle; }
+    .accounts-table th {
+      color: var(--muted);
+      background: #f7f6f2;
+      border-bottom: 1px solid var(--border);
+      font-size: 10.5px;
+      font-weight: 550;
+      white-space: nowrap;
+    }
+    .accounts-table td { border-bottom: 1px solid #efede7; font-size: 11.5px; }
+    .accounts-table tbody tr:last-child td { border-bottom: 0; }
+    .accounts-table tbody tr:hover { background: #fdfbf8; }
+    .account-cell { display: flex; align-items: center; gap: 9px; min-width: 150px; }
+    .avatar {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      flex: none;
+      border: 1px solid #ead6c8;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font: 600 12px var(--mono);
+      text-transform: uppercase;
+    }
+    .account-name-wrap { min-width: 0; }
+    .account-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    .current-badge {
+      display: inline-block;
+      margin-top: 2px;
+      color: var(--accent);
+      font-size: 9.5px;
+      line-height: 1.2;
+    }
+    .session-count { font: 12px var(--mono); }
+    .session-label { margin-left: 4px; color: var(--muted); font-size: 10px; }
+    .table-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .table-actions .button { white-space: nowrap; }
+    .current-note { color: var(--muted); font-size: 10px; white-space: nowrap; }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(41, 42, 39, .34);
+    }
+    .modal-card {
+      width: min(100%, 430px);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+      box-shadow: 0 18px 55px rgba(38, 32, 21, .18);
+      animation: modal-in .16s ease-out;
+    }
+    .modal-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 20px 20px 0;
+    }
+    .modal-header .panel-icon { background: #f1f4f1; color: var(--ok); }
+    .modal-close {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      flex: none;
+      margin-left: auto;
+      padding: 0;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+    }
+    .modal-close:hover { background: var(--panel-2); color: var(--text); }
+    .modal-body { padding: 18px 20px 20px; }
+    .modal-user {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 15px;
+      padding: 6px 9px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #faf9f6;
+      color: var(--text);
+      font: 11px var(--mono);
+    }
+    .modal-user .icon { width: 14px; height: 14px; color: var(--accent); }
+    .modal-copy { margin: 0 0 14px; color: var(--muted); font-size: 11px; line-height: 1.65; }
+    .modal-copy strong { color: var(--text); font-weight: 600; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 19px; }
+    .modal-status { min-height: 0; margin-top: 10px; color: var(--err); font-size: 10.5px; }
+    body.modal-open { overflow: hidden; }
+
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 40;
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      width: min(360px, calc(100% - 32px));
+      padding: 11px 13px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 8px 24px rgba(42, 35, 24, .12);
+      color: var(--text);
+      font-size: 11px;
+      transform: translateY(12px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .16s, transform .16s;
+    }
+    .toast[data-state="visible"] { opacity: 1; transform: none; }
+    .toast[data-type="success"] { border-color: #d4e5d9; }
+    .toast[data-type="error"] { border-color: #ebceca; }
+    .toast .icon { width: 16px; height: 16px; margin-top: 1px; color: var(--accent); }
+    .toast[data-type="success"] .icon { color: var(--ok); }
+    .toast[data-type="error"] .icon { color: var(--err); }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes modal-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+
+    @media (max-width: 900px) {
+      .workspace { grid-template-columns: 1fr; }
+      .create-panel { max-width: none; }
+    }
+    @media (max-width: 700px) {
+      .header-inner, main { width: min(100% - 32px, 1240px); }
+      .header-inner { min-height: 62px; gap: 12px; flex-wrap: wrap; padding: 10px 0; }
+      .header-actions { width: 100%; margin-left: 0; justify-content: flex-end; }
+      .identity-chip { margin-right: auto; }
+      .page-intro { align-items: flex-start; flex-direction: column; gap: 13px; }
+      .page-state { align-self: flex-start; }
+      main { padding-top: 22px; }
+    }
+    @media (max-width: 520px) {
+      .summary-grid { grid-template-columns: 1fr; }
+      .summary-item { padding: 11px 0; }
+      .summary-item + .summary-item { border-top: 1px solid var(--border); border-left: 0; padding-left: 0; }
+      .panel-header, .panel-body { padding-left: 16px; padding-right: 16px; }
+      .directory-header { padding-bottom: 15px; }
+      .directory-toolbar { align-items: stretch; flex-direction: column; padding-left: 16px; padding-right: 16px; }
+      .search-box { max-width: none; }
+      .list-meta { align-self: flex-start; }
+      .table-wrap { overflow: visible; }
+      .accounts-table, .accounts-table tbody, .accounts-table tr, .accounts-table td { display: block; width: 100%; }
+      .accounts-table thead { display: none; }
+      .accounts-table tbody tr { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+      .accounts-table tbody tr:last-child { border-bottom: 0; }
+      .accounts-table td { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 6px 0; border: 0; }
+      .accounts-table td::before { content: attr(data-label); flex: none; color: var(--muted); font-size: 10px; }
+      .accounts-table td.account-column { display: block; padding-top: 0; padding-bottom: 9px; }
+      .accounts-table td.account-column::before { display: none; }
+      .accounts-table td.actions-column { display: block; padding-top: 10px; }
+      .accounts-table td.actions-column::before { display: block; margin-bottom: 7px; }
+      .account-cell { min-width: 0; }
+      .table-actions { justify-content: flex-start; }
+      .modal { padding: 14px; }
+      .toast { right: 16px; bottom: 16px; width: calc(100% - 32px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="7" r="4"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 9-9M15 6l3 3M18 3l3 3"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-14.9-3L3 11"/><path d="M3 4v7h7M4 13a8.1 8.1 0 0 0 14.9 3L21 13"/><path d="M21 20v-7h-7"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 4.3A10.7 10.7 0 0 1 12 4c6.5 0 10 8 10 8a18.5 18.5 0 0 1-3.1 4.4M6.2 6.2C3.5 8.1 2 12 2 12s3.5 8 10 8a10.7 10.7 0 0 0 2.1-.2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol>
+    <symbol id="i-log-out" viewBox="0 0 24 24"><path d="M10 17l5-5-5-5M15 12H3M21 19V5a2 2 0 0 0-2-2h-6"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M4 4h16l1 12H3L4 4Z"/><path d="M3 16h5l2 3h4l2-3h5M8 9h8"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9 2.2 18a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  </svg>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="返回 Data Agent 工作台">
+        <span class="brand-mark"><svg class="icon"><use href="#i-users"></use></svg></span>
+        <span class="brand-copy">
+          <span class="brand-title">Data Agent</span>
+          <span class="brand-subtitle">ACCOUNT ADMINISTRATION</span>
+        </span>
+      </a>
+      <div class="header-actions">
+        <div class="identity-chip" aria-label="当前登录账户">
+          <span class="identity-dot" aria-hidden="true"></span>
+          <span class="identity-name" id="currentUser">加载中</span>
+          <span id="currentRole" class="role-badge"><svg class="icon"><use href="#i-shield"></use></svg>管理员</span>
+        </div>
+        <a class="button ghost" href="/"><svg class="icon"><use href="#i-arrow-left"></use></svg>返回工作台</a>
+        <button class="button ghost" id="logoutButton" type="button"><span class="button-icon"><svg class="icon"><use href="#i-log-out"></use></svg></span>退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="page-intro" aria-labelledby="pageTitle">
+      <div>
+        <p class="eyebrow">Administrator console / identity</p>
+        <h1 id="pageTitle">账户管理</h1>
+        <p class="page-description">创建和维护工作台账户，查看登录会话，并在需要时撤销访问权限。</p>
+      </div>
+      <div class="page-state" id="pageState" data-state="loading">正在同步账户目录</div>
+    </section>
+
+    <section class="summary-grid" aria-label="账户摘要">
+      <div class="summary-item">
+        <span class="summary-label">账户总数</span>
+        <strong class="summary-value" id="statTotal">—</strong>
+        <span class="summary-note">已注册账户</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">管理员</span>
+        <strong class="summary-value" id="statAdmins">—</strong>
+        <span class="summary-note">拥有系统管理权限</span>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">活跃会话</span>
+        <strong class="summary-value" id="statSessions">—</strong>
+        <span class="summary-note">当前有效登录</span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <section class="panel create-panel" aria-labelledby="createHeading">
+        <div class="panel-header">
+          <span class="panel-icon"><svg class="icon"><use href="#i-plus"></use></svg></span>
+          <div class="panel-heading">
+            <h2 id="createHeading">创建账户</h2>
+            <p class="panel-description">为新的协作者配置登录身份和权限。</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form id="createForm" novalidate>
+            <div class="field">
+              <label class="field-label" for="newUsername">用户名 <span>必填</span></label>
+              <input id="newUsername" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="60" placeholder="例如：alice" required pattern="[a-zA-Z0-9][a-zA-Z0-9._-]{0,59}">
+              <p class="field-hint">使用 1–60 个字母、数字、点、下划线或连字符。</p>
+            </div>
+
+            <div class="field">
+              <label class="field-label" for="newPassword">初始密码 <span>至少 8 个字符</span></label>
+              <div class="password-wrap">
+                <input id="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="输入临时或初始密码" required>
+                <button class="password-toggle" id="toggleCreatePassword" type="button" aria-label="显示密码" title="显示密码"><svg class="icon"><use href="#i-eye"></use></svg></button>
+              </div>
+              <div class="password-meter" id="createPasswordMeter" data-level="empty" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+              <span class="password-meter-label" id="createPasswordLabel">密码不会显示在账户列表中</span>
+            </div>
+
+            <fieldset class="role-fieldset">
+              <legend class="role-legend">账户角色</legend>
+              <div class="role-options">
+                <label class="role-option">
+                  <input type="radio" name="newRole" value="user" checked>
+                  <svg class="icon"><use href="#i-user"></use></svg>
+                  <span><strong>普通用户</strong><small>使用分析工作台</small></span>
+                  <span class="role-option-check"><svg class="icon"><use href="#i-check"></use></svg></span>
+                </label>
+                <label class="role-option">
+                  <input type="radio" name="newRole" value="admin">
+                  <svg class="icon"><use href="#i-shield"></use></svg>
+                  <span><strong>管理员</strong><small>管理模型与账户</small></span>
+                  <span class="role-option-check"><svg class="icon"><use href="#i-check"></use></svg></span>
+                </label>
+              </div>
+            </fieldset>
+
+            <div class="form-actions">
+              <button class="button primary" id="createButton" type="submit"><span class="button-icon"><svg class="icon"><use href="#i-plus"></use></svg></span>创建账户</button>
+              <button class="button" id="clearButton" type="reset">清空</button>
+            </div>
+            <p class="form-status" id="createStatus" role="status"></p>
+          </form>
+
+          <div class="security-note">
+            <svg class="icon"><use href="#i-lock"></use></svg>
+            <span>密码以不可逆哈希保存。重置密码会立即撤销该账户的已有登录会话。</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel directory-panel" aria-labelledby="directoryHeading">
+        <div class="panel-header directory-header">
+          <span class="panel-icon"><svg class="icon"><use href="#i-list"></use></svg></span>
+          <div class="panel-heading">
+            <h2 id="directoryHeading">账户目录</h2>
+            <p class="panel-description">查看权限和会话状态，按需执行账户操作。</p>
+          </div>
+          <div class="directory-actions">
+            <button class="button icon-only" id="refreshButton" type="button" aria-label="刷新账户列表" title="刷新账户列表"><span class="button-icon"><svg class="icon"><use href="#i-refresh"></use></svg></span></button>
+          </div>
+        </div>
+        <div class="directory-toolbar">
+          <label class="search-box" for="accountSearch">
+            <svg class="icon"><use href="#i-search"></use></svg>
+            <span class="sr-only">搜索账户</span>
+            <input id="accountSearch" type="search" placeholder="搜索用户名" autocomplete="off">
+          </label>
+          <span class="list-meta" id="listMeta">正在加载</span>
+        </div>
+        <div class="list-content" id="accountsList">
+          <div class="loading-state"><span class="spinner" aria-hidden="true"></span><span>正在加载账户目录</span></div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div class="modal" id="resetModal" hidden role="dialog" aria-modal="true" aria-labelledby="resetHeading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="panel-icon"><svg class="icon"><use href="#i-key"></use></svg></span>
+        <div class="panel-heading">
+          <h2 id="resetHeading">重置密码</h2>
+          <p class="panel-description">设置新密码并撤销原有登录会话。</p>
+        </div>
+        <button class="modal-close" type="button" data-close-modal="resetModal" aria-label="关闭对话框" title="关闭"><svg class="icon"><use href="#i-x"></use></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-user"><svg class="icon"><use href="#i-user"></use></svg><span id="resetUsername"></span></div>
+        <form id="resetForm" novalidate>
+          <label class="field-label" for="resetPassword">新密码 <span>至少 8 个字符</span></label>
+          <div class="password-wrap">
+            <input id="resetPassword" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="输入新的登录密码" required>
+            <button class="password-toggle" id="toggleResetPassword" type="button" aria-label="显示密码" title="显示密码"><svg class="icon"><use href="#i-eye"></use></svg></button>
+          </div>
+          <p class="field-hint">该账户下次登录时必须使用新密码。</p>
+          <div class="password-meter" id="resetPasswordMeter" data-level="empty" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+          <span class="password-meter-label" id="resetPasswordLabel">至少需要 8 个字符</span>
+          <p class="modal-status" id="resetStatus" role="alert"></p>
+          <div class="modal-actions">
+            <button class="button" type="button" data-close-modal="resetModal">取消</button>
+            <button class="button primary" id="resetButton" type="submit"><span class="button-icon"><svg class="icon"><use href="#i-key"></use></svg></span>确认重置</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="deleteModal" hidden role="dialog" aria-modal="true" aria-labelledby="deleteHeading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="panel-icon" style="background:#fff1ef;color:var(--err)"><svg class="icon"><use href="#i-trash"></use></svg></span>
+        <div class="panel-heading">
+          <h2 id="deleteHeading">删除账户</h2>
+          <p class="panel-description">删除后将无法恢复该账户的登录身份。</p>
+        </div>
+        <button class="modal-close" type="button" data-close-modal="deleteModal" aria-label="关闭对话框" title="关闭"><svg class="icon"><use href="#i-x"></use></svg></button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-copy">确定删除账户 <strong id="deleteUsername"></strong> 吗？该操作会同时撤销它的登录会话，但不会删除账户已经产生的分析历史。</p>
+        <p class="modal-status" id="deleteStatus" role="alert"></p>
+        <div class="modal-actions">
+          <button class="button" type="button" data-close-modal="deleteModal">取消</button>
+          <button class="button danger" id="deleteButton" type="button"><span class="button-icon"><svg class="icon"><use href="#i-trash"></use></svg></span>确认删除</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"><svg class="icon"><use href="#i-check"></use></svg><span id="toastText"></span></div>
+
+  <script>
+    const API_BASE = "/v1/auth";
+    let currentUser = null;
+    let accounts = [];
+    let pendingUsername = "";
+    let toastTimer = 0;
+
+    const $ = (id) => document.getElementById(id);
+    const icon = (name) => {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.classList.add("icon");
+      svg.setAttribute("aria-hidden", "true");
+      const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+      use.setAttribute("href", `#i-${name}`);
+      svg.append(use);
+      return svg;
+    };
+    const text = (value) => document.createTextNode(String(value ?? ""));
+
+    function setPageState(message, state = "loading") {
+      const node = $("pageState");
+      node.textContent = message;
+      node.dataset.state = state;
+    }
+
+    function setStatus(id, message = "", state = "") {
+      const node = $(id);
+      node.textContent = message;
+      if (state) node.dataset.state = state;
+      else delete node.dataset.state;
+    }
+
+    function setButtonBusy(button, busy, loadingIcon = "refresh") {
+      if (!button) return;
+      if (busy) {
+        if (button.dataset.busy !== "true") {
+          button.dataset.busy = "true";
+          button.dataset.originalIcon = button.querySelector(".button-icon use")?.getAttribute("href") || "";
+        }
+        button.disabled = true;
+        button.classList.add("is-loading");
+        const iconNode = button.querySelector(".button-icon");
+        if (iconNode) {
+          iconNode.replaceChildren(icon(loadingIcon));
+        }
+        button.setAttribute("aria-busy", "true");
+      } else {
+        const originalIcon = button.dataset.originalIcon;
+        const iconNode = button.querySelector(".button-icon");
+        if (originalIcon && iconNode) iconNode.replaceChildren(icon(originalIcon.slice(3)));
+        delete button.dataset.originalIcon;
+        delete button.dataset.busy;
+        button.disabled = false;
+        button.classList.remove("is-loading");
+        button.removeAttribute("aria-busy");
+      }
+    }
+
+    async function readResponse(response) {
+      const raw = await response.text();
+      let payload = null;
+      try { payload = raw ? JSON.parse(raw) : null; } catch (_) { /* fall through to the raw response */ }
+      if (!response.ok) {
+        const message = payload?.error?.message || payload?.message || raw || `请求失败（${response.status}）`;
+        throw new Error(message);
+      }
+      return payload;
+    }
+
+    async function api(path, options = {}) {
+      const headers = new Headers(options.headers || {});
+      if (options.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+      const response = await fetch(`${API_BASE}${path}`, {
+        ...options,
+        headers,
+        credentials: "same-origin",
+      });
+      return readResponse(response);
+    }
+
+    function showToast(message, type = "info") {
+      const toast = $("toast");
+      $("toastText").textContent = message;
+      toast.dataset.type = type;
+      toast.dataset.state = "visible";
+      const use = toast.querySelector("use");
+      use.setAttribute("href", type === "error" ? "#i-alert" : type === "success" ? "#i-check" : "#i-refresh");
+      window.clearTimeout(toastTimer);
+      toastTimer = window.setTimeout(() => { toast.dataset.state = ""; }, 4200);
+    }
+
+    function roleBadge(role) {
+      const span = document.createElement("span");
+      span.className = `role-badge${role === "user" ? " user" : ""}`;
+      span.append(icon(role === "admin" ? "shield" : "user"), text(role === "admin" ? "管理员" : "普通用户"));
+      return span;
+    }
+
+    function updateSummary() {
+      $("statTotal").textContent = String(accounts.length);
+      $("statAdmins").textContent = String(accounts.filter((account) => account.role === "admin").length);
+      $("statSessions").textContent = String(accounts.reduce((sum, account) => sum + Number(account.createdSessions || 0), 0));
+    }
+
+    function stateBlock(kind, title, description, buttonLabel = "") {
+      const wrapper = document.createElement("div");
+      wrapper.className = `${kind}-state`;
+      const mark = document.createElement("span");
+      mark.className = "state-mark";
+      mark.append(icon(kind === "error" ? "alert" : kind === "empty" ? "inbox" : "search"));
+      wrapper.append(mark);
+      const heading = document.createElement("strong");
+      heading.textContent = title;
+      wrapper.append(heading);
+      if (description) {
+        const copy = document.createElement("p");
+        copy.textContent = description;
+        wrapper.append(copy);
+      }
+      if (buttonLabel) {
+        const button = document.createElement("button");
+        button.className = "button small";
+        button.type = "button";
+        button.textContent = buttonLabel;
+        wrapper.append(button);
+        return { wrapper, button };
+      }
+      return { wrapper };
+    }
+
+    function renderAccounts() {
+      const root = $("accountsList");
+      const query = $("accountSearch").value.trim().toLowerCase();
+      const visible = accounts.filter((account) => account.username.toLowerCase().includes(query));
+      $("listMeta").textContent = query ? `${visible.length} / ${accounts.length} 个账户` : `${accounts.length} 个账户`;
+      root.replaceChildren();
+
+      if (!visible.length) {
+        const state = stateBlock("empty", query ? "没有匹配账户" : "暂无账户", query ? "换一个用户名试试，或清除当前搜索。" : "使用左侧表单创建第一个账户。", query ? "清除搜索" : "");
+        if (state.button) state.button.addEventListener("click", () => { $("accountSearch").value = ""; renderAccounts(); });
+        root.append(state.wrapper);
+        return;
+      }
+
+      const tableWrap = document.createElement("div");
+      tableWrap.className = "table-wrap";
+      const table = document.createElement("table");
+      table.className = "accounts-table";
+      table.innerHTML = `<thead><tr><th scope="col">账户</th><th scope="col">角色</th><th scope="col">活跃会话</th><th scope="col">操作</th></tr></thead>`;
+      const body = document.createElement("tbody");
+      for (const account of visible) {
+        const row = document.createElement("tr");
+        const isCurrent = account.username === currentUser?.username;
+
+        const accountCell = document.createElement("td");
+        accountCell.className = "account-column";
+        accountCell.dataset.label = "账户";
+        const accountWrap = document.createElement("div");
+        accountWrap.className = "account-cell";
+        const avatar = document.createElement("span");
+        avatar.className = "avatar";
+        avatar.textContent = account.username.slice(0, 1);
+        const nameWrap = document.createElement("span");
+        nameWrap.className = "account-name-wrap";
+        const name = document.createElement("span");
+        name.className = "account-name";
+        name.textContent = account.username;
+        nameWrap.append(name);
+        if (isCurrent) {
+          const current = document.createElement("span");
+          current.className = "current-badge";
+          current.textContent = "当前登录";
+          nameWrap.append(current);
+        }
+        accountWrap.append(avatar, nameWrap);
+        accountCell.append(accountWrap);
+
+        const roleCell = document.createElement("td");
+        roleCell.dataset.label = "角色";
+        roleCell.append(roleBadge(account.role));
+
+        const sessionsCell = document.createElement("td");
+        sessionsCell.dataset.label = "活跃会话";
+        const count = document.createElement("span");
+        count.className = "session-count";
+        count.textContent = String(account.createdSessions || 0);
+        const sessionLabel = document.createElement("span");
+        sessionLabel.className = "session-label";
+        sessionLabel.textContent = "个";
+        sessionsCell.append(count, sessionLabel);
+
+        const actionsCell = document.createElement("td");
+        actionsCell.className = "actions-column";
+        actionsCell.dataset.label = "操作";
+        const actions = document.createElement("div");
+        actions.className = "table-actions";
+        const reset = document.createElement("button");
+        reset.className = "button small";
+        reset.type = "button";
+        reset.title = `重置 ${account.username} 的密码`;
+        reset.append(icon("key"), text("重置密码"));
+        reset.addEventListener("click", () => openResetModal(account.username));
+        actions.append(reset);
+        if (isCurrent) {
+          const note = document.createElement("span");
+          note.className = "current-note";
+          note.textContent = "当前账户";
+          actions.append(note);
+        } else {
+          const remove = document.createElement("button");
+          remove.className = "button small danger";
+          remove.type = "button";
+          remove.title = `删除 ${account.username}`;
+          remove.append(icon("trash"), text("删除"));
+          remove.addEventListener("click", () => openDeleteModal(account.username));
+          actions.append(remove);
+        }
+        actionsCell.append(actions);
+        row.append(accountCell, roleCell, sessionsCell, actionsCell);
+        body.append(row);
+      }
+      table.append(body);
+      tableWrap.append(table);
+      root.append(tableWrap);
+    }
+
+    async function loadAccounts() {
+      const refresh = $("refreshButton");
+      setButtonBusy(refresh, true);
+      $("listMeta").textContent = "正在加载";
+      if (!accounts.length) {
+        $("accountsList").replaceChildren(Object.assign(document.createElement("div"), { className: "loading-state", innerHTML: '<span class="spinner" aria-hidden="true"></span><span>正在加载账户目录</span>' }));
+      }
+      try {
+        const data = await api("/accounts");
+        accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+        updateSummary();
+        renderAccounts();
+        setPageState("账户目录已同步", "ready");
+      } catch (error) {
+        const state = stateBlock("error", "账户目录加载失败", error.message, "重试");
+        state.button.addEventListener("click", () => void loadAccounts());
+        $("accountsList").replaceChildren(state.wrapper);
+        $("listMeta").textContent = "同步失败";
+        setPageState("同步失败", "error");
+        showToast(error.message, "error");
+      } finally {
+        setButtonBusy(refresh, false);
+      }
+    }
+
+    function updatePasswordMeter(inputId, meterId, labelId) {
+      const length = $(inputId).value.length;
+      let level = "empty";
+      let label = "密码不会显示在账户列表中";
+      if (length > 0 && length < 8) { level = "short"; label = "还需要至少 8 个字符"; }
+      else if (length >= 8) { level = "ready"; label = "密码长度符合要求"; }
+      $(meterId).dataset.level = level;
+      $(labelId).dataset.level = level;
+      $(labelId).textContent = label;
+    }
+
+    function togglePassword(inputId, buttonId) {
+      const input = $(inputId);
+      const button = $(buttonId);
+      const visible = input.type === "text";
+      input.type = visible ? "password" : "text";
+      button.setAttribute("aria-label", visible ? "显示密码" : "隐藏密码");
+      button.title = visible ? "显示密码" : "隐藏密码";
+      button.querySelector("use").setAttribute("href", visible ? "#i-eye" : "#i-eye-off");
+    }
+
+    function openModal(id) {
+      $(id).hidden = false;
+      document.body.classList.add("modal-open");
+      window.setTimeout(() => $(id).querySelector("input, button")?.focus(), 0);
+    }
+
+    function closeModal(id) {
+      $(id).hidden = true;
+      if ($("resetModal").hidden && $("deleteModal").hidden) document.body.classList.remove("modal-open");
+      if (id === "resetModal") {
+        $("resetForm").reset();
+        updatePasswordMeter("resetPassword", "resetPasswordMeter", "resetPasswordLabel");
+        setStatus("resetStatus");
+        pendingUsername = "";
+      }
+      if (id === "deleteModal") {
+        setStatus("deleteStatus");
+        pendingUsername = "";
+      }
+    }
+
+    function openResetModal(username) {
+      pendingUsername = username;
+      $("resetUsername").textContent = username;
+      setStatus("resetStatus");
+      openModal("resetModal");
+    }
+
+    function openDeleteModal(username) {
+      pendingUsername = username;
+      $("deleteUsername").textContent = username;
+      setStatus("deleteStatus");
+      openModal("deleteModal");
+    }
+
+    async function checkAuth() {
+      try {
+        const data = await api("/status");
+        if (!data?.account) {
+          window.location.href = "/";
+          return;
+        }
+        if (data.account.role !== "admin") {
+          showToast("只有管理员可以访问账户管理", "error");
+          window.setTimeout(() => { window.location.href = "/"; }, 1400);
+          return;
+        }
+        currentUser = data.account;
+        $("currentUser").textContent = currentUser.username;
+        $("currentRole").replaceChildren(icon("shield"), text("管理员"));
+        await loadAccounts();
+      } catch (error) {
+        setPageState("认证失败", "error");
+        showToast(`无法验证管理员身份：${error.message}`, "error");
+      }
+    }
+
+    $("newPassword").addEventListener("input", () => updatePasswordMeter("newPassword", "createPasswordMeter", "createPasswordLabel"));
+    $("resetPassword").addEventListener("input", () => updatePasswordMeter("resetPassword", "resetPasswordMeter", "resetPasswordLabel"));
+    $("toggleCreatePassword").addEventListener("click", () => togglePassword("newPassword", "toggleCreatePassword"));
+    $("toggleResetPassword").addEventListener("click", () => togglePassword("resetPassword", "toggleResetPassword"));
+    $("accountSearch").addEventListener("input", renderAccounts);
+    $("refreshButton").addEventListener("click", () => void loadAccounts());
+    $("clearButton").addEventListener("click", () => window.setTimeout(() => {
+      document.querySelector('input[name="newRole"][value="user"]').checked = true;
+      updatePasswordMeter("newPassword", "createPasswordMeter", "createPasswordLabel");
+      setStatus("createStatus");
+    }, 0));
+
+    $("createForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const username = $("newUsername").value.trim().toLowerCase();
+      const password = $("newPassword").value;
+      const role = document.querySelector('input[name="newRole"]:checked')?.value || "user";
+      if (!/^[a-z0-9][a-z0-9._-]{0,59}$/.test(username)) {
+        setStatus("createStatus", "用户名格式不正确。", "error");
+        $("newUsername").focus();
+        return;
+      }
+      if (password.length < 8) {
+        setStatus("createStatus", "密码至少需要 8 个字符。", "error");
+        $("newPassword").focus();
+        return;
+      }
+      const button = $("createButton");
+      setButtonBusy(button, true, "plus");
+      setStatus("createStatus", "正在创建账户…");
+      try {
+        await api("/accounts", { method: "POST", body: JSON.stringify({ username, password, role }) });
+        event.target.reset();
+        updatePasswordMeter("newPassword", "createPasswordMeter", "createPasswordLabel");
+        document.querySelector('input[name="newRole"][value="user"]').checked = true;
+        setStatus("createStatus", `账户 ${username} 已创建。`, "success");
+        showToast(`账户“${username}”创建成功`, "success");
+        await loadAccounts();
+        $("newUsername").focus();
+      } catch (error) {
+        setStatus("createStatus", `创建失败：${error.message}`, "error");
+        showToast(`创建失败：${error.message}`, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+
+    $("resetForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const username = pendingUsername;
+      const password = $("resetPassword").value;
+      if (!username) return;
+      if (password.length < 8) {
+        setStatus("resetStatus", "密码至少需要 8 个字符。", "error");
+        $("resetPassword").focus();
+        return;
+      }
+      const button = $("resetButton");
+      setButtonBusy(button, true, "key");
+      setStatus("resetStatus", "正在重置密码…");
+      try {
+        await api(`/accounts/${encodeURIComponent(username)}/reset-password`, { method: "POST", body: JSON.stringify({ password }) });
+        closeModal("resetModal");
+        if (username === currentUser.username) {
+          showToast("当前账户密码已重置，请使用新密码重新登录", "success");
+          window.setTimeout(() => { window.location.href = "/"; }, 700);
+          return;
+        }
+        showToast(`账户“${username}”的密码已重置，已有会话已撤销`, "success");
+        await loadAccounts();
+      } catch (error) {
+        setStatus("resetStatus", `重置失败：${error.message}`, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+
+    $("deleteButton").addEventListener("click", async () => {
+      const username = pendingUsername;
+      if (!username) return;
+      const button = $("deleteButton");
+      setButtonBusy(button, true, "trash");
+      setStatus("deleteStatus", "正在删除账户…");
+      try {
+        await api(`/accounts/${encodeURIComponent(username)}`, { method: "DELETE" });
+        closeModal("deleteModal");
+        showToast(`账户“${username}”已删除`, "success");
+        await loadAccounts();
+      } catch (error) {
+        setStatus("deleteStatus", `删除失败：${error.message}`, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+
+    document.querySelectorAll("[data-close-modal]").forEach((button) => {
+      button.addEventListener("click", () => closeModal(button.dataset.closeModal));
+    });
+    document.querySelectorAll(".modal").forEach((modal) => {
+      modal.addEventListener("click", (event) => { if (event.target === modal) closeModal(modal.id); });
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (!$("resetModal").hidden) closeModal("resetModal");
+      else if (!$("deleteModal").hidden) closeModal("deleteModal");
+    });
+
+    $("logoutButton").addEventListener("click", async () => {
+      const button = $("logoutButton");
+      setButtonBusy(button, true, "refresh");
+      try {
+        await api("/logout", { method: "POST", headers: currentUser ? { "x-data-agent-account": currentUser.username } : {} });
+      } catch (error) {
+        showToast(`退出失败：${error.message}`, "error");
+        setButtonBusy(button, false);
+        return;
+      }
+      window.location.href = "/";
+    });
+
+    checkAuth();
+  </script>
+</body>
+</html>

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { redact, type AppConfig, type ModelConfig } from "../config.js";
-import type { ConnectionConfig, SessionCapabilities } from "../db/types.js";
+import { ConnectionConfig, type SessionCapabilities } from "../db/types.js";
 import { AppError } from "../errors.js";
 import { DbSession } from "../db/session.js";
 import { assertTargetAllowed } from "../db/engines/index.js";
@@ -21,7 +21,7 @@ import type { Artifact } from "../artifacts/types.js";
 import { auditExport } from "../audit.js";
 import { EventBroker, type TaskEvent } from "./events.js";
 import { createModelHandle, type ModelHandle } from "./model.js";
-import { buildChannelCatalog, type ChannelCatalog } from "./channels.js";
+import { buildChannelCatalog, type ChannelCatalog, type ChannelSelectionRequest } from "./channels.js";
 import { readPiConfig } from "./pi-config.js";
 import { ProviderStore, ProviderConfig, ProviderWrite, ProviderId } from "./provider-store.js";
 import { ManagedModel } from "./provider-store.js";
@@ -29,7 +29,10 @@ import { discoverModels } from "./model-discovery.js";
 import { AnalysisSession, type TaskRecord } from "./runtime.js";
 import { buildTitleTranscriptFromTasks, generateTitleFromModel, type GeneratedSessionTitle } from "./session-title.js";
 import { HistoryStore, connectionKey } from "./history.js";
+import { BusinessContextStore, businessContextScope } from "../business-context/store.js";
+import type { BusinessContextFile } from "../business-context/types.js";
 import { ProfileStore } from "../db/profiles-store.js";
+import { AccountStore } from "../auth/accounts.js";
 import { DEFAULT_MODEL_API, SELECTABLE_MODEL_APIS, findModelApi } from "./model-apis.js";
 import { ModelKeyStore, type KeyStoreState } from "./model-key-store.js";
 import {
@@ -143,6 +146,7 @@ export class AnalysisService {
   private readonly broker: EventBroker;
   readonly history: HistoryStore;
   readonly profiles: ProfileStore;
+  readonly businessContext: BusinessContextStore;
   private readonly modelSettings: ModelSettingsStore;
   /** Snapshot of the environment model configuration; console overrides are layered on top. */
   private readonly envModel: ModelConfig;
@@ -169,6 +173,7 @@ export class AnalysisService {
     modelSettings: ModelSettingsStore,
     modelKeys: ModelKeyStore,
     envModel: ModelConfig,
+    readonly accounts?: AccountStore,
   ) {
     this.model = model;
     this.modelSettings = modelSettings;
@@ -179,6 +184,7 @@ export class AnalysisService {
     this.history = new HistoryStore(join(app.dataDir, "history"));
     this.broker = new EventBroker(5_000, this.history);
     this.profiles = new ProfileStore(join(app.dataDir, "connections.json"), app.profileSecretKey);
+    this.businessContext = new BusinessContextStore(join(app.dataDir, "business-context"));
   }
 
   static async create(app: AppConfig): Promise<AnalysisService> {
@@ -198,15 +204,22 @@ export class AnalysisService {
     const model = await createModelHandle(app, savedKey, { providers: owned, ...secret });
     const results = new ResultStore(`${app.dataDir}/results`);
     const artifacts = new ArtifactService(new ArtifactStore(join(app.dataDir, "artifacts")), results, app.budgets, analysisOptions(app).maxSeries);
-    const service = new AnalysisService(
-      app,
-      model,
-      results,
-      artifacts,
-      modelSettings,
-      modelKeys,
-      envModel,
-    );
+    let accounts: AccountStore | undefined;
+    let service: AnalysisService;
+    try {
+      if (app.requireAuth) {
+        if (!app.profileSecretKey?.trim()) throw new Error("Account mode requires a stable DATA_AGENT_PROFILE_SECRET_KEY");
+        accounts = new AccountStore(join(app.dataDir, "accounts.db"));
+        if (!accounts.hasAdmin()) {
+          if (!app.adminPassword) throw new Error("Set DATA_AGENT_ADMIN_PASSWORD to initialize the admin account");
+          await accounts.setPassword("admin", app.adminPassword, "bootstrap");
+        }
+      }
+      service = new AnalysisService(app, model, results, artifacts, modelSettings, modelKeys, envModel, accounts);
+    } catch (error) {
+      accounts?.close();
+      throw error;
+    }
     service.sweeper = setInterval(() => void service.sweepExpired().catch(error => console.warn("Session maintenance failed", (error as Error).message)), 30_000);
     service.sweeper.unref?.();
     return service;
@@ -752,14 +765,82 @@ export class AnalysisService {
 
   // ---------------------------------------------------------------- sessions
 
-  async createSession(config: ConnectionConfig, ownerKey: string, sessionId?: string): Promise<AnalysisSession> {
+  connectionForResume(sessionId: string, ownerKey: string): { connection: ConnectionConfig; profileId: string } {
+    const previous = this.history.getSession(sessionId, ownerKey);
+    const profileId = previous.connectionProfileId;
+    const connection = profileId && this.profiles.connectionById(ownerKey, profileId);
+    if (!profileId || !connection || !this.matchesHistory(previous, connection, ownerKey)) {
+      throw new AppError("RECONNECT_PROFILE_REQUIRED", "No matching saved connection with credentials. Select or fill the original connection and retry.");
+    }
+    return { connection, profileId };
+  }
+
+  bindProfile(sessionId: string, ownerKey: string, config: ConnectionConfig, profileId: string): void {
+    const previous = this.history.getSession(sessionId, ownerKey);
+    if (this.matchesHistory(previous, config, ownerKey)) {
+      this.history.saveSession(ownerKey, previous.snapshot, undefined, undefined, profileId);
+    }
+  }
+
+  private matchesHistory(previous: ReturnType<HistoryStore["getSession"]>, config: ConnectionConfig, ownerKey: string): boolean {
+    return previous.connectionKey === connectionKey(config) &&
+      (!previous.businessContext || previous.businessContext.scope === businessContextScope(ownerKey, config));
+  }
+
+  /** Builds a private runtime without changing the global default or shared models.json. */
+  private async sessionModel(selection?: ChannelSelectionRequest): Promise<{ handle: ModelHandle; thinkingLevel: ThinkingLevel }> {
+    const provider = selection?.provider ?? this.app.model.provider;
+    const modelId = selection?.modelId ?? this.app.model.modelId;
+    const owned = this.providers.get(provider);
+    if (owned && !owned.models.some((m) => m.id === modelId)) throw new AppError("INVALID_INPUT", "目标模型不在该渠道中。");
+    if (selection && !owned && !this.model.runtime.getModel(provider, modelId) &&
+      !(provider === this.envModel.provider && modelId === this.envModel.modelId)) {
+      throw new AppError("INVALID_INPUT", "目标渠道或模型不存在，请刷新模型列表。");
+    }
+    const baseline = provider === this.app.model.provider && modelId === this.app.model.modelId ? this.app.model
+      : provider === this.envModel.provider && modelId === this.envModel.modelId ? this.envModel
+      : { provider, modelId, thinkingLevel: this.app.model.thinkingLevel, authPath: this.envModel.authPath };
+    const model: ModelConfig = { ...baseline, thinkingLevel: selection?.thinkingLevel ?? baseline.thinkingLevel };
+    const key = this.modelKeys.get(provider);
+    if (provider !== this.envModel.provider) model.apiKey = undefined;
+    const dir = await mkdtemp(join(tmpdir(), "data-agent-session-model-"));
+    try {
+      const handle = await createModelHandle({ ...this.app, model }, key,
+        { providers: this.providers.all(), ...AnalysisService.providerSecret(this.providerKeys, provider) }, dir);
+      // Pin the composed provider in memory before deleting the temporary catalogue.
+      // Runtime registration refreshes later; it must not lose the original session endpoint.
+      const source = handle.runtime.getProvider(provider);
+      if (source) {
+        handle.runtime.registerNativeProvider(source);
+        await handle.runtime.refresh({ allowNetwork: false });
+      }
+      return { handle, thinkingLevel: model.thinkingLevel };
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+
+  async setSessionModel(sessionId: string, ownerKey: string, selection: ChannelSelectionRequest) {
+    const session = this.getSession(sessionId, ownerKey);
+    await session.changeModel(async () => (await this.sessionModel(selection)).handle, selection.thinkingLevel);
+    return session.snapshot();
+  }
+
+  async createSession(config: ConnectionConfig, ownerKey: string, sessionId?: string, profileId?: string): Promise<AnalysisSession> {
     if (this.closed) throw new AppError("INTERNAL_ERROR", "Service is shutting down");
+    const scope = businessContextScope(ownerKey, config);
+    let files: BusinessContextFile[] | undefined;
     let savedTitle: string | undefined;
+    let selection: ChannelSelectionRequest | undefined;
     if (sessionId) {
       const previous = this.history.getSession(sessionId, ownerKey);
       savedTitle = typeof previous.snapshot.title === "string" ? previous.snapshot.title : undefined;
-      if (previous.connectionKey !== connectionKey(config)) {
-        throw new AppError("INVALID_INPUT", "Reconnect must use the same database, account, environment and workspace as the original session");
+      if (!this.matchesHistory(previous, config, ownerKey)) {
+        throw new AppError("INVALID_INPUT", "Reconnect must use the original database connection and account");
+      }
+      files = previous.businessContext?.files;
+      selection = previous.snapshot.agent?.selection ?? undefined;
+      // Older snapshots may record provider/model but no explicit selection.
+      if (!selection && previous.snapshot.agent?.provider && previous.snapshot.agent?.model) {
+        selection = { provider: previous.snapshot.agent.provider, modelId: previous.snapshot.agent.model };
       }
       const active = this.sessions.get(sessionId);
       if (active?.isBusy) throw new AppError("INVALID_INPUT", "Cancel the running task before reconnecting");
@@ -772,23 +853,27 @@ export class AnalysisService {
         `Service already holds ${this.sessions.size} sessions (limit ${this.app.maxSessions}); close one or retry later`,
       );
     }
-    if (this.providers.get(this.app.model.provider) && !this.model.hasAuth) {
-      throw new AppError("MODEL_NOT_CONFIGURED", "Configure the default project channel's credentials before creating a session");
+    const selected = await this.sessionModel(selection);
+    if ((selection || this.providers.get(this.app.model.provider)) && !selected.handle.hasAuth) {
+      throw new AppError("MODEL_NOT_CONFIGURED", "请先配置该会话模型的凭证；不会自动退回其他模型。");
     }
+    files ??= this.businessContext.select(scope, config.businessContextIds ?? this.businessContext.getDefaults(scope));
     const session = await AnalysisSession.create({
       config,
-      app: this.app,
+      app: { ...this.app, model: { ...this.app.model, thinkingLevel: selected.thinkingLevel } },
       results: this.results,
-      model: this.model,
+      model: selected.handle,
       broker: this.broker,
       ownerKey,
       history: this.history,
       artifacts: this.artifacts,
       sessionId,
       title: savedTitle,
+      modelSelection: selection,
+      businessContext: { scope, files },
     });
+    this.history.saveSession(ownerKey, session.snapshot(), connectionKey(config), { scope, files }, profileId);
     this.sessions.set(session.id, session);
-    this.history.saveSession(ownerKey, session.snapshot(), connectionKey(config));
     return session;
   }
 
@@ -801,12 +886,29 @@ export class AnalysisService {
     return session;
   }
 
-  listSessions(ownerKey: string) {
-    const snapshots = new Map(this.history.listSessions(ownerKey).map((snapshot) => [snapshot.session_id, snapshot]));
-    for (const session of this.sessions.values()) {
-      if (session.ownerKey === ownerKey) snapshots.set(session.id, session.snapshot());
+  private sessionProfileCandidates(ownerKey: string) {
+    try {
+      return this.profiles.list(ownerKey).flatMap((profile) => {
+        const parsed = ConnectionConfig.safeParse(this.profiles.reveal(ownerKey, profile.name));
+        if (!parsed.success) return [];
+        return [{ id: profile.id, key: connectionKey(parsed.data), scope: businessContextScope(ownerKey, parsed.data), usesSsh: Boolean(parsed.data.ssh) }];
+      });
+    } catch {
+      // Old transcripts remain readable when saved connection credentials are unavailable.
+      return [];
     }
-    return [...snapshots.values()];
+  }
+
+  listSessions(ownerKey: string) {
+    const history = this.history.listSessions(ownerKey);
+    const candidates = history.some((record) => !record.connectionProfileId) ? this.sessionProfileCandidates(ownerKey) : [];
+    return history.map((record) => {
+      const live = this.sessions.get(record.snapshot.session_id);
+      const snapshot = live?.ownerKey === ownerKey ? live.snapshot() : record.snapshot;
+      const matches = record.connectionProfileId ? [] : candidates.filter((candidate) =>
+        candidate.key === record.connectionKey && (record.scope ? candidate.scope === record.scope : !candidate.usesSsh));
+      return { ...snapshot, connection_profile_id: record.connectionProfileId ?? (matches.length === 1 ? matches[0]!.id : undefined) };
+    });
   }
 
   sessionSnapshot(sessionId: string, ownerKey: string) {
@@ -831,6 +933,14 @@ export class AnalysisService {
     const result = await generateTitleFromModel(this.model, transcript);
     this.history.setSessionTitle(sessionId, ownerKey, result.title);
     return result;
+  }
+
+  renameSession(sessionId: string, ownerKey: string, title: string): void {
+    const live = this.sessions.get(sessionId);
+    if (live) {
+      if (live.ownerKey !== ownerKey) throw new AppError("NOT_FOUND", `Session ${sessionId} not found`);
+      live.setTitle(title);
+    } else this.history.setSessionTitle(sessionId, ownerKey, title);
   }
 
   async listResults(sessionId: string, ownerKey: string) {
@@ -916,6 +1026,18 @@ export class AnalysisService {
     const session = this.getSession(sessionId, ownerKey);
     this.sessions.delete(sessionId);
     await session.close();
+    // No live session can resolve these tasks any more, so their in-memory event logs are dead
+    // weight. The ndjson log stays on disk and is still served by history reads.
+    this.dropSessionEvents(sessionId, ownerKey);
+  }
+
+  /** Release bounded-but-per-task memory once the tasks cannot be watched again. */
+  private dropSessionEvents(sessionId: string, ownerKey: string): void {
+    try {
+      for (const task of this.history.listTasks(sessionId, ownerKey)) this.broker.drop(task.id);
+    } catch {
+      // Purge already removed the history record; nothing left to resolve.
+    }
   }
 
   /**
@@ -1027,6 +1149,7 @@ export class AnalysisService {
       if (!expired || session.isBusy) continue;
       this.sessions.delete(id);
       await session.close().catch(() => undefined);
+      this.dropSessionEvents(id, session.ownerKey);
     }
     const days = analysisOptions(this.app).retentionDays;
     if (days > 0) {
@@ -1039,7 +1162,9 @@ export class AnalysisService {
   }
 
   async shutdown(): Promise<void> {
+    if (this.closed) return;
     this.closed = true;
+    this.accounts?.close();
     if (this.sweeper) clearInterval(this.sweeper);
     const sessions = [...this.sessions.values()];
     this.sessions.clear();

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { BusinessContextIds } from "../business-context/types.js";
 
 export const EngineKind = z.enum(["postgres", "mysql", "doris", "starrocks"]);
 export type EngineKind = z.infer<typeof EngineKind>;
@@ -59,6 +60,8 @@ export const ConnectionConfig = z.object({
   workspace: WorkspaceConfig.optional(),
   label: z.string().max(120).optional(),
   timezone: z.string().max(80).refine(v => { try { new Intl.DateTimeFormat("en", { timeZone: v }); return true; } catch { return false; } }, "Invalid IANA timezone").optional(),
+  /** Explicit initial selection for a new session; omitted uses the connection defaults. */
+  businessContextIds: BusinessContextIds.optional(),
 });
 
 export type ConnectionConfig = z.infer<typeof ConnectionConfig>;
@@ -114,6 +117,8 @@ export interface ObjectRef {
   rowEstimate?: number | null;
   comment?: string | null;
   matchedColumns?: Array<{ name: string; type: string; comment?: string | null }>;
+  match?: "name" | "schema" | "comment" | "column";
+  columnMatch?: { name: string; count: number };
 }
 
 export interface ObjectDescription {

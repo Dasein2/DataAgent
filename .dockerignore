@@ -1,0 +1,19 @@
+# Keep credentials out of the build context: `data/` holds accounts.db, connections.json and the
+# model key stores, and `.env*` holds the deployment secrets. None of them is needed to build.
+.git
+.gitignore
+node_modules
+dist
+data
+data-*
+.tmp
+.secrets
+tests
+*.log
+.env
+.env.*
+!.env.example
+docker-compose*.yml
+Dockerfile
+docs
+README.md

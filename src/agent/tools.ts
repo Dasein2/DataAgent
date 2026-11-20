@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { BudgetConfig } from "../config.js";
+import type { SessionCapabilities } from "../db/types.js";
 import type { ArtifactService } from "../artifacts/service.js";
 import type { ChartSpec } from "../artifacts/types.js";
 import { AppError, isAppError } from "../errors.js";
@@ -88,8 +89,8 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     label: "Execute read-only SQL",
     description:
       "Execute one read-only SQL statement and return a preview plus a result handle. " +
-      "SQL is validated before execution: only SELECT/WITH/SHOW/DESCRIBE are accepted; use query_explain for EXPLAIN (ANALYZE is explicit), source writes are rejected. " +
-      "The full result is stored and can be paged with result_read.",
+      "SQL is validated before execution: only SELECT/WITH/SHOW/DESCRIBE are accepted, and source writes are rejected. " +
+      "Use result_read to inspect the rows saved within the storage cap.",
     promptSnippet: "Run one read-only SQL statement and get a result_id for paging",
     promptGuidelines: [
       "Send exactly one statement per call; multiple statements are rejected.",
@@ -149,13 +150,15 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     name: "result_read",
     label: "Read stored result rows",
     description:
-      "Page through the full rows of a previous query_execute result. Returns rows plus next_offset (null at the end).",
-    promptSnippet: "Page through a stored query result by result_id",
-    promptGuidelines: ["Prefer result_summary or result_transform for large results; never read all pages to compute statistics in model context."],
+      "Inspect stored result rows without querying the source. Use mode=rows to page/project exact rows, " +
+      "or mode=summary for bounded statistics (null counts, capped distinct counts, candidate frequencies and approximate numeric ranges). " +
+      "These statistics describe saved rows only, not the source table.",
+    promptSnippet: "Inspect exact rows or summary statistics for a stored result_id",
+    promptGuidelines: ["Use mode=summary for statistics or result_transform for custom aggregations; do not page through all rows to compute in context."],
     parameters: Type.Object({
-      result_id: Type.String({ description: "result_id returned by query_execute or query_explain" }),
+      result_id: Type.String({ description: "Handle of a saved result, such as the result_id returned by query_execute or result_transform" }),
       columns: Type.Optional(Type.Array(Type.String(), { maxItems: 50 })),
-      mode: Type.Optional(Type.Union([Type.Literal("rows"), Type.Literal("summary")])),
+      mode: Type.Optional(Type.Union([Type.Literal("rows"), Type.Literal("summary")], { description: "rows (default) pages/projects rows. summary describes all stored rows, ignoring paging and projection parameters." })),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "Row offset, default 0" })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000, description: "Rows to return, default 50" })),
     }),
@@ -170,7 +173,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
           page.columns = indexes.map(i => page.columns[i]!); page.rows = page.rows.map(row => indexes.map(i => row[i]));
         }
         const text = [
-          `result_id=${page.id} rows=${page.rows.length} offset=${page.offset} total_rows=${page.rowCount} next_offset=${page.nextOffset ?? "null"}`,
+          `result_id=${page.id} rows=${page.rows.length} offset=${page.offset} stored_rows=${page.rowCount} truncated=${page.truncated} next_offset=${page.nextOffset ?? "null"}`,
           "",
           renderTable(page.columns, page.rows, cellChars),
         ].join("\n");
@@ -179,6 +182,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
           offset: page.offset,
           next_offset: page.nextOffset,
           row_count: page.rowCount,
+          truncated: page.truncated,
           columns: page.columns,
         });
       } catch (error) {
@@ -233,7 +237,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     name: "catalog_search",
     label: "Search catalog",
     description:
-      "Search tables/views by name, schema or comments, optionally matching column names/comments. Returns candidate objects, not content matches. Use object_describe_batch to inspect columns.",
+      "Search tables/views by name, schema or comments, optionally matching column names/comments. Returns candidate objects, not content matches. Use object_describe to inspect columns.",
     promptSnippet: "Find tables/views by name or schema",
     promptGuidelines: [
       "Start with broad search terms (e.g. 'order', 'customer'); refine with schema when names collide.",
@@ -276,42 +280,41 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
 
   const objectDescribe = defineTool({
     name: "object_describe",
-    label: "Describe table or view",
+    label: "Describe tables or views",
     description:
-      "Describe one relation: columns with types/nullability/defaults, primary key, indexes, foreign keys, and kind. Use before writing SQL.",
-    promptSnippet: "Describe columns, keys and indexes of a table or view",
-    promptGuidelines: ["Pass the schema/database when the object is not in the default scope."],
+      "Describe 1–20 named relations before writing SQL: column types, nullability, defaults, keys and indexes. Each relation may return its own error.",
+    promptSnippet: "Inspect columns, keys and indexes of known tables or views",
+    promptGuidelines: ["Use a one-item objects array for a single table. Qualify the schema/database if needed."],
     parameters: Type.Object({
-      name: Type.String({ description: "Relation name" }),
-      schema: Type.Optional(Type.String({ description: "Schema (PostgreSQL) or database (MySQL)" })),
-    }),
-    executionMode: "sequential",
+      objects: Type.Array(Type.Object({
+        name: Type.String({ description: "Relation name" }),
+        schema: Type.Optional(Type.String({ description: "Schema (PostgreSQL) or database (MySQL)" })),
+      }, { additionalProperties: false }), { minItems: 1, maxItems: 20, description: "Named relations with optional schema; use one array item for a single relation" }),
+    }, { additionalProperties: false }),
+    executionMode: "parallel",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     execute: async (_id, params) => {
-      try {
-        const described = await db.describe(params.schema ?? null, params.name);
+      const objects = await db.describeMany(params.objects);
+      const sections = objects.map((item) => {
+        if ("error" in item) {
+          return `${item.schema ? `${item.schema}.` : ""}${item.name}: ${item.error}`;
+        }
+        const described = item.description;
+        const { object, columns, primaryKey, partitionKey, indexes, foreignKeys } = described;
         const lines = [
-          `${described.object.schema}.${described.object.name} (${described.object.kind})${described.object.rowEstimate !== null ? ` ~${described.object.rowEstimate} rows` : ""}${described.object.comment ? ` — ${described.object.comment}` : ""}`,
-          `primary_key: ${described.primaryKey.length ? described.primaryKey.join(", ") : "(none)"}`,
-          `partition_key: ${described.partitionKey ?? "unknown/not partitioned"}`,
-          ...(described.object.rowEstimate && described.object.rowEstimate > 1_000_000 ? ["LARGE TABLE: use selective date/partition filters; LIMIT does not bound aggregate scan cost."] : []),
-          "",
+          `${object.schema}.${object.name} (${object.kind})${object.rowEstimate != null ? ` ~${object.rowEstimate} rows` : ""}${object.comment ? ` — ${object.comment}` : ""}`,
+          `primary_key: ${primaryKey.join(", ") || "(none)"}`,
+          `partition_key: ${partitionKey ?? "unknown/not partitioned"}`,
+          ...(object.rowEstimate != null && object.rowEstimate > 1_000_000 ? ["LARGE TABLE: use selective date/partition filters; LIMIT does not bound aggregate scan cost."] : []),
           "columns:",
-          ...described.columns.map(
-            (column) =>
-              `- ${column.name} ${column.type}${column.nullable ? "" : " NOT NULL"}${column.default !== null && column.default !== undefined ? ` DEFAULT ${column.default}` : ""}${column.comment ? ` — ${column.comment}` : ""}`,
-          ),
+          ...columns.map((column) =>
+            `- ${column.name} ${column.type}${column.nullable ? "" : " NOT NULL"}${column.default != null ? ` DEFAULT ${column.default}` : ""}${column.comment ? ` — ${column.comment}` : ""}`),
+          ...indexes.map((index) => `index: ${index.name}${index.unique ? " UNIQUE" : ""} (${index.columns.join(", ")})`),
+          ...foreignKeys.map((fk) => `foreign_key: ${fk.name} (${fk.columns.join(", ")}) -> ${fk.references}${fk.referencedColumns?.length ? ` (${fk.referencedColumns.join(", ")})` : ""}`),
         ];
-        if (described.indexes.length) {
-          lines.push("", "indexes:", ...described.indexes.map((index) => `- ${index.name}${index.unique ? " UNIQUE" : ""} (${index.columns.join(", ")})`));
-        }
-        if (described.foreignKeys.length) {
-          lines.push("", "foreign_keys:", ...described.foreignKeys.map((fk) => `- ${fk.name} (${fk.columns.join(", ")}) -> ${fk.references}`));
-        }
-        return textOutput(clampText(lines.join("\n")), { object: described.object, columns: described.columns, primary_key: described.primaryKey });
-      } catch (error) {
-        return errorOutput(error);
-      }
+        return lines.join("\n");
+      });
+      return textOutput(clampText(sections.join("\n\n")), { objects });
     },
   });
 
@@ -500,8 +503,8 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     name: "job_cancel",
     label: "Cancel running query",
     description:
-      "Cancel the query currently executing on this session's database connection, using a separate control connection. The session stays usable afterwards.",
-    promptSnippet: "Cancel the query that is currently running",
+      "Cancel this session's currently running SQL only when requested by the user. This does not stop the analysis task.",
+    promptSnippet: "Cancel the currently running SQL when requested",
     parameters: Type.Object({
       job_id: Type.Optional(Type.String({ description: "Task id; defaults to the current task" })),
     }),
@@ -675,8 +678,8 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     datasetList,
     datasetDrop,
   ];
-  const parallel = new Set(["session_info", "catalog_search", "object_describe", "result_read", "job_get", "job_cancel"]);
-  return tools.filter(tool => tool.name !== "query_explain" || db.capabilitiesView?.features?.explain !== false).map(tool => {
+  const parallel = new Set(["session_info", "catalog_search", "result_read", "job_get", "job_cancel"]);
+  return tools.map(tool => {
     const execute = tool.execute;
     return { ...tool, executionMode: parallel.has(tool.name) ? "parallel" : tool.executionMode,
       execute: async (...args: Parameters<typeof execute>) => {
@@ -689,6 +692,18 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
         return { ...result, content, details: { ...(result.details as object ?? {}), budget } };
       },
     } as ToolDefinition;
+  });
+}
+
+/** Filter by session capabilities at creation. Visibility is not authorization; execution checks still apply. */
+export function selectTools<T extends { name: string }>(
+  tools: readonly T[],
+  caps: Pick<SessionCapabilities, "features" | "workspaceName" | "workspaceAccess">,
+): T[] {
+  return tools.filter(({ name }) => {
+    if (name === "query_explain") return caps.features.explain;
+    if (name.startsWith("dataset_")) return Boolean(caps.workspaceName) && caps.workspaceAccess !== "none";
+    return true;
   });
 }
 
@@ -714,8 +729,7 @@ export interface ToolInfo {
 
 /**
  * Every factory closes over its runtime and only touches it inside `execute()`, so an inert stub is
- * enough to describe the catalogue without an analysis session. `tests/tools.test.ts` asserts this
- * list stays in step with `createDatabaseTools()` and that no tool is executed with the stub.
+ * enough to describe the complete catalogue without an analysis session.
  */
 const METADATA_ONLY_RUNTIME = {
   db: {},
@@ -736,9 +750,9 @@ function describeParameters(schema: unknown): ToolParameterInfo[] {
   });
 }
 
-/** Public description of the tools the agent is given, for the console and `/v1/tools`. */
-export function toolCatalog(): ToolInfo[] {
-  return createDatabaseTools(METADATA_ONLY_RUNTIME).map((tool) => ({
+/** Describe a selected session toolset, or the full service catalogue when no tools are supplied. */
+export function toolCatalog(tools: readonly ToolDefinition[] = createDatabaseTools(METADATA_ONLY_RUNTIME)): ToolInfo[] {
+  return tools.map((tool) => ({
     name: tool.name,
     label: tool.label,
     description: tool.description,

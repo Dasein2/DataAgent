@@ -11,6 +11,12 @@ import type {
 } from "../types.js";
 import { SshTunnel } from "../ssh-tunnel.js";
 import {
+  attachColumnMatches,
+  CATALOG_TABLE_KINDS,
+  tableCountsByScope,
+  catalogLimit,
+  catalogMatch,
+  CATALOG_MATCHES,
   cellText,
   quoteAnsi,
   sampleSql,
@@ -321,57 +327,95 @@ export class PostgresEngine implements Engine {
     };
   }
 
+  // pg_catalog exposes metadata even without SELECT. Use the same read-access rule
+  // for directory entries and direct object details.
+  private readableObject() {
+    return `has_schema_privilege(n.oid, 'USAGE') AND CASE
+      WHEN c.relkind = 'S' THEN has_sequence_privilege(c.oid, 'SELECT')
+      ELSE has_table_privilege(c.oid, 'SELECT') END`;
+  }
+
   async listScopes(): Promise<string[]> {
     const { rows } = await this.buffered(
       `SELECT nspname FROM pg_namespace
-       WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' ORDER BY 1`,
+       WHERE left(nspname, 3) <> 'pg_' AND nspname <> 'information_schema'
+         AND has_schema_privilege(oid, 'USAGE') ORDER BY 1`,
       15_000,
     );
     return rows.map((row) => String(row[0]));
   }
 
-  async listObjects(filter: ObjectFilter): Promise<ObjectRef[]> {
+  private catalogObjectKind() {
+    return `CASE c.relkind
+      WHEN 'r' THEN 'table' WHEN 'p' THEN 'table' WHEN 'v' THEN 'view'
+      WHEN 'm' THEN 'materialized_view' WHEN 'f' THEN 'foreign_table' WHEN 'S' THEN 'sequence' END`;
+  }
+
+  private catalogVisibility(scopes?: string[]) {
+    return `c.relkind IN ('r','p','v','m','f','S') AND ${this.readableObject()}
+      AND n.nspname NOT IN ('pg_catalog','information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+      ${scopes ? `AND n.nspname IN (${scopes.map((scope) => this.literal(scope)).join(",")})` : ""}`;
+  }
+
+  async catalogTableCounts(scopes: string[]) {
+    if (!scopes.length) return {};
+    const kinds = CATALOG_TABLE_KINDS.map((kind) => this.literal(kind)).join(",");
     const { rows } = await this.buffered(
-      `SELECT n.nspname AS schema,
-              c.relname AS name,
-              CASE c.relkind
-                WHEN 'r' THEN 'table' WHEN 'p' THEN 'table'
-                WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view'
-                WHEN 'f' THEN 'foreign_table' WHEN 'S' THEN 'sequence'
-                ELSE c.relkind::text END AS kind,
-              CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END AS row_estimate,
-              obj_description(c.oid, 'pg_class') AS comment
-       FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE c.relkind IN ('r','p','v','m','f','S')
-         AND n.nspname NOT IN ('pg_catalog','information_schema')
-         AND n.nspname NOT LIKE 'pg_toast%'
-         AND n.nspname NOT LIKE 'pg_temp%'
-         AND (${this.literal(filter.search ?? null)}::text IS NULL
-              OR c.relname ILIKE '%' || ${this.literal(filter.search ?? null)} || '%'
-              OR n.nspname ILIKE '%' || ${this.literal(filter.search ?? null)} || '%'
-              OR obj_description(c.oid, 'pg_class') ILIKE '%' || ${this.literal(filter.search ?? null)} || '%'
-              ${filter.searchColumns ? `OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND (a.attname ILIKE '%' || ${this.literal(filter.search ?? null)} || '%' OR col_description(c.oid,a.attnum) ILIKE '%' || ${this.literal(filter.search ?? null)} || '%'))` : ""})
-         AND (${this.literal(filter.schema ?? null)}::text IS NULL OR n.nspname = ${this.literal(filter.schema ?? null)})
-       ORDER BY 1, 2
-       LIMIT ${Math.max(1, Math.min(2_000, filter.limit))}`,
+      `SELECT n.nspname, COUNT(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE ${this.catalogVisibility(scopes)} AND ${this.catalogObjectKind()} IN (${kinds})
+       GROUP BY n.nspname`,
       20_000,
     );
-    const kinds = filter.kinds ? new Set<string>(filter.kinds) : undefined;
-    return rows
-      .map((row) => ({
-        schema: String(row[0]),
-        name: String(row[1]),
-        kind: String(row[2]),
-        rowEstimate: row[3] === null || row[3] === undefined ? null : Number(row[3]),
-        comment: row[4] === null || row[4] === undefined ? null : String(row[4]),
-      }))
-      .filter((object) => !kinds || kinds.has(object.kind));
+    return tableCountsByScope(scopes, rows);
+  }
+
+  async listObjects(filter: ObjectFilter): Promise<ObjectRef[]> {
+    if (filter.scopes?.length === 0 || filter.kinds?.length === 0) return [];
+    const contains = (field: string) => `strpos(lower(${field}), lower(${this.literal(filter.search ?? null)}::text)) > 0`;
+    const matchesColumn = `(${contains("a.attname")} OR ${contains("col_description(c.oid, a.attnum)")})`;
+    const match = catalogMatch(filter, contains("c.relname"), contains("n.nspname"), contains("obj_description(c.oid, 'pg_class')"),
+      `EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND ${matchesColumn})`);
+    const { rows } = await this.buffered(
+      `SELECT * FROM (
+        SELECT n.nspname AS schema, c.relname AS name, ${this.catalogObjectKind()} AS kind,
+               CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END AS row_estimate,
+               obj_description(c.oid, 'pg_class') AS comment, ${match.rank} AS match_rank
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE ${this.catalogVisibility(filter.scopes)}
+          ${filter.schema === undefined ? "" : `AND n.nspname = ${this.literal(filter.schema)}`}
+          ${match.where}
+      ) catalog
+      ${filter.kinds ? `WHERE kind IN (${filter.kinds.map((value) => this.literal(value)).join(",")})` : ""}
+      ORDER BY match_rank, schema, name ${catalogLimit(filter)}`,
+      20_000,
+    );
+    const objects: ObjectRef[] = rows.map((row) => ({
+      schema: String(row[0]), name: String(row[1]), kind: String(row[2]),
+      rowEstimate: row[3] == null ? null : Number(row[3]),
+      comment: row[4] == null ? null : String(row[4]),
+      match: CATALOG_MATCHES[Number(row[5]) - 1],
+    }));
+    const matched = filter.includeMatchDetails ? objects.filter((object) => object.match === "column") : [];
+    if (matched.length) {
+      const { rows: columns } = await this.buffered(
+        `SELECT n.nspname, c.relname, MIN(a.attname::text), COUNT(*)
+         FROM pg_attribute a JOIN pg_class c ON a.attrelid = c.oid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE a.attnum > 0 AND NOT a.attisdropped AND ${matchesColumn}
+           AND c.relkind IN ('r','p','v','m','f','S') AND ${this.readableObject()}
+           AND (n.nspname, c.relname) IN (${matched.map((o) => `(${this.literal(o.schema)},${this.literal(o.name)})`).join(",")})
+         GROUP BY n.nspname, c.relname`,
+        20_000,
+      );
+      attachColumnMatches(objects, columns);
+    }
+    return objects;
   }
 
   private literal(value: string | null): string {
     if (value === null) return "NULL";
-    return `'${value.replace(/'/g, "''")}'`;
+    return `E'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
   }
 
   async describeObject(schema: string | null, name: string): Promise<ObjectDescription> {
@@ -380,7 +424,8 @@ export class PostgresEngine implements Engine {
       `SELECT c.oid::bigint, c.relkind::text, obj_description(c.oid, 'pg_class'),
               CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END
        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = ${this.literal(scope)} AND c.relname = ${this.literal(name)}`,
+       WHERE n.nspname = ${this.literal(scope)} AND c.relname = ${this.literal(name)}
+         AND c.relkind IN ('r','p','v','m','f','S') AND ${this.readableObject()}`,
       15_000,
     );
     if (objectRows.length === 0) throw new Error(`Object ${scope}.${name} was not found or is not accessible`);
@@ -448,7 +493,7 @@ export class PostgresEngine implements Engine {
         schema: scope,
         name,
         kind:
-          relkind === "v" ? "view" : relkind === "m" ? "materialized_view" : relkind === "f" ? "foreign_table" : "table",
+          relkind === "v" ? "view" : relkind === "m" ? "materialized_view" : relkind === "f" ? "foreign_table" : relkind === "S" ? "sequence" : "table",
         rowEstimate: estimate === null || estimate === undefined ? null : Number(estimate),
         comment: comment ? String(comment) : null,
       },

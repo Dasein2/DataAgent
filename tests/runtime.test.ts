@@ -15,7 +15,7 @@ async function fixture(run: (emit: (event: any) => void, goal: string, agent: an
   };
   const db = { snapshot: () => ({ queries: { used: 0 }, status: "ready" }), listResults: async () => [],
     touch: () => {}, close: async () => {}, cancel: async () => true };
-  session = new (AnalysisSession as any)("sess_test", "owner", db, agent, broker, app, {});
+  session = new (AnalysisSession as any)("sess_test", "owner", db, agent, [], broker, app, {}, {}, "fixture", { files: [], prompt: "" });
   return { session, broker, agent, app, close: async () => { await session.close(); await cleanup(app); } };
 }
 

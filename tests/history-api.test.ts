@@ -185,6 +185,19 @@ it("serves historical results/tasks/events and server profiles over HTTP after r
     const list = await (await request("/v1/connections/profiles")).json();
     assert.equal(list.profiles.length, 2); assert.equal(list.secret_storage_enabled, true);
     assert.equal((await (await request("/v1/connections/profiles", "bob")).json()).profiles.length, 0);
+    service!.profiles.save("bob", "other", connection, false);
+    const renameGroup = (from: string, to: string, owner = "alice") => request("/v1/connections/groups", owner, { method: "PATCH", body: JSON.stringify({ from, to }) });
+    assert.equal((await renameGroup("unknown", "missing")).status, 404);
+    assert.equal((await renameGroup("", "   ")).status, 400);
+    const renamed = await renameGroup("", " 分析环境 ");
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(await renamed.json(), { updated: 2 });
+    const reopenedProfiles = new ProfileStore(join(config.dataDir, "connections.json"), "test-key");
+    assert.deepEqual(reopenedProfiles.list("alice").map(({ id, group }) => [id, group]),
+      list.profiles.map(({ id }: { id: string }) => [id, "分析环境"]));
+    assert.equal(reopenedProfiles.get("bob", "other")?.group, undefined);
+    assert.deepEqual(reopenedProfiles.reveal("alice", "fixture"), connection);
+    assert.equal(reopenedProfiles.get("alice", "no-secret")?.hasSecret, false);
     assert.equal((await request(`/v1/sessions/${task().session_id}/reconnect`, "alice", { method: "POST", body: JSON.stringify({ connection: { ...connection, database: "wrong-db" } }) })).status, 400);
     assert.equal((await request("/v1/connections/profiles/fixture", "alice", { method: "DELETE" })).status, 204);
     // Purge deletes the saved history, results and artifacts; ownership is enforced first.

@@ -18,7 +18,11 @@ const { Server: SshServer, utils } = ssh2;
  * and log in, which is what "the key is already pinned" looks like from the client side.
  */
 async function startBastion(password = "jump-secret") {
-  const { private: hostKey } = utils.generateKeyPairSync("ed25519");
+  let hostKey = utils.generateKeyPairSync("ed25519").private;
+  // ssh2 occasionally generates OpenSSH keys its own parser rejects (observed on Node 24).
+  for (let retry = 0; retry < 4 && utils.parseKey(hostKey) instanceof Error; retry++) {
+    hostKey = utils.generateKeyPairSync("ed25519").private;
+  }
   const live = new Set<any>();
   const server = new SshServer({ hostKeys: [hostKey] }, (client) => {
     live.add(client);

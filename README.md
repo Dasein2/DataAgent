@@ -22,10 +22,15 @@ Source data remains read-only; local analysis does not open another source extra
 See [使用与配置说明](docs/readonly-bi-workbench.md) and [实施/验收记录](docs/readonly-bi-roadmap.md)
 for safety boundaries, API examples, defaults and test limitations.
 
+After connecting, use **业务资料** in the workbench to manage Markdown definitions and **业务上下文**
+next to the chat input to apply documents once per session or save them as connection defaults.
+See [业务资料与会话上下文](docs/readonly-bi-workbench.md#业务资料与会话上下文) for versioning,
+limits and API details.
+
 ## Quick start
 
 ```bash
-cp .env.example .env        # set DATA_AGENT_MODEL_* and (in production) DATA_AGENT_API_TOKEN
+cp .env.example .env        # configure a model and choose an auth mode before deploying
 npm install
 npm run dev                 # http://127.0.0.1:8787  → web console at / (restarts on src and .env changes)
 ```
@@ -57,10 +62,112 @@ DATA_AGENT_MODEL_API_KEY=sk-...   # optional: otherwise pi's channel key is used
 Values set in `.env` always win over the pi defaults; the console override
 (`model-settings.json`) still layers on top of both.
 
+## Account login and private connections
+
+Enable account mode in `.env` (or `.env.prod` for Docker Compose):
+
+```dotenv
+DATA_AGENT_REQUIRE_AUTH=1
+DATA_AGENT_ADMIN_PASSWORD=<unique password, at least 8 characters>
+DATA_AGENT_PROFILE_SECRET_KEY=<random stable key, e.g. generated with openssl rand -hex 32>
+```
+
+1. Start the service once and sign in as **admin**. The bootstrap password only initializes a new
+   account store. Afterward, remove `DATA_AGENT_ADMIN_PASSWORD` from the deployment and keep
+   `DATA_AGENT_REQUIRE_AUTH=1`. Changing the environment password does not reset the account.
+2. Build with `npm run build`, then use `npm run account -- add alice` or
+   `npm run account -- reset alice`. Pass the new password via stdin, not as a command-line argument.
+   For example, in Bash:
+
+   ```bash
+   read -rsp 'Password: ' pw
+   printf '%s\n' "$pw" | npm run account -- add alice
+   unset pw
+   ```
+
+   Append `--env-file .env.prod` if the running service uses that file. With Compose, pipe the password
+   to `docker compose exec -T data-agent npm run account -- add alice` instead, so the CLI uses the
+   same volume. Resetting a password revokes existing logins without deleting the account's data.
+3. In the console, fill in the connection, click **保存连接**, then select the saved profile to
+   connect. The server encrypts the full profile, including the database password, SSH private keys,
+   passphrases and hop passwords. Credentials aren't returned by the API or saved in browser storage.
+   Open a saved session and click **恢复分析** to reconnect using its linked profile, regardless of
+   what is currently in the connection form. If the profile was deleted, the target changed, or it
+   was never linked, select or enter the original connection and use **使用表单恢复**.
+
+Use HTTPS for network access. Cookies are HttpOnly, SameSite=Strict and expire after seven days.
+Production enables Secure cookies by default; keep that enabled behind an HTTPS reverse proxy,
+forward the original `Host` header and restrict direct access to the backend port. Login rate limits
+are applied per peer IP; clients behind a proxy share its limit. Back up the data directory
+(including `accounts.db` and `connections.json`) and keep the encryption key separately and stable.
+Losing the key means re-entering saved connection credentials. Global model settings are admin-only;
+all accounts use the configured model. Give accounts only the database/network access they need.
+
+Account mode ignores bearer tokens and `X-Caller-Id` for authentication and ownership. Existing bearer
+and browser profiles/history are not automatically imported or assigned to an account. Back up legacy
+storage and re-save connections after signing in. With account mode disabled, legacy bearer/open mode
+remains available; production requires account mode or a bearer token.
+
+## Server deployment
+
+**Single instance only.** Accounts live in SQLite, sessions live in memory and all evidence lives in one
+data directory. Do not run two replicas against the same volume and do not put this behind a load
+balancer that distributes requests across instances. Scale the machine up instead.
+
+`docker-compose.yml` binds `127.0.0.1:8787` and ships memory/CPU ceilings and log rotation. A reverse
+proxy must:
+
+- terminate TLS (account mode issues `Secure; __Host-` cookies, which browsers refuse over plain HTTP
+  to anything but localhost), and
+- forward the original `Host` header, because the CSRF check compares `Origin` against it, and
+- forward `X-Forwarded-For` **and** set `DATA_AGENT_TRUST_PROXY` (e.g. `1` for one hop). Without it every
+  request looks like it came from the proxy: the per-IP login limiter would lock out all users at once
+  and audit records would show the proxy address. Never set it while the service is also directly
+  reachable — a client could then forge the header and reset its own rate limit.
+- wait for `GET /readyz` (503 while no model credential resolves) instead of `/healthz`. `/healthz` is a
+  liveness probe and stays 200 even when the model is unconfigured, so the console can still be used to
+  fix that. Proxies must also disable response buffering for `/v1/tasks/*/events` (SSE); the service
+  sends `x-accel-buffering: no` for nginx-compatible proxies.
+
+```caddyfile
+agent.example.com {
+  reverse_proxy 127.0.0.1:8787
+  encode gzip
+}
+```
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:8787;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_buffering off;   # SSE task events
+}
+```
+
+Retention defaults to 30 days when `NODE_ENV=production` (`DATA_AGENT_RETENTION_DAYS=0` disables it).
+Enabling it is not optional in practice: without it, session evidence and event logs grow until the
+volume fills. Audit `ndjson` files are never purged by retention and need their own rotation. Note that
+`node:sqlite` is still flagged experimental in Node 24, so pin the image (e.g. `node:24.14-alpine`)
+rather than tracking `24-alpine` if you cannot re-test on every minor upgrade.
+
+Back up the data volume together with `DATA_AGENT_PROFILE_SECRET_KEY` — separately, since the key
+unlocks the saved connection credentials:
+
+```bash
+DEST=/backup/data-agent/$(date +%F); mkdir -p "$DEST"
+docker run --rm -v data-agent-data:/data:ro -v "$DEST":/backup alpine \
+  tar czf /backup/data.tar.gz -C /data .
+cp .env.prod "$DEST/env.backup"; chmod 600 "$DEST/env.backup"
+```
+
 ## HTTP API
 
-All `/v1/*` routes require `Authorization: Bearer $DATA_AGENT_API_TOKEN` when a token is configured.
-Callers can add `X-Caller-Id` to scope session ownership (defaults to a hash of the token).
+In account mode, `POST /v1/auth/login` accepts `{username, password}` and sets a session cookie;
+`GET /v1/auth/status` reports the current login and `POST /v1/auth/logout` revokes it. Other `/v1` routes
+require the cookie. In legacy mode, those routes use `Authorization: Bearer $DATA_AGENT_API_TOKEN`
+when configured; `X-Caller-Id` scopes legacy ownership (default: a hash of the token).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -71,17 +178,17 @@ Callers can add `X-Caller-Id` to scope session ownership (defaults to a hash of 
 | PUT | `/v1/model` | override model settings (write-only `apiKey`); refused unless `DATA_AGENT_ALLOW_MODEL_EDIT` |
 | DELETE | `/v1/model` | drop all console overrides and rebuild from the environment |
 | POST | `/v1/model/test` | send one 16-token completion through the active handle and report latency/HTTP status |
-| GET | `/v1/tools` | tools the agent is given: labels, descriptions, parameters, read-only flags |
+| GET | `/v1/tools` | complete tool catalogue; `?session_id=…` returns the active tools of an owned live session |
 | POST | `/v1/connections/test` | open a connection, report capabilities, close it |
 | POST | `/v1/connections/host-key` | read an unconfirmed jump host's key (`{connection}` or `{profile, credentials}`); `pin` stores the confirmed one |
-| GET | `/v1/connections/profiles` | caller's saved connections (credentials redacted) and secret-storage availability |
-| PUT | `/v1/connections/profiles/{name}` | save/replace `{connection, rememberSecret}` |
+| GET | `/v1/connections` or `/v1/connections/profiles` | caller's saved connections (credentials redacted) and secret-storage availability |
+| PUT | `/v1/connections/profiles/{name}` | save/replace `{connection, rememberSecret, session_id?}`; in account mode credentials are always encrypted and saved |
 | DELETE | `/v1/connections/profiles/{name}` | delete a saved connection |
 | POST | `/v1/sessions` | create a pinned session (one DB connection + one SSH chain) |
 | GET | `/v1/sessions` | list the caller's live and historical sessions |
 | GET | `/v1/sessions/{id}` | session snapshot (capabilities, budgets, datasets, tasks) |
 | DELETE | `/v1/sessions/{id}` | close session and its tunnel; `?purge=true` also deletes its history, results and artifacts |
-| POST | `/v1/sessions/{id}/reconnect` | reconnect the original database/account and resume the saved conversation |
+| POST | `/v1/sessions/{id}/reconnect` | resume using the linked profile (no body), or provide the original connection explicitly |
 | POST | `/v1/sessions/{id}/title` | name the session from its own conversation (works for live and saved sessions) |
 | GET | `/v1/sessions/{id}/tasks` | saved tasks, including final/partial answers and errors |
 | GET | `/v1/sessions/{id}/results` | result metadata for the session |
@@ -152,19 +259,30 @@ historical session also resumes an active task's progress.
 
 ## Agent tools
 
-24 tool definitions (unsupported `query_explain` is omitted for engines with no plan capability):
+21 tool definitions. The model’s toolset is selected once when creating or reconnecting a session:
 
-- Discover: `session_info`, `catalog_search`, `catalog_overview`, `object_describe`, `object_describe_batch`, `data_profile`.
-- Source read: `query_explain`, `query_execute` (`dry_run`, opt-in `reuse`), `job_get`, `job_cancel`.
-- Saved rows: `result_read` (projection/summary), `result_summary`, `result_transform`.
-- Local snapshots: `snapshot_create`, `snapshot_list`, `snapshot_query`, `snapshot_drop`.
+- Discover: `session_info`, `catalog_search`, `catalog_overview`, `object_describe(objects)` (1–20 relations), `data_profile`.
+- Source read: `query_explain`, `query_execute` (`dry_run`, opt-in `reuse`).
+- Saved rows: `result_read` (`mode: "rows"` for paging/projection, `"summary"` for statistics), `result_transform` (local SQL over `source: {kind: "result" | "snapshot", id}`).
+- Local snapshots: `snapshot_create`, `snapshot_list`, `snapshot_drop`.
+- BI evidence: `chart_create`.
 - Controlled workspace: `dataset_create`, `dataset_list`, `dataset_drop`.
-- BI evidence: `chart_create`, `chart_list`, `chart_archive`, `chart_revise`.
+- Task and chart management: `job_get`, `job_cancel`, `chart_list`, `chart_archive`, `chart_revise`.
 
-Models never write source DDL/DML and never see credentials. `dataset_create(name, select_sql, kind)` is the
-only source-connected write path (local results/snapshots/artifacts are separate); the service generates `CREATE [SQL SECURITY INVOKER] VIEW` or `CREATE TABLE AS` in
-the pre-provisioned workspace. Results are always handle-based: `query_execute` returns a preview and
-a `result_id`; `result_read` pages the full NDJSON on disk.
+Management tools are available in the same conversation as analysis. The model is instructed to
+cancel SQL, rename charts, or archive/restore charts only when the user asks. A session gets 18
+tools on an engine with plan support, plus the 3 workspace tools when it has a writable workspace.
+Engines without plan support omit `query_explain`. Tool visibility is not an access grant: workspace
+checks, source read-only enforcement, ownership, and budgets still apply. The workbench’s task,
+snapshot and artifact APIs are unchanged. The old `DATA_AGENT_TOOL_PROFILE` setting is ignored and
+can be removed.
+
+Models cannot issue source DDL/DML and never see credentials. For `dataset_create(name, select_sql, kind)`
+the service generates `CREATE [SQL SECURITY INVOKER] VIEW` or `CREATE TABLE AS` in the pre-provisioned
+workspace; `dataset_drop` can only remove session-owned workspace objects. Prefer saved rows for local
+follow-ups; query the source only when saved data is insufficient or freshness is needed. Use a workspace
+dataset only when later source SQL must reference it. See [tool routing A/B evaluation](docs/tool-routing-eval.md)
+for the behavior checks against the old 24-tool setup.
 
 ## Charts and artifacts
 
@@ -180,7 +298,8 @@ An artifact is a record, not a cache of the UI state:
 - `spec`: what was asked for (fields, explicit axis order, formats). Versioned by `SPEC_VERSION`.
 - `data`: the long-format snapshot (columns with roles `x`/`y`/`series`/`value`, rows, `row_key`).
 - `compiled`: the ECharts option produced by the server compiler, plus `COMPILER_VERSION` and
-  `ECHARTS_VERSION`, so a chart reopened later renders exactly as it did when it was created.
+  `ECHARTS_VERSION`. The console adapts the visible range to the chart's display size without
+  modifying this saved option.
 - `summary`: shape, cell/point count, missing combinations, colour clipping, top values and the
   `art_…#cell[field=value]` refs a report should quote instead of retyping numbers. Click a reference
   in the console to inspect its exact value, row and source SQL. Numeric strings retain their original
@@ -193,10 +312,14 @@ row/cell caps (`DATA_AGENT_MAX_CHART_ROWS`, `DATA_AGENT_MAX_CHART_CELLS`). Missi
 reported (`missing`) and drawn as gaps, never as zero. Artifacts are deduplicated per session by
 `spec_hash` + `result_id`, and capped per task by `DATA_AGENT_MAX_ARTIFACTS_PER_TASK`.
 
+When categories don't fit, the console adds independent horizontal and/or vertical sliders. Dense
+scatter plots offer both sliders for zooming into a region. Drag the slider window to browse and its
+ends to resize the window. This affects only the view; the data table, CSV and artifact limits are
+unchanged.
+
 Downloads and figure-type switching are console actions on the stored artifact: CSV and
-streamed result export requests are audited to `data/audit/exports.ndjson`, SVG comes from the ECharts
-instance, and PNG is drawn off-screen with the canvas renderer from the currently selected stored
-option. The audit records export requests, not proof that the client finished downloading. SVG/PNG
+streamed result export requests are audited to `data/audit/exports.ndjson`. SVG comes from the ECharts
+instance, and PNG is drawn off-screen with the canvas renderer. Both images show the current view. The audit records export requests, not proof that the client finished downloading. SVG/PNG
 exports run locally in the browser; the console first records an authenticated export-action request
 in the same audit (not proof of successful file delivery).
 
@@ -214,7 +337,8 @@ in the same audit (not proof of successful file delivery).
 | Audit | Every session and query decision appended to `data/audit/{session}.ndjson` |
 
 Session credentials are held in memory. After restart, callers can send the original connection
-configuration to `/v1/sessions/{id}/reconnect`, or reference an explicitly saved profile. The engine,
+configuration to `/v1/sessions/{id}/reconnect`, reference a saved profile, or omit the body for a
+session already linked to a saved profile with credentials. The engine,
 host, port, database, user, environment and workspace must match the original session. Reconnection
 restores conversation context and dataset registry; it opens a fresh database connection and resets
 its query budget. Interrupted SQL and tasks are never replayed automatically.
@@ -305,9 +429,10 @@ for its own runtime is built with `apiKey`/`oauth` stripped (a `${VAR}` referenc
 is not a secret). An `.env` key is never forwarded to another provider's endpoint: switching
 channels drops it, and the channel's own credential is used instead.
 
-The console also lists the agent's tools from `/v1/tools` (the same descriptors feed
-`/v1/capabilities.tool_names`): name, label, description, parameter names/types/optionality, and
-whether a tool is read-only or serialised on the session connection. Both blocks sit in collapsible
+The console lists tools from `/v1/tools`: name, label, description, parameter names/types/optionality,
+and whether a tool is read-only or serialised on the session connection. With a live session selected,
+it requests `?session_id=…` to show only that session’s model tools. The unscoped catalogue is the
+complete service inventory, also reflected by `/v1/capabilities.tool_names`. Both blocks sit in collapsible
 panels below the main view — one button per block, and the model block is split into the channel
 list on the left and the editable form on the right.
 
@@ -323,8 +448,8 @@ History is persisted under the configured `DATA_AGENT_DATA_DIR` (default `data/`
   per-session index (rebuildable from the objects).
 - `audit/exports.ndjson`: one line per CSV export (artifact or result), with caller, session and whether
   the result was truncated.
-- `connections.json`: server-side connection profiles; passwords and SSH credentials are removed
-  from public configuration fields.
+- `connections.json`: server-side profiles (fully encrypted for account-owned profiles).
+- `accounts.db`: account IDs, scrypt password hashes, and hashed login session tokens (account mode).
 
 Closing/expiring a session releases its connection and preserves its history/results. Restart marks
 previously queued/running tasks `incomplete` with `SERVICE_RESTARTED`, retains partial answers and
@@ -340,8 +465,8 @@ Existing results from versions without a persisted ownership record cannot be re
 their session ID. This is single-process filesystem storage with no automatic history retention;
 back up the data directory and avoid sharing it between concurrent service instances.
 
-The console saves profiles through the service API. Non-secret configuration remains available
-after clearing browser storage (re-enter the API token if required). To opt into storing database
+In legacy mode, non-secret server profiles remain available after clearing browser storage
+(re-enter the API token if required). To opt into storing database
 passwords or SSH credentials, set a stable `DATA_AGENT_PROFILE_SECRET_KEY`, restart and select
 **连同密码一起保存**. Secrets use AES-256-GCM; API responses never return decrypted values. Without
 the key only non-secret configuration can be saved. Keep the key across restarts; changing it makes
@@ -352,8 +477,8 @@ use **选择密钥文件…** (or paste its contents). OpenSSH and PEM private k
 extensionless `id_ed25519` / `id_rsa` files; `.pub` public keys and PuTTY `.ppk` files are not.
 Encrypted keys also need their passphrase. The browser reads the selected file locally; it does not
 scan `~/.ssh`, store the key in browser storage, or send it merely because a file was selected.
-Testing/connecting sends the key to the service; saving uses the same explicit encrypted-credential
-opt-in described above. Use HTTPS when accessing the console over a network.
+Testing/connecting sends the key to the service. Account mode encrypts it on save; legacy mode
+requires the explicit credential opt-in described above.
 
 The SSH **host key** is separate from that private key: the private key proves who you are, the host
 key proves which server you reached. Like `ssh` and `ssh-keyscan`, the console does not ask you to
@@ -368,8 +493,8 @@ An unchanged key is reported as `指纹未变` without asking again, so the butt
 
 Session creation, connection tests and reconnection also accept
 `{ "profile": "saved-name", "credentials": { "password": "optional override", "ssh": [] } }`.
-Credential overrides apply only to that request. Legacy browser profiles remain selectable and are
-migrated only when explicitly saved; their local copy is removed after a successful migration.
+Credential overrides apply only to that request unless saving a profile. In legacy mode, browser
+profiles are migrated only when explicitly saved; their local copy is removed after a successful save.
 
 ## Result storage
 
@@ -432,7 +557,8 @@ src/
     model.ts             pi ModelRuntime (models.json, in-memory API key)
     model-settings.ts    console-editable model overrides layered over the environment
     prompts.ts           per-engine system prompt
-    tools.ts             13 tool definitions (TypeBox schemas, annotations)
+    tools.ts             core tool definitions, shared metadata, and profile/capability selection
+    analysis-tools.ts    local analysis, snapshot and chart management definitions
     runtime.ts           pi AgentSession + task queue + event mapping
     session-title.ts     one-shot, tool-free session naming over a bounded transcript
     service.ts           sessions, ownership, TTL sweeper, result access
@@ -462,6 +588,15 @@ tests/                   unit + integration
 
 ## Known limitations (P0)
 
+- Single instance only: SQLite account store, in-memory sessions and one local data directory. No
+  shared state, no horizontal scaling, no failover.
+- Only login is rate limited. Task creation, `/v1/model/test` and connection tests have no per-account
+  quota, so one authenticated account can consume model tokens or outbound connections until budgets
+  or the global session ceiling stop it. `DATA_AGENT_MAX_SESSIONS` is global, not per account.
+- Streaming events are appended one `appendFileSync` call per token. On a slow or network-backed data
+  volume that write is the bottleneck; keep `/data` on local SSD and cap `MAX_SESSIONS`.
+- `SIGTERM` cancels running tasks (recorded as `TASK_INTERRUPTED`) after at most the compose grace
+  period; there is no drain-and-finish mode.
 - Queries are synchronous; `job_get` reports task state, there is no detached job queue.
 - One task runs per session at a time (queue depth 8); steering is supported, approval prompts are not.
 - MySQL workspaces require a separate database; if it is unavailable the session degrades to

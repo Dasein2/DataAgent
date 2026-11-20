@@ -82,7 +82,10 @@
   .code-block { border: 1px solid var(--border); border-radius: 6px; margin: 8px 0; background: var(--bg); overflow: hidden; }
   .code-head { display: flex; align-items: center; gap: 8px; padding: 3px 4px 3px 9px; border-bottom: 1px solid var(--border); background: var(--panel-2); font: 11px var(--mono); color: var(--muted); }
   .code-head .code-lang { text-transform: uppercase; letter-spacing: .06em; }
-  .code-head .code-toggle { margin-left: 2px; padding: 1px 8px; background: transparent; font-size: 11px; }
+  .code-head .code-toggle { display: inline-grid; place-items: center; flex: none; width: 24px; height: 24px; min-height: 24px; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--muted); }
+  .code-head .code-toggle:hover:not(:disabled), .code-head .code-toggle:active:not(:disabled) { border: 0; background: transparent; box-shadow: none; color: var(--text); transform: none; }
+  .code-toggle .icon { width: 12px; height: 12px; stroke-width: 2.5; }
+  .code-toggle[aria-expanded="true"] .icon { transform: rotate(180deg); }
   .code-block pre { margin: 0; border: 0; border-radius: 0; }
   .code-block.collapsed .code-head { border-bottom: 0; }
   .code-block.collapsed pre { display: none; }
@@ -202,8 +205,6 @@
   .row, .row-3 { gap: 10px; }
   .row > *, .row-3 > *, .grid-2 > *, .grid-3 > * { min-width: 0; }
   .host-row { grid-template-columns: minmax(0, 1fr) 78px; }
-  .profile-controls { display: flex; gap: 6px; align-items: center; }
-  .profile-controls .select-wrap { flex: 1; width: 0; min-width: 0; }
   .checkbox-label { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 400; margin-top: 10px; }
   .checkbox-label input { margin: 0; }
   .ssh-key-file-controls { display: flex; gap: 6px; }
@@ -271,12 +272,8 @@
   #btnTitle { min-height: 30px; padding: 4px 10px; font-size: 11px; white-space: nowrap; }
   #btnTitle[data-state="success"] { color: var(--ok); border-color: #d4e5d9; }
   #btnTitle[data-state="error"] { color: var(--err); }
-  .history-toolbar { display: flex; flex: none; gap: 7px; align-items: center; padding: 0 24px 14px; border-bottom: 1px solid #efede7; }
-  .history-toolbar > .icon { color: #92938b; width: 15px; }
-  .history-toolbar .select-wrap { max-width: 560px; flex: 1; width: 0; min-width: 0; }
-  .history-toolbar button.select-trigger { min-height: 32px; padding: 5px 9px; font-size: 11px; background: var(--bg); }
-  .history-toolbar .icon-button { width: 32px; padding: 5px; }
-  .history-toolbar button { min-height: 32px; padding: 5px 9px; font-size: 11px; white-space: nowrap; flex: none; }
+  .session-toolbar { display: flex; flex: none; gap: 7px; align-items: center; padding: 0 24px 14px; border-bottom: 1px solid #efede7; }
+  .session-toolbar button { min-height: 32px; padding: 5px 9px; font-size: 11px; white-space: nowrap; flex: none; }
   #messages { display: flex; flex-direction: column; min-height: 0; max-height: none; padding: 24px; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #d8d4cb transparent; }
   #messages > * { flex-shrink: 0; }
   #messages:has(.empty-state) { padding-top: 12px; padding-bottom: 12px; }
@@ -298,8 +295,6 @@
   #taskbar { font-size: 10px; gap: 9px; margin-bottom: 10px; min-width: 0; flex-wrap: wrap; }
   #taskId { overflow-wrap: anywhere; }
   .taskbar-label { margin-right: auto; font-family: inherit; color: #7d7c73; font-size: 10.5px; }
-  .prompt-editor { background: #fff; border: 1px solid #dedad0; border-radius: 9px; overflow: hidden; box-shadow: 0 2px 4px rgba(30, 25, 15, .025); transition: border-color .15s, box-shadow .15s; }
-  .prompt-editor:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(166, 83, 56, .08); }
   #goal { display: block; min-height: 75px; max-height: 220px; padding: 13px 14px 8px; border: 0; background: transparent; box-shadow: none; outline: 0; resize: vertical; font-size: 12px; }
   .composer-actions { display: flex; align-items: center; gap: 7px; padding: 8px 10px 10px; }
   .composer-hint { font-size: 10px; color: #7c7b73; margin-right: auto; }
@@ -349,7 +344,7 @@
     .header-actions > button { min-height: 30px; padding-block: 4px; }
     .header-actions .connection-badge { flex-basis: 100%; justify-content: flex-end; border: 0; background: transparent; }
   }
-  @media (max-width: 900px) { main { grid-template-columns: 286px minmax(0, 1fr); gap: 16px; padding-inline: 20px; } body > header { padding-inline: 20px; } section.panel { padding: 16px; } .chat-heading { padding: 16px; } .history-toolbar { padding: 0 16px 14px; flex-wrap: wrap; } .history-toolbar > .icon { display: none; } .history-toolbar .select-wrap { max-width: none; flex-basis: 100%; width: 100%; } #messages { padding: 18px; } .prompt-grid { grid-template-columns: 1fr; gap: 7px; margin-top: 22px; } .prompt-card { display: grid; grid-template-columns: 20px 1fr; column-gap: 9px; padding: 10px 12px; } .prompt-card > .icon { grid-row: span 2; margin: 0; } .prompt-card span { grid-column: 2; } .empty-state h3 { font-size: 25px; } #composer { padding: 12px; } }
+  @media (max-width: 900px) { main { grid-template-columns: 286px minmax(0, 1fr); gap: 16px; padding-inline: 20px; } body > header { padding-inline: 20px; } section.panel { padding: 16px; } .chat-heading { padding: 16px; } .session-toolbar { padding: 0 16px 14px; flex-wrap: wrap; } #messages { padding: 18px; } .prompt-grid { grid-template-columns: 1fr; gap: 7px; margin-top: 22px; } .prompt-card { display: grid; grid-template-columns: 20px 1fr; column-gap: 9px; padding: 10px 12px; } .prompt-card > .icon { grid-row: span 2; margin: 0; } .prompt-card span { grid-column: 2; } .empty-state h3 { font-size: 25px; } #composer { padding: 12px; } }
   @media (max-width: 680px) {
     body > header { gap: 8px; padding: 12px 16px; }
     .brand { width: 100%; }
@@ -368,9 +363,7 @@
     .empty-description { font-size: 11.5px; }
     .prompt-grid { grid-template-columns: 1fr; }
     .empty-footnote { font-size: 10px; }
-    .history-toolbar { flex-wrap: wrap; }
-    .history-toolbar .select-wrap { flex-basis: 100%; width: 100%; }
-    .history-toolbar #btnHistoryDelete { margin-left: auto; }
+    .session-toolbar { flex-wrap: wrap; }
     #system { right: 10px; width: calc(100% - 20px); padding: 18px; }
     #system .kv { grid-template-columns: 100px minmax(0, 1fr); }
     #system .side { max-height: 32vh; }
@@ -389,7 +382,7 @@
   .select-trigger .select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .select-trigger .chev { width: 13px; height: 13px; color: var(--muted); transition: transform .18s ease; }
   .select-trigger[aria-expanded="true"] .chev { transform: rotate(180deg); }
-  .select-menu { position: fixed; z-index: 40; min-width: 150px; max-width: min(440px, calc(100vw - 24px)); padding: 5px; background: #fff; border: 1px solid var(--border); border-radius: 9px; box-shadow: 0 14px 38px rgba(42, 35, 24, .14), 0 3px 10px rgba(42, 35, 24, .08); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; opacity: 0; transform: translateY(-5px) scale(.97); transform-origin: top center; transition: opacity .15s ease, transform .17s cubic-bezier(.2, .8, .3, 1.08); }
+  .select-menu { position: fixed; z-index: 10000; min-width: 150px; max-width: min(440px, calc(100vw - 24px)); padding: 5px; background: #fff; border: 1px solid var(--border); border-radius: 9px; box-shadow: 0 14px 38px rgba(42, 35, 24, .14), 0 3px 10px rgba(42, 35, 24, .08); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; opacity: 0; transform: translateY(-5px) scale(.97); transform-origin: top center; transition: opacity .15s ease, transform .17s cubic-bezier(.2, .8, .3, 1.08); will-change: opacity, transform; }
   .select-menu.up { transform-origin: bottom center; transform: translateY(5px) scale(.97); }
   .select-menu.open { opacity: 1; transform: translateY(0) scale(1); }
   .select-option { display: flex; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 6px; font-size: 12px; line-height: 1.45; color: var(--text); cursor: pointer; }
@@ -447,10 +440,25 @@
   #legacyModel .split { margin-top: 14px; }
   @media (max-width: 900px) { .mm-layout { grid-template-columns: 190px minmax(0, 1fr); gap: 16px; } .mm-test { grid-template-columns: 1fr 1fr; } }
   @media (max-width: 650px) { #system { right: 8px; width: calc(100% - 16px); max-width: calc(100% - 16px); padding: 16px; } .mm-layout { grid-template-columns: 1fr; } .mm-sidebar { position: static; } #mmList { max-height: 160px; } .mm-heading { align-items: start; } .mm-heading p { max-width: 210px; } .mm-active > .hint { margin-left: 0; } }
+  body[data-auth-locked] > :not(#accountGate):not(script) { display: none !important; }
+  #accountGate { width: min(400px, calc(100% - 32px)); margin: max(30px, 12vh) auto 24px; }
+  #accountGate h1 { margin: 0 0 6px; font-size: 22px; }
+  #accountUser { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 </style>
 <link rel="stylesheet" href="/workbench.css" />
 </head>
-<body>
+<body data-auth-locked>
+<section class="panel" id="accountGate" aria-labelledby="accountTitle">
+  <h1 id="accountTitle">登录 Data Agent</h1>
+  <div class="hint">连接档案与分析历史仅对你的账号可见。</div>
+  <form id="loginForm" hidden>
+    <label for="loginUsername">账号</label><input id="loginUsername" autocomplete="username" maxlength="60" required />
+    <label for="loginPassword">登录密码</label><input id="loginPassword" type="password" autocomplete="current-password" maxlength="256" required />
+    <div class="buttons"><button type="submit" class="primary" id="btnLogin">登录</button></div>
+  </form>
+  <div class="status info" id="loginStatus" role="status">正在检查登录状态…</div>
+  <button id="btnAuthRetry" type="button" class="ghost" hidden>重试</button>
+</section>
 <header>
   <div class="brand">
     <span class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 16v-5m7 5V5m7 11V8M4 20h16" /></svg></span>
@@ -461,12 +469,13 @@
   <span class="connection-badge" id="connBadge" data-ready="false" role="status"><span class="connection-badge-text" id="connBadgeText">未连接</span></span>
   <button class="tab" id="tabModel" data-panel="panelModel" aria-controls="panelModel" aria-expanded="false" title="模型渠道与当前生效设置">
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6m8 4v6" /></svg>
-    模型配置<span class="tab-tag" id="modelTabTag">—</span>
+    模型配置
   </button>
   <button class="tab" id="tabTools" data-panel="panelTools" aria-controls="panelTools" aria-expanded="false" title="Agent 可用的工具">
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></svg>
     工具<span class="tab-tag" id="toolCount">—</span>
   </button>
+  <span id="accountUser" hidden></span><button type="button" id="btnLogout" class="ghost" hidden>退出登录</button>
   <button class="ghost" id="btnCommands" title="命令面板 Ctrl / ⌘ K">⌘ K</button>
   <button class="ghost" id="btnTheme" title="切换明暗主题" aria-label="切换明暗主题">◐</button>
   <button class="ghost" id="btnHealth" title="检查服务"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4" /></svg>检查服务</button>
@@ -475,24 +484,33 @@
 
 <main>
   <div class="sidebar">
-    <section class="panel connection-panel" aria-labelledby="connectionTitle">
-      <div class="panel-heading">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v7c0 4 16 4 16 0V5M4 12v7c0 4 16 4 16 0v-7" /></svg>
-        <h2 id="connectionTitle">数据库连接</h2><span class="eyebrow">DATA SOURCE</span>
+    <section class="panel asset-panel" aria-labelledby="assetTitle">
+      <div class="panel-heading asset-heading">
+        <h2 id="assetTitle">数据库资产</h2>
+        <button type="button" class="ghost" id="btnNewConnection" title="添加数据库连接" aria-label="添加数据库连接">＋</button>
+        <button type="button" class="ghost" id="btnToggleAssets" aria-controls="assetSearch assetList" aria-expanded="true" aria-label="收起资产侧栏" title="收起资产侧栏">‹</button>
       </div>
-      <label for="profileSelect">已保存连接</label>
-      <div class="profile-controls">
-        <select id="profileSelect">
-          <option value="">— 未选择，手动填写 —</option>
-        </select>
-        <button class="icon-button" id="btnProfileSave" title="保存连接" aria-label="保存连接"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" /><path d="M7 3v6h9V3M7 21v-8h10v8" /></svg></button>
-        <button class="icon-button ghost danger" id="btnProfileDelete" title="删除连接" aria-label="删除连接"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></svg></button>
+      <input type="search" id="assetSearch" aria-label="搜索连接和会话" placeholder="搜索连接和会话" />
+      <nav id="assetList" aria-label="数据库连接与分析会话"><p class="asset-empty">正在载入资产…</p></nav>
+    </section>
+    <dialog class="connection-panel connection-dialog" id="connectionDialog" aria-labelledby="connectionTitle">
+      <header>
+        <h2 id="connectionTitle">数据库连接</h2>
+        <button type="button" class="ghost" id="btnConnectionDismiss">关闭</button>
+      </header>
+      <div id="resumeProfileField" hidden>
+        <label for="resumeProfile">使用已保存连接</label>
+        <select id="resumeProfile"></select>
       </div>
-      <label class="checkbox-label">
+      <div class="row">
+        <div><label for="profileName">连接名称</label><input id="profileName" maxlength="60" placeholder="例如 analytics" /></div>
+        <div><label for="profileGroup">分组</label><input id="profileGroup" maxlength="60" placeholder="未分组" list="profileGroups" /><datalist id="profileGroups"></datalist></div>
+      </div>
+      <label class="checkbox-label" id="legacyProfileOptIn">
         <input id="profileRememberPassword" type="checkbox" />
         连同密码一起保存
       </label>
-      <details class="storage-note"><summary>连接与凭据如何保存</summary><div class="hint">连接配置保存在服务端，清除浏览器数据后仍可读取。密码 / SSH 私钥仅在服务端配置加密密钥并勾选保存时加密存储。</div></details>
+      <details class="storage-note"><summary>连接与凭据如何保存</summary><div class="hint" id="profileStorageHint">连接配置保存在服务端，清除浏览器数据后仍可读取。密码 / SSH 私钥仅在服务端配置加密密钥并勾选保存时加密存储。</div></details>
       <div class="row field-divider">
         <div>
           <label for="engine">引擎</label>
@@ -534,8 +552,10 @@
       </div>
       <details class="advanced-options" id="advancedConnection">
       <summary><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6m8 4v6" /></svg>高级连接设置</summary>
-      <label for="token">API token <span>（可选）</span></label>
-      <input id="token" type="password" placeholder="服务启用鉴权时填写" autocomplete="off" />
+      <div id="legacyTokenFields">
+        <label for="token">API token <span>（可选）</span></label>
+        <input id="token" type="password" placeholder="服务启用鉴权时填写" autocomplete="off" />
+      </div>
       <label for="sslMode">TLS 加密</label>
       <select id="sslMode">
         <option value="">不使用</option>
@@ -613,16 +633,18 @@
       </details>
 
       <div class="connection-actions">
-        <button id="btnTest">测试连接</button>
-        <button class="primary" id="btnSession">建立会话<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg></button>
+        <button type="button" class="ghost danger" id="btnProfileDelete" hidden>删除连接</button>
+        <button type="button" id="btnTest">测试连接</button>
+        <button type="button" id="btnProfileSave">保存连接</button>
+        <button type="button" class="primary" id="btnSession"><span id="btnSessionLabel">建立会话</span></button>
       </div>
-      <div id="connStatus" class="status info" role="status">填写连接信息后，建立分析会话。</div>
-    </section>
+      <div id="connStatus" class="status info" role="status"></div>
+    </dialog>
 
     <section class="panel session-panel" aria-labelledby="sessionTitle">
       <div class="panel-heading"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" /><path d="m8 10 3 2-3 2m6 1h3" /></svg><h2 id="sessionTitle">会话详情</h2></div>
       <div id="sessionInfo" class="kv"><span class="k">当前状态</span><span>等待建立连接</span></div>
-      <div class="buttons"><button class="ghost" id="btnRefresh" disabled>刷新状态</button><button class="ghost danger" id="btnClose" disabled>关闭会话</button></div>
+      <div class="buttons"><button class="ghost" id="btnRefresh" disabled>刷新状态</button></div>
     </section>
 
   </div>
@@ -634,10 +656,10 @@
         <button class="ghost" id="btnTitle" title="根据当前对话生成会话标题" disabled>生成标题</button>
       </div>
     </div>
-    <div class="history-toolbar">
-      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.8 7M3 4v7h7m2-4v5l3 2" /></svg>
-      <label for="historySelect" class="sr-only">历史会话</label>
-      <select id="historySelect"><option value="">历史会话</option></select><button class="ghost" id="btnHistory">读取历史</button><button class="ghost" id="btnReconnect">恢复分析</button><button class="ghost danger icon-button" id="btnHistoryDelete" title="删除所选历史会话" aria-label="删除历史会话" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></svg></button>
+    <div class="session-toolbar" id="sessionToolbar" hidden>
+      <button type="button" class="ghost" id="btnReconnect" hidden>恢复分析</button>
+      <button type="button" class="ghost" id="btnClose" hidden>断开连接</button>
+      <span id="analysisStatus" class="session-notice" role="status"></span>
     </div>
     <div id="messages">
       <div class="empty-state" id="welcome">
@@ -659,21 +681,39 @@
             <strong>发现异常信号</strong><span>定位波动，寻找背后原因</span>
           </button>
         </div>
-        <p class="empty-footnote">连接左侧数据库，或读取历史会话，继续你的探索。</p>
+        <p class="empty-footnote">从左侧选择数据库或打开已有会话。</p>
       </div>
     </div>
     <div id="composer">
       <div id="taskbar"><span class="taskbar-label">分析任务</span><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span><span id="taskActivity" role="status" aria-live="polite"></span></div>
-      <div class="prompt-editor">
-        <label for="goal" class="sr-only">分析目标</label>
-        <textarea id="goal" rows="3" placeholder="你想从数据中了解什么？例如：分析最近一年的月度 GMV，找出增长与异常。"></textarea>
-        <div class="composer-actions">
-          <span class="composer-hint">Ctrl / ⌘ + Enter 发送</span>
-          <button class="ghost" id="btnCancel" disabled>取消</button>
-          <button class="ghost" id="btnSteer" disabled>插入指令</button>
-          <button class="primary" id="btnSend" disabled>发送任务<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-5 5 5-5 5 5" /></svg></button>
+      <div class="composer-card" id="composerCard">
+        <div class="composer-editing" id="composerEditing" hidden><span>编辑重发 · 发送将追加新消息，不修改原消息</span><button type="button" class="ghost" id="btnEditCancel">取消编辑</button></div>
+        <div class="composer-input-row">
+          <label for="goal" class="sr-only">分析目标</label>
+          <textarea id="goal" rows="1" maxlength="20000" placeholder="描述你的分析问题…"></textarea>
+          <button type="button" class="primary" id="btnSend" disabled title="Enter 发送，Shift + Enter 换行">发送<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14 0m-6-6 6 6-6 6" /></svg></button>
+          <button type="button" class="ghost" id="btnCancel" disabled hidden>■ 停止</button>
         </div>
       </div>
+      <div class="composer-actions">
+        <div class="model-picker">
+          <button type="button" class="model-chip" id="btnModelChip" aria-haspopup="listbox" aria-expanded="false" aria-controls="modelChoices" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="3"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/></svg><span id="modelChipName">选择模型</span><span class="model-chip-chevron" aria-hidden="true">⌃</span></button>
+          <div class="model-popover" id="modelPopover" hidden>
+            <div class="model-picker-tabs"><button type="button" class="ghost" data-model-scope="enabled" aria-pressed="true">已限定</button><button type="button" class="ghost" data-model-scope="all" aria-pressed="false">全部</button></div>
+            <input type="search" id="modelSearch" placeholder="筛选渠道或模型…" aria-label="筛选模型" autocomplete="off" />
+            <div id="modelChoices" role="listbox" aria-label="当前会话模型"></div>
+            <div class="model-picker-note">仅切换当前会话 · 凭证在模型管理中配置</div>
+          </div>
+        </div>
+        <span class="model-provider" id="modelChipProvider"></span>
+        <button type="button" class="ghost" id="btnBusinessContext" aria-haspopup="dialog" disabled>业务上下文</button>
+        <button type="button" class="ghost" id="btnSteer" disabled hidden>插入指令</button>
+        <span class="composer-spacer"></span>
+        <span class="composer-meta" id="modelThinking"></span>
+        <span class="composer-meta" id="modelContext"></span>
+        <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+      </div>
+      <dialog class="model-confirm" id="modelConfirm" aria-labelledby="modelConfirmTitle"><h3 id="modelConfirmTitle">确认切换模型</h3><p id="modelConfirmText"></p><div class="buttons"><button type="button" class="ghost" id="btnModelConfirmCancel">取消</button><button type="button" class="primary" id="btnModelConfirm">仍然切换</button></div></dialog>
     </div>
   </section>
 </main>
@@ -739,7 +779,7 @@
   <div class="tabpanel" id="panelTools" hidden>
     <div class="split">
       <div class="side">
-        <div class="side-head">工具<span class="pill" id="toolCountSide">—</span></div>
+        <div class="side-head"><span id="toolScope">服务工具目录</span><span class="pill" id="toolCountSide">—</span></div>
         <div id="toolList" class="channels hint">读取中…</div>
       </div>
       <div id="toolDetail"><div class="hint">选一个工具查看它的参数与行为。</div></div>
@@ -761,13 +801,20 @@ import { followTask } from "/task-stream.js";
 import { createExplorer } from "/explore.js";
 import { initWorkbench } from "/workbench.js";
 import { createCharts } from "/charts.js";
+import { initAssets, sessionTitle } from "/assets.js";
+import { initChatComposer } from "/chat-composer.js";
 const $ = (id) => document.getElementById(id);
 const state = {
   token: sessionStorage.getItem("data-agent-token") || "",
+  account: null,
   sessionId: null,
   taskId: null,
   streamAbort: null,
   profiles: [],
+  sessions: [],
+  unreadSessions: new Set(), // 跟踪有新完成任务的会话
+  profileError: "",
+  historyError: "",
   selectedProfile: null,
   sessionReady: false,
   title: null,
@@ -782,9 +829,23 @@ const state = {
   segmentText: "",
   lastSegmentText: "",
 };
-const { downloadFile, artifactTable, buildChartCard, renderArtifactInto } = createCharts({ api, state, escapeHtml, cellToString, openRef, refreshContext: () => workbench.refreshContext() });
+const { downloadFile, artifactTable, buildChartCard, renderArtifactInto } = createCharts({ api, state, authHeaders, escapeHtml, cellToString, openRef, refreshContext: () => workbench.refreshContext() });
 const exploreResult = createExplorer({ api, downloadFile, refreshContext: () => workbench.refreshContext() });
-const workbench = initWorkbench({ api, state, openResult, buildChartCard, loadHistory });
+const workbench = initWorkbench({ api, state, openResult, buildChartCard, openSession });
+const assets = initAssets({
+  list: $("assetList"),
+  search: $("assetSearch"),
+  toggle: $("btnToggleAssets"),
+  onEdit: openConnectionEditor,
+  onOpen: (session) => void openSession(session.session_id),
+  onDelete: deleteHistorySession,
+  onDeleteAsset: (profile) => void deleteSavedConnection(profile.name).catch((error) => setAnalysisStatus(error.message, true)),
+  onRenameSession: renameHistorySession,
+  onRenameGroup: renameConnectionGroup,
+});
+const welcome = $("welcome");
+const composer = initChatComposer({ api, state, applySession, onError: (message) => setAnalysisStatus(message, true) });
+let submittingTask = false;
 $("token").value = state.token;
 
 // Example questions only prepare a draft; submitting still requires an established session.
@@ -799,21 +860,120 @@ setInterval(() => {
   const since = Number($("taskActivity").dataset.since);
   if (since) { const label = $("taskActivity").textContent.split(" · ")[0]; $("taskActivity").textContent = label + " · " + Math.floor((Date.now() - since) / 1000) + "s"; }
 }, 1000);
-void initProfiles();
-void loadHistory();
-void loadModel();
-void loadTools();
+
+// 定时轮询所有会话状态，只有真正变化时才重新渲染（否则重建列表会重置滚动位置、闪滚动条）
+setInterval(async () => {
+  if (!state.account && !state.token) return;
+  try {
+    const { sessions } = await api("/v1/sessions");
+    // 检测任务完成：从有 current_task_id 变为无，且不是当前会话
+    for (const next of sessions) {
+      const prev = state.sessions.find((s) => s.session_id === next.session_id);
+      const taskFinished = prev?.current_task_id && !next.current_task_id;
+      if (taskFinished && next.session_id !== state.sessionId) state.unreadSessions.add(next.session_id);
+    }
+    const previous = new Map(state.sessions.map((s) => [s.session_id, s]));
+    const changed = sessions.length !== state.sessions.length || sessions.some((next) => {
+      const prev = previous.get(next.session_id);
+      return !prev || prev.current_task_id !== next.current_task_id ||
+        prev.status !== next.status || prev.title !== next.title;
+    });
+    if (!changed) return;
+    state.sessions = sessions;
+    renderAssets();
+  } catch (error) {
+    // 静默失败，不打断用户
+  }
+}, 3000);
+function loadConsole() {
+  void initProfiles();
+  void loadHistory();
+  if (!state.account || state.account.role === "admin") void loadModel();
+  void loadTools();
+}
+
+function authHeaders() {
+  if (state.account) return { "x-data-agent-account": state.account.username };
+  return state.token ? { authorization: "Bearer " + state.token } : {};
+}
+
+function reloadAfterAccountChange() {
+  document.body.dataset.authLocked = "";
+  state.streamAbort?.abort();
+  window.location.reload();
+}
+
+async function checkAccount() {
+  const data = await api("/v1/auth/status");
+  if (state.account && data.account?.username !== state.account.username) reloadAfterAccountChange();
+  return data;
+}
+
+async function initAccount() {
+  $("btnAuthRetry").hidden = true;
+  try {
+    const data = await checkAccount();
+    if (data.required && !data.account) {
+      $("loginForm").hidden = false;
+      setStatus("loginStatus", "请输入账号和密码。", "info");
+      $("loginUsername").focus();
+      return;
+    }
+    state.account = data.account;
+    if (state.account) {
+      $("accountUser").textContent = state.account.username;
+      $("accountUser").hidden = $("btnLogout").hidden = false;
+      $("legacyTokenFields").hidden = $("legacyProfileOptIn").hidden = true;
+      $("tabModel").hidden = state.account.role !== "admin";
+      $("profileStorageHint").textContent = "完整连接（含数据库密码、SSH 私钥和口令）在服务端加密保存，仅当前账号可使用。";
+    }
+    $("accountGate").hidden = true;
+    delete document.body.dataset.authLocked;
+    loadConsole();
+  } catch (error) {
+    setStatus("loginStatus", "无法检查登录状态：" + error.message, "err");
+    $("btnAuthRetry").hidden = false;
+  }
+}
+
+$("btnAuthRetry").onclick = () => void initAccount();
+$("loginForm").onsubmit = async (event) => {
+  event.preventDefault();
+  $("btnLogin").disabled = true;
+  try {
+    await api("/v1/auth/login", { method: "POST", body: {
+      username: $("loginUsername").value, password: $("loginPassword").value,
+    } });
+    if (!(await checkAccount()).account) throw new Error("浏览器未保存登录 Cookie；请确认访问使用 HTTPS。");
+    $("loginPassword").value = "";
+    reloadAfterAccountChange();
+  } catch (error) {
+    $("loginPassword").value = "";
+    setStatus("loginStatus", error.status === 401 ? "账号或密码错误。" : error.status === 429 ? "尝试次数过多，请稍后重试。" : error.message, "err");
+    $("loginPassword").focus();
+  } finally { $("btnLogin").disabled = false; }
+};
+$("btnLogout").onclick = async () => {
+  $("btnLogout").disabled = true;
+  try { await api("/v1/auth/logout", { method: "POST" }); reloadAfterAccountChange(); }
+  catch (error) { setStatus("connStatus", "退出失败：" + error.message, "err"); }
+  finally { $("btnLogout").disabled = false; }
+};
+window.addEventListener("focus", () => { if (state.account) void checkAccount().catch(() => {}); });
+window.addEventListener("pageshow", (event) => { if (event.persisted && state.account) reloadAfterAccountChange(); });
 
 function api(path, options = {}) {
-  const headers = Object.assign({}, options.headers || {});
-  if (state.token) headers["authorization"] = "Bearer " + state.token;
+  const headers = Object.assign({}, options.headers || {}, authHeaders());
   if (options.body !== undefined) headers["content-type"] = "application/json";
   return fetch(path, Object.assign({}, options, { headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) }))
     .then(async (res) => {
       const text = await res.text();
       let data = null;
       try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
-      if (!res.ok) throw new Error((data && data.error && (data.error.code + ": " + data.error.message)) || ("HTTP " + res.status));
+      if (!res.ok) {
+        if (res.status === 401 && state.account && !path.startsWith("/v1/auth/")) reloadAfterAccountChange();
+        throw Object.assign(new Error(data?.error?.message || "HTTP " + res.status), { status: res.status, code: data?.error?.code });
+      }
       return data;
     });
 }
@@ -905,6 +1065,7 @@ function connectionPayload() {
 }
 
 function saveToken() {
+  if (state.account) return;
   state.token = $("token").value;
   sessionStorage.setItem("data-agent-token", state.token);
   void loadEngines();
@@ -913,8 +1074,6 @@ function saveToken() {
 // ── saved connection profiles ────────────────────────────────────────────────
 // Server profiles are authoritative. Legacy browser profiles can be migrated with Save.
 const PROFILE_KEY = "data-agent-connections-v1";
-const PROFILE_LAST = "data-agent-connection-last";
-
 function legacyProfiles() {
   try {
     const parsed = JSON.parse(localStorage.getItem(PROFILE_KEY) || "[]");
@@ -925,13 +1084,15 @@ function legacyProfiles() {
 }
 
 function readProfiles() {
+  if (state.account) return state.profiles;
   const names = new Set(state.profiles.map((entry) => entry.name));
   return state.profiles.concat(legacyProfiles().filter((entry) => !names.has(entry.name)));
 }
 
-async function refreshProfiles() {
+async function refreshProfiles(version) {
   const data = await api("/v1/connections/profiles");
-  state.profiles = (data.profiles || []).map((entry) => ({ ...entry.config, name: entry.name, hasSecret: entry.hasSecret }));
+  if (version !== profileListVersion) return;
+  state.profiles = (data.profiles || []).map(profileEntry);
   $("profileRememberPassword").disabled = !data.secret_storage_enabled;
   if (!data.secret_storage_enabled) $("profileRememberPassword").checked = false;
 }
@@ -945,25 +1106,64 @@ function connectionRequest() {
   } };
 }
 
-function renderProfiles(selected) {
-  const list = readProfiles().sort((a, b) => a.name.localeCompare(b.name));
-  const select = $("profileSelect");
-  select.innerHTML = '<option value="">— 未选择，手动填写 —</option>' +
-    list
-      .map((profile) => {
-        const suffix = (profile.localOnly ? " · 浏览器旧配置" : " · 服务端") + (profile.host ? " · " + profile.host + (profile.database ? "/" + profile.database : "") : "");
-        return '<option value="' + escapeHtml(profile.name) + '">' + escapeHtml(profile.name + suffix) + "</option>";
-      })
-      .join("");
-  const target = selected !== undefined ? selected : localStorage.getItem(PROFILE_LAST) || "";
-  select.value = target;
-  // A name that no longer exists (deleted in another tab) leaves the select value empty.
-  if (select.value !== target) select.value = "";
+function profileEntry(entry) {
+  return { ...entry.config, id: entry.id, name: entry.name, group: entry.group, hasSecret: entry.hasSecret };
 }
+
+function renderAssets() {
+  assets.update(readProfiles(), state.sessions, {
+    selected: state.sessionId,
+    unreadSessions: state.unreadSessions,
+    error: [state.profileError, state.historyError].filter(Boolean).join(" · "),
+  });
+}
+
+function openConnectionEditor(profile = null, newSession = false, resumeId = null) {
+  const dialog = $("connectionDialog");
+  if (dialog.open) return;
+  dialog.dataset.resumeId = resumeId || "";
+  $("connectionTitle").textContent = resumeId ? "填写原连接以恢复分析" : newSession ? "新建分析会话" : profile ? "连接设置" : "添加数据库连接";
+  $("profileName").value = profile?.name || "";
+  $("profileName").readOnly = Boolean(profile);
+  $("profileGroup").value = profile?.group || "";
+  $("btnProfileDelete").hidden = !profile || Boolean(resumeId);
+  $("btnProfileSave").hidden = Boolean(resumeId);
+  $("resumeProfileField").hidden = !resumeId || !readProfiles().length;
+  if (resumeId) {
+    $("resumeProfile").replaceChildren(new Option("手动填写原连接", ""), ...readProfiles().map((item) => new Option(item.name, item.name)));
+    $("resumeProfile").value = profile?.name || "";
+  }
+  $("profileGroups").replaceChildren(...[...new Set(readProfiles().map((item) => item.group).filter(Boolean))].map((name) => new Option(name)));
+  applyProfile(profile || (resumeId ? originalConnectionFields() : { localOnly: true, engine: "postgres", environment: "production" }));
+  $("btnSessionLabel").textContent = resumeId ? "恢复分析" : "建立会话";
+  const missing = profile ? missingSecrets(profile) : [];
+  setStatus("connStatus", missing.length ? "请补填「" + missing.join("、") + "」" : "", "info");
+  dialog.showModal();
+}
+
+function originalConnectionFields() {
+  const { engine, host, database, environment } = state.session || {};
+  return { localOnly: true, engine, host, database, environment };
+}
+
+$("resumeProfile").onchange = () => {
+  const profile = readProfiles().find((item) => item.name === $("resumeProfile").value);
+  applyProfile(profile || originalConnectionFields());
+  $("btnSessionLabel").textContent = "恢复分析";
+  setStatus("connStatus", "请确认是原数据库连接，并补填所需凭据。", "info");
+};
+$("btnNewConnection").onclick = () => openConnectionEditor();
+$("btnConnectionDismiss").onclick = () => $("connectionDialog").close();
+
+// Close select menu when dialog closes
+$("connectionDialog").addEventListener("close", () => {
+  if (openSelect) closeSelectMenu(true);
+});
 
 function applyProfile(profile) {
   if (!profile) return;
   state.selectedProfile = profile.localOnly ? null : profile.name;
+  $("btnSessionLabel").textContent = state.selectedProfile ? "连接并开始分析" : "建立会话";
   $("profileRememberPassword").checked = !$("profileRememberPassword").disabled && Boolean(profile.hasSecret);
   const engines = [...$("engine").options].map((option) => option.value);
   $("engine").value = engines.includes(profile.engine) ? profile.engine : engines[0];
@@ -1009,6 +1209,7 @@ function applyProfile(profile) {
 
 function missingSecrets(profile) {
   const missing = [];
+  if (state.account) return missing;
   if (!profile.hasSecret && !profile.password) missing.push("数据库密码");
   const hop = (profile.ssh && profile.ssh.hops && profile.ssh.hops[0]) || null;
   if (!profile.hasSecret && hop && hop.auth && !hop.auth.password && !hop.auth.privateKey) {
@@ -1017,78 +1218,91 @@ function missingSecrets(profile) {
   return missing;
 }
 
+let profileListVersion = 0;
 async function initProfiles() {
-  await loadEngines();
-  try { await refreshProfiles(); } catch (error) { setStatus("connStatus", error.message, "err"); }
-  renderProfiles();
-  const last = localStorage.getItem(PROFILE_LAST);
-  const profile = last ? readProfiles().find((entry) => entry.name === last) : null;
-  if (!profile) return;
-  applyProfile(profile);
-  $("profileSelect").value = profile.name;
-  const missing = missingSecrets(profile);
-  setStatus(
-    "connStatus",
-    "已载入连接「" + profile.name + "」" +
-      (missing.length ? "；请补填：" + missing.join("、") : "（含已保存的凭据）"),
-    missing.length ? "info" : "ok",
-  );
+  const version = ++profileListVersion;
+  void loadEngines();
+  try {
+    await refreshProfiles(version);
+    if (version === profileListVersion) state.profileError = "";
+  } catch (error) {
+    if (version !== profileListVersion) return;
+    state.profiles = [];
+    state.profileError = "加载连接失败：" + error.message;
+  } finally {
+    if (version === profileListVersion) renderAssets();
+  }
 }
 
 $("btnProfileSave").onclick = async () => {
+  const button = $("btnProfileSave");
+  button.disabled = true;
   try {
     saveToken();
     const connection = connectionPayload();
-    let name = $("profileSelect").value;
-    if (!name) name = (window.prompt("保存名称（字母、数字、点、下划线或连字符）", (connection.engine + "-" + connection.host + "-" + connection.database).replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 60)) || "").trim();
-    if (!name) return;
-    const saved = await api("/v1/connections/profiles/" + encodeURIComponent(name), { method: "PUT", body: { ...connectionRequest(), rememberSecret: $("profileRememberPassword").checked } });
-    await refreshProfiles();
-    // Remove a legacy plaintext copy only after its explicit server migration succeeded.
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(legacyProfiles().filter((item) => item.name !== name).map(({localOnly, ...item}) => item)));
-    localStorage.setItem(PROFILE_LAST, name);
-    renderProfiles(name);
-    state.selectedProfile = name;
-    setStatus("connStatus", "已保存到服务端「" + name + "」" + (saved.profile.hasSecret ? "（凭据已加密）" : "（未保存凭据）"), "ok");
+    const name = $("profileName").value.trim() || (connection.engine + "-" + connection.host + "-" + connection.database).replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 60);
+    if (!state.selectedProfile && state.profiles.some((item) => item.name === name && item.hasSecret) &&
+      !window.confirm("将用表单中的完整配置覆盖「" + name + "」。未填写的旧凭据不会保留。继续保存？")) return;
+    if (state.account && !(await ensureHostFingerprint())) throw new Error("请先确认 SSH 主机指纹");
+    const saved = await api("/v1/connections/profiles/" + encodeURIComponent(name), { method: "PUT", body: {
+      ...connectionRequest(), rememberSecret: Boolean(state.account) || $("profileRememberPassword").checked,
+      group: $("profileGroup").value.trim(),
+    } });
+    if (!state.account) removeLegacyProfile(name);
+    await Promise.all([initProfiles(), loadHistory()]);
+    $("profileName").value = name;
+    $("profileName").readOnly = true;
+    $("btnProfileDelete").hidden = false;
+    if (saved.profile.hasSecret) applyProfile(profileEntry(saved.profile));
+    else state.selectedProfile = name;
+    $("btnSessionLabel").textContent = "建立会话";
+    setStatus("connStatus", "已保存「" + name + "」", "ok");
   } catch (error) { setStatus("connStatus", error.message, "err"); }
+  finally { button.disabled = false; }
 };
+
+function removeLegacyProfile(name) {
+  localStorage.setItem(PROFILE_KEY, JSON.stringify(legacyProfiles().filter((item) => item.name !== name).map(({ localOnly, ...item }) => item)));
+}
+
+async function renameConnectionGroup(from, to) {
+  const entries = readProfiles();
+  if (entries.some((profile) => profile.group === to)) throw new Error("已存在同名分组");
+  const members = entries.filter((profile) => (profile.group || "") === from);
+  if (!members.length) throw new Error("找不到该连接分组");
+  if (members.some((profile) => !profile.localOnly)) {
+    await api("/v1/connections/groups", { method: "PATCH", body: { from, to } });
+  }
+  const localNames = new Set(members.filter((profile) => profile.localOnly).map((profile) => profile.name));
+  if (localNames.size) {
+    const updated = legacyProfiles().map(({ localOnly, ...profile }) =>
+      localNames.has(profile.name) && (profile.group || "") === from ? { ...profile, group: to } : profile);
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(updated));
+  }
+  await initProfiles();
+}
+
+async function deleteSavedConnection(name) {
+  const entry = readProfiles().find((item) => item.name === name);
+  if (!entry || !window.confirm("删除已保存的连接「" + name + "」？它的会话仍可在侧栏查看。")) return false;
+  if (!entry.localOnly) await api("/v1/connections/profiles/" + encodeURIComponent(name), { method: "DELETE" });
+  if (!state.account) removeLegacyProfile(name);
+  if (state.selectedProfile === name) state.selectedProfile = null;
+  await Promise.all([initProfiles(), loadHistory()]);
+  setAnalysisStatus("已删除连接「" + name + "」");
+  return true;
+}
+
 $("btnProfileDelete").onclick = async () => {
-  const name = $("profileSelect").value;
-  if (!name || !window.confirm("删除已保存的连接「" + name + "」？")) return;
   try {
-    const entry = readProfiles().find((item) => item.name === name);
-    if (entry && !entry.localOnly) await api("/v1/connections/profiles/" + encodeURIComponent(name), { method: "DELETE" });
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(legacyProfiles().filter((item) => item.name !== name).map(({localOnly, ...item}) => item)));
-    localStorage.removeItem(PROFILE_LAST);
-    state.selectedProfile = null;
-    await refreshProfiles();
-    renderProfiles("");
-    setStatus("connStatus", "已删除连接「" + name + "」", "ok");
+    if (await deleteSavedConnection($("profileName").value)) $("connectionDialog").close();
   } catch (error) { setStatus("connStatus", error.message, "err"); }
 };
 for (const id of ["engine", "host", "port", "database", "user", "environment", "workspace", "allowWeakReadOnly", "sslMode", "sslCa", "sslServerName", "sshHost", "sshPort", "sshUser", "sshFingerprint", "sshAuth"]) {
-  $(id).addEventListener("input", () => { state.selectedProfile = null; });
-  $(id).addEventListener("change", () => { state.selectedProfile = null; });
+  const markManual = () => { state.selectedProfile = null; };
+  $(id).addEventListener("input", markManual);
+  $(id).addEventListener("change", markManual);
 }
-$("profileSelect").addEventListener("change", () => {
-  const name = $("profileSelect").value;
-  if (!name) {
-    state.selectedProfile = null;
-    localStorage.removeItem(PROFILE_LAST);
-    setStatus("connStatus", "未选择已保存连接，可手动填写后保存", "info");
-    return;
-  }
-  const profile = readProfiles().find((entry) => entry.name === name);
-  if (!profile) return;
-  applyProfile(profile);
-  localStorage.setItem(PROFILE_LAST, name);
-  const missing = missingSecrets(profile);
-  setStatus(
-    "connStatus",
-    "已载入连接「" + name + "」" + (missing.length ? "；请补填：" + missing.join("、") : "（含已保存的凭据）"),
-    missing.length ? "info" : "ok",
-  );
-});
 
 // Private-key file import is entirely browser-local. The existing connection/profile actions
 // send the text only when explicitly requested; no file path or key goes into browser storage.
@@ -1348,22 +1562,18 @@ $("btnTest").onclick = async () => {
 };
 
 $("btnSession").onclick = async () => {
+  const dialog = $("connectionDialog");
+  const resumeId = dialog.dataset.resumeId;
   saveToken();
   $("btnSession").disabled = true;
   setStatus("connStatus", "建立会话…", "info");
   try {
     if (!(await ensureHostFingerprint())) throw new Error("主机密钥指纹未确认，未建立会话");
-    const data = await api("/v1/sessions", { method: "POST", body: connectionRequest() });
-    state.streamAbort?.abort();
-    state.taskId = null;
-    state.sessionId = data.session.session_id;
-    state.hasConversation = false;
-    applySession(data.session);
-    setStatus("connStatus", "会话已建立 · " + state.sessionId, "ok");
-    $("btnSend").disabled = false;
-    $("btnCancel").disabled = true;
-    $("btnClose").disabled = false;
-    $("btnRefresh").disabled = false;
+    const path = resumeId ? "/v1/sessions/" + resumeId + "/reconnect" : "/v1/sessions";
+    const { session } = await api(path, { method: "POST", body: connectionRequest() });
+    dialog.close();
+    if (resumeId) await openSession(resumeId);
+    else showSession(session, []);
     void loadHistory();
   } catch (error) {
     setStatus("connStatus", String(error.message || error), "err");
@@ -1389,6 +1599,10 @@ function applySession(session) {
   state.sessionReady = session.status === "ready";
   setConnectionBadge(session);
   $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId);
+  $("sessionToolbar").hidden = false;
+  $("btnReconnect").hidden = state.sessionReady;
+  $("btnClose").hidden = !["ready", "unavailable"].includes(session.status);
+  $("btnRefresh").disabled = false;
   setChatTitle(state.title);
   setTitleButtonSource(titleNamingSessionId === state.sessionId ? "naming" : "idle");
   const caps = session.capabilities || {};
@@ -1407,9 +1621,9 @@ function applySession(session) {
     ["expires", session.expires_at || "—"],
   ];
   $("sessionInfo").innerHTML = rows
-    .map(([k, v]) => '<span class="k">' + k + '</span><span>' + escapeHtml(String(v ?? "")) + '</span>')
+    .map(([k, v]) => '<span class="k" data-key="' + k + '">' + k + '</span><span>' + escapeHtml(String(v ?? "")) + '</span>')
     .join("");
-  if (session.unavailable_reason) setStatus("connStatus", session.unavailable_reason, "err");
+  setAnalysisStatus(session.unavailable_reason || (!state.sessionReady ? "历史记录 · 未连接数据库" : ""), Boolean(session.unavailable_reason));
   if (caps.workspaceNote) {
     $("sessionInfo").innerHTML += '<span class="k">note</span><span>' + escapeHtml(caps.workspaceNote) + "</span>";
   }
@@ -1417,6 +1631,9 @@ function applySession(session) {
     $("sessionInfo").innerHTML += '<span class="k">warning</span><span>' + escapeHtml(note) + "</span>";
   }
   if (typeof workbench !== "undefined") workbench.sessionChanged();
+  if (submittingTask) $("btnSend").disabled = true;
+  composer.sessionChanged();
+  void loadTools();
 }
 
 function setChatTitle(title) {
@@ -1428,6 +1645,8 @@ function setChatTitle(title) {
 
 function clearTitleState() {
   state.session = null;
+  workbench.sessionChanged();
+  void loadTools();
   setChatTitle(null);
   clearTimeout(titleFlashTimer);
   $("btnTitle").dataset.state = "idle";
@@ -1487,32 +1706,30 @@ $("btnTitle").onclick = async () => {
 };
 
 $("btnRefresh").onclick = async () => {
-  if (!state.sessionId) return;
+  const id = state.sessionId;
+  if (!id) return;
   try {
-    const data = await api("/v1/sessions/" + state.sessionId);
-    applySession(data.session);
+    const { session } = await api("/v1/sessions/" + id);
+    if (state.sessionId !== id || pendingSessionId) return;
+    applySession(session);
+    void loadHistory();
   } catch (error) {
-    setStatus("connStatus", String(error.message || error), "err");
+    if (state.sessionId === id && !pendingSessionId) setAnalysisStatus(error.message, true);
   }
 };
 
 $("btnClose").onclick = async () => {
-  if (!state.sessionId) return;
   const id = state.sessionId;
-  state.streamAbort?.abort();
-  state.taskId = null;
-  state.sessionReady = false;
-  state.sessionId = null;
-  state.hasConversation = false;
-  $("btnSend").disabled = true;
-  $("btnClose").disabled = true;
-  $("btnRefresh").disabled = true;
-  $("btnCancel").disabled = true;
-  setConnectionBadge(null);
-  clearTitleState();
-  try { await api("/v1/sessions/" + id, { method: "DELETE" }); } catch (error) { console.warn(error); }
-  setStatus("connStatus", "会话已关闭", "info");
-  void loadHistory();
+  if (!id) return;
+  const button = $("btnClose");
+  button.disabled = true;
+  try {
+    await api("/v1/sessions/" + id, { method: "DELETE" });
+    if (state.sessionId === id && !pendingSessionId) await openSession(id);
+    void loadHistory();
+  } catch (error) {
+    if (state.sessionId === id) setAnalysisStatus(error.message, true);
+  } finally { button.disabled = false; }
 };
 
 function escapeHtml(text) {
@@ -1550,14 +1767,17 @@ function shortPath(path) {
   return parts.length <= 2 ? path : "…/" + parts.slice(-2).join("/");
 }
 
-function addMessage(who) {
+function addMessage(who, options = {}) {
   $("welcome")?.remove();
   const wrap = document.createElement("div");
   wrap.className = "msg " + who;
   wrap.innerHTML = '<div class="who">' + (who === "user" ? "you" : "agent") + '</div><div class="body"></div>';
+  const follow = isNearBottom();
   $("messages").appendChild(wrap);
-  $("messages").scrollTop = $("messages").scrollHeight;
-  return wrap.querySelector(".body");
+  const body = wrap.querySelector(".body");
+  composer.attachMessage(body, who, options);
+  if (follow) $("messages").scrollTop = $("messages").scrollHeight;
+  return body;
 }
 
 function renderInline(text) {
@@ -1603,32 +1823,37 @@ async function openRef(ref) {
 }
 
 /** Minimal but practical markdown: fences, headings, tables, lists, bold/inline code, rules. */
-function renderMarkdown(text) {
-  const parts = [];
-  const fence = /```(\w*)\n([\s\S]*?)```/g;
-  let last = 0;
-  let match;
-  while ((match = fence.exec(text))) {
-    parts.push(renderBlocks(text.slice(last, match.index)));
-    parts.push(renderFence(match[1], match[2]));
-    last = match.index + match[0].length;
+function renderMarkdown(text, options = {}) {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const parts = [], prose = [];
+  const flush = () => { if (prose.length) parts.push(renderBlocks(prose.splice(0).join("\n"))); };
+  for (let i = 0; i < lines.length; i++) {
+    const open = /^ {0,3}(`{3,}|~{3,})([^`~]*)$/.exec(lines[i]);
+    if (!open) { prose.push(lines[i]); continue; }
+    flush();
+    const lang = open[2].trim().split(/\s+/)[0];
+    const code = [];
+    const close = new RegExp("^ {0,3}" + open[1][0] + "{" + open[1].length + ",}\\s*$");
+    i++;
+    for (; i < lines.length && !close.test(lines[i]); i++) code.push(lines[i]);
+    parts.push(renderFence(lang, code.join("\n") + (i < lines.length && code.length ? "\n" : ""), options.streaming && i === lines.length));
   }
-  parts.push(renderBlocks(text.slice(last)));
+  flush();
   return parts.join("");
 }
 
 const SQL_LANGS = new Set(["sql", "mysql", "postgres", "postgresql", "sqlite", "doris", "starrocks", "hive", "spark"]);
 
 /** SQL fences get a header with a fold button; other fences stay as plain pre/code. */
-function renderFence(lang, code) {
+function renderFence(lang, code, streaming = false) {
   const tag = String(lang || "").toLowerCase();
   const isSql = SQL_LANGS.has(tag) || (!tag && /^\s*(select|with|show|describe|desc|explain)\b/i.test(code));
-  if (!isSql) return "<pre><code>" + escapeHtml(code) + "</code></pre>";
-  return '<div class="code-block" data-lang="' + escapeHtml(tag || "sql") + '">' +
-      '<div class="code-head"><span class="code-lang">' + escapeHtml(tag || "sql") + '</span>' +
-      '<button type="button" class="code-toggle" aria-expanded="true">收起</button></div>' +
-      "<pre><code>" + escapeHtml(code) + "</code></pre>" +
-    "</div>";
+  return '<div class="code-block' + (streaming ? ' streaming' : '') + '" data-lang="' + escapeHtml(tag || (isSql ? "sql" : "code")) + '">' +
+      '<div class="code-head"><span class="code-lang">' + escapeHtml(tag || (isSql ? "sql" : "code")) + '</span>' +
+      '<button type="button" class="ghost code-copy">复制' + (isSql ? " SQL" : "代码") + '</button>' +
+      (isSql ? '<button type="button" class="code-toggle" aria-expanded="true" aria-label="收起 SQL" title="收起 SQL">' +
+        '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg></button>' : '') + '</div>' +
+      "<pre><code>" + escapeHtml(code) + "</code></pre></div>";
 }
 
 function setToolOpen(card, open) {
@@ -1649,7 +1874,9 @@ function setSqlOpen(block, open) {
   const toggle = block.querySelector(".code-toggle");
   if (toggle) {
     toggle.setAttribute("aria-expanded", String(open));
-    toggle.textContent = open ? "收起" : "展开";
+    const label = open ? "收起 SQL" : "展开 SQL";
+    toggle.setAttribute("aria-label", label);
+    toggle.title = label;
   }
 }
 
@@ -1705,9 +1932,12 @@ function renderBlocks(source) {
 
 $("btnSend").onclick = async () => {
   const goal = $("goal").value.trim();
-  if (!goal || !state.sessionId) return;
-  $("goal").value = "";
-  addMessage("user").textContent = goal;
+  const id = state.sessionId;
+  if (!goal || !id || !state.sessionReady || pendingSessionId || state.taskId || submittingTask || $("btnSend").disabled) return;
+  submittingTask = true;
+  composer.setSubmitting(true);
+  const userBody = addMessage("user", { text: goal });
+  composer.sent();
   state.assistantEl = null;
   state.textNode = null;
   state.segmentText = "";
@@ -1715,18 +1945,29 @@ $("btnSend").onclick = async () => {
   $("btnSend").disabled = true;
   $("btnCancel").disabled = false;
   try {
-    const data = await api("/v1/sessions/" + state.sessionId + "/tasks", { method: "POST", body: { goal } });
+    const data = await api("/v1/sessions/" + id + "/tasks", { method: "POST", body: { goal } });
+    void loadHistory();
+    if (state.sessionId !== id) return;
     state.hasConversation = true;
     setTitleButtonSource(titleNamingSessionId === state.sessionId ? "naming" : "idle");
     state.taskId = data.task.id;
+    userBody.closest(".msg").dataset.taskId = data.task.id;
+    composer.update();
     $("taskId").textContent = data.task.id;
     $("taskPill").className = "pill running";
     $("taskPill").textContent = "running";
     streamTask(data.task.id);
   } catch (error) {
-    $("btnSend").disabled = false;
+    if (state.sessionId !== id) return;
+    $("btnSend").disabled = !state.sessionReady || Boolean(pendingSessionId);
     $("btnCancel").disabled = true;
-    addMessage("assistant").textContent = "任务创建失败: " + (error.message || error);
+    userBody.closest(".msg").classList.add("send-failed");
+    if (!$("goal").value) { $("goal").value = goal; composer.resize(); }
+    addMessage("assistant", { text: "任务创建失败: " + (error.message || error) });
+  } finally {
+    submittingTask = false;
+    composer.setSubmitting(false);
+    if (state.sessionId === id) { $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId) || Boolean(pendingSessionId); composer.update(); }
   }
 };
 
@@ -1736,7 +1977,7 @@ function streamTask(taskId) {
   state.streamAbort = controller;
   void followTask({
     taskId, signal: controller.signal,
-    headers: state.token ? { authorization: "Bearer " + state.token } : {},
+    headers: authHeaders(),
     onEvent: (event) => { if (state.streamAbort === controller) handleEvent(event); },
     onCursor: (cursor) => sessionStorage.setItem("data-agent-task-cursor:" + taskId, String(cursor)),
     onConnection: (status) => {
@@ -1750,6 +1991,7 @@ function streamTask(taskId) {
     state.taskId = null;
     $("btnSend").disabled = !state.sessionReady;
     $("btnCancel").disabled = true;
+    composer.update();
     setStatus("connStatus", error.message, "err");
   });
 }
@@ -1765,9 +2007,9 @@ function handleEvent(event) {
       break;
     case "message_delta":
       ensureAssistant();
-      state.textNode.textContent += data.text;
       state.segmentText += data.text;
-      $("messages").scrollTop = $("messages").scrollHeight;
+      composer.appendSource(state.assistantEl, data.text);
+      scheduleStreamRender();
       break;
     case "reasoning_delta":
       break;
@@ -1849,8 +2091,11 @@ function handleEvent(event) {
     }
     case "usage":
       workbench.updateUsage(data);
+      if (state.session?.agent && data.context_usage) state.session.agent.context_usage = data.context_usage;
+      composer.update();
       break;
     case "task_finished": {
+      const follow = isNearBottom();
       if (data.usage) workbench.updateUsage(data.usage);
       $("taskActivity").textContent = "";
       delete $("taskActivity").dataset.since;
@@ -1870,7 +2115,9 @@ function handleEvent(event) {
         ensureAssistant();
         for (const artifactId of data.artifacts) void renderArtifactInto(state.assistantEl, artifactId);
       }
-      $("messages").scrollTop = $("messages").scrollHeight;
+      if (finalAnswer) composer.setSource(state.assistantEl, finalAnswer);
+      composer.update();
+      if (follow) $("messages").scrollTop = $("messages").scrollHeight;
       const status = data.status || "finished";
       $("taskPill").className = "pill " + status;
       $("taskPill").textContent = status;
@@ -1916,10 +2163,53 @@ function statusNote(text, tone) {
   return note;
 }
 
-/** Turn the in-progress text node into markdown and start a new segment after the next card. */
+function isNearBottom() {
+  const box = $("messages");
+  return box.scrollHeight - box.clientHeight - box.scrollTop < 80;
+}
+let streamFrame = null, streamTimer = null;
+function cancelStreamRender() {
+  if (streamFrame !== null) cancelAnimationFrame(streamFrame);
+  if (streamTimer !== null) clearTimeout(streamTimer);
+  streamFrame = streamTimer = null;
+}
+function scheduleStreamRender() {
+  if (streamFrame !== null || streamTimer !== null) return;
+  const render = () => {
+    streamFrame = streamTimer = null;
+    const node = state.textNode;
+    if (!node) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && (node.contains(selection.anchorNode) || node.contains(selection.focusNode))) return;
+    const follow = isNearBottom();
+    renderSegment(node, state.segmentText, true);
+    node.classList.add("is-streaming");
+    if (follow) $("messages").scrollTop = $("messages").scrollHeight;
+  };
+  if (state.segmentText.length > 40000) streamTimer = setTimeout(render, 200);
+  else streamFrame = requestAnimationFrame(render);
+}
+document.addEventListener("selectionchange", () => {
+  if (state.textNode && window.getSelection()?.isCollapsed) scheduleStreamRender();
+});
+
+function renderSegment(node, text, streaming) {
+  const blocks = [...node.querySelectorAll(".code-block")];
+  const ui = blocks.map((block) => ({ folded: block.classList.contains("collapsed"), scroll: block.querySelector("pre")?.scrollLeft || 0 }));
+  node.innerHTML = renderMarkdown(text, { streaming });
+  node.querySelectorAll(".code-block").forEach((block, i) => {
+    if (ui[i]?.folded) setSqlOpen(block, false);
+    const pre = block.querySelector("pre");
+    if (pre && ui[i]) pre.scrollLeft = ui[i].scroll;
+  });
+}
+
+/** Finalize the active text segment without touching tool/chart DOM. */
 function closeSegment() {
+  cancelStreamRender();
+  if (state.textNode) state.textNode.classList.remove("is-streaming");
   if (state.textNode && state.segmentText.trim()) {
-    state.textNode.innerHTML = renderMarkdown(state.segmentText);
+    renderSegment(state.textNode, state.segmentText, false);
     state.lastSegmentText = state.segmentText;
   }
   state.textNode = null;
@@ -1968,10 +2258,6 @@ $("btnSteer").onclick = async () => {
   if (!text) return;
   try { await api("/v1/tasks/" + state.taskId + "/steer", { method: "POST", body: { text } }); } catch (error) { alert(error.message); }
 };
-
-$("goal").addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") $("btnSend").click();
-});
 
 api("/healthz").then((health) => { $("modelBadge").textContent = "model: " + health.model; }).catch(() => {});
 
@@ -2057,7 +2343,6 @@ function renderModel(view) {
   $("btnModelSave").disabled = !view.editable || view.api_key_source === "managed";
   $("btnModelReset").disabled = !view.editable;
   $("modelBadge").textContent = "model: " + view.provider + "/" + view.model_id;
-  $("modelTabTag").textContent = view.provider + "/" + view.model_id;
   // Re-render from the cached catalogue so the active channel stays highlighted without a refetch.
   if (state.channels) renderChannels(state.channels);
   setStatus("modelStatus", view.editable ? "可编辑；保存后新会话生效" : (view.edit_disabled_reason || "只读"), view.editable ? "info" : "err");
@@ -2138,9 +2423,19 @@ async function resetModel() {
   } catch (error) { setStatus("modelStatus", error.message, "err"); }
 }
 
+let toolRequestId = 0;
 async function loadTools() {
+  const requestId = ++toolRequestId;
+  const activeId = ["ready", "unavailable"].includes(state.session?.status) ? state.sessionId : null;
+  $("toolScope").textContent = activeId ? "当前会话工具" : "服务工具目录";
+  state.tools = [];
+  $("toolCount").textContent = $("toolCountSide").textContent = "—";
+  $("toolList").textContent = "正在加载工具…";
+  $("toolDetail").textContent = "";
   try {
-    const { tools } = await api("/v1/tools");
+    const path = activeId ? "/v1/tools?session_id=" + encodeURIComponent(activeId) : "/v1/tools";
+    const { tools } = await api(path);
+    if (requestId !== toolRequestId) return;
     state.tools = tools;
     $("toolCount").textContent = String(tools.length);
     $("toolCountSide").textContent = String(tools.length);
@@ -2150,7 +2445,11 @@ async function loadTools() {
         (tool.readOnly ? "" : '<span class="tag" style="color:var(--warn)">写</span>') +
       "</div>").join("");
     renderToolDetail(tools[0]);
-  } catch (error) { $("toolList").textContent = error.message; }
+  } catch (error) {
+    if (requestId !== toolRequestId) return;
+    $("toolList").textContent = error.message;
+    $("toolDetail").textContent = "未能读取工具。";
+  }
 }
 
 function renderToolDetail(tool) {
@@ -2337,131 +2636,170 @@ $("mApi").addEventListener("change", () => {
         : " 选协议还需要填 base url，否则无法描述一个 endpoint。");
 });
 
+let historyListVersion = 0;
+let sessionViewVersion = 0;
+let pendingSessionId = null;
+
 async function loadHistory() {
+  const version = ++historyListVersion;
   try {
-    const selected = $("historySelect").value || state.sessionId;
     const { sessions } = await api("/v1/sessions");
-    $("historySelect").innerHTML = '<option value="">历史会话</option>' + sessions.slice().reverse().map((item) =>
-      '<option value="' + escapeHtml(item.session_id) + '" title="' + escapeHtml(item.session_id) + '">' + escapeHtml((item.title ? item.title + " · " : "") + item.database + " · " + item.status) + '</option>').join("");
-    if (selected) $("historySelect").value = selected;
-    syncHistoryDelete();
-    workbench.updateHistory(sessions.slice().reverse());
-  } catch (error) { console.warn(error); }
+    if (version !== historyListVersion) return;
+    state.sessions = sessions;
+    state.historyError = "";
+  } catch (error) {
+    if (version !== historyListVersion) return;
+    state.historyError = "加载会话失败：" + error.message;
+  }
+  renderAssets();
 }
 
-function syncHistoryDelete() {
-  $("btnHistoryDelete").disabled = !$("historySelect").value;
+function setAnalysisStatus(text, error = false) {
+  $("sessionToolbar").hidden = !text && !state.sessionId;
+  $("analysisStatus").textContent = text;
+  $("analysisStatus").classList.toggle("warning-text", error);
 }
-$("historySelect").addEventListener("change", syncHistoryDelete);
 
-$("btnHistoryDelete").onclick = async () => {
-  const id = $("historySelect").value;
-  if (!id) return;
-  if (!window.confirm("删除历史会话「" + id + "」？\n对话记录、查询结果和图表都会被删除，无法恢复。")) return;
+function clearTranscript() {
+  cancelStreamRender();
+  state.streamAbort?.abort();
+  state.streamAbort = null;
+  state.taskId = null;
+  state.assistantEl = null;
+  state.textNode = null;
+  state.segmentText = "";
+  state.lastSegmentText = "";
+  $("messages").replaceChildren(welcome);
+  $("btnCancel").disabled = true;
+  $("taskPill").className = "pill";
+  $("taskPill").textContent = "idle";
+  $("taskId").textContent = "";
+  $("turnInfo").textContent = "";
+  $("taskActivity").textContent = "";
+  delete $("taskActivity").dataset.since;
+}
+
+async function renameHistorySession(id, newTitle) {
+  const { title } = await api("/v1/sessions/" + encodeURIComponent(id), { method: "PATCH", body: { title: newTitle } });
+  const session = state.sessions.find((item) => item.session_id === id);
+  if (session) session.title = title;
+  if (state.sessionId === id && state.session) {
+    state.session = { ...state.session, title };
+    setChatTitle(title);
+    const titleKey = $("sessionInfo").querySelector('[data-key="title"]');
+    if (titleKey) titleKey.nextElementSibling.textContent = title;
+  }
+  await loadHistory();
+}
+
+async function deleteHistorySession(session) {
+  const id = session.session_id;
+  if (!window.confirm("删除会话「" + sessionTitle(session) + "」？对话、查询结果和图表将被删除，无法恢复。")) return;
   try {
     await api("/v1/sessions/" + id + "?purge=true", { method: "DELETE" });
+    if (pendingSessionId === id) {
+      sessionViewVersion++;
+      pendingSessionId = null;
+      $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId);
+    }
     if (state.sessionId === id) {
-      // The transcript on screen belongs to the deleted session; clear it with the session state.
-      state.streamAbort?.abort();
-      state.taskId = null;
+      clearTranscript();
       state.sessionId = null;
       state.sessionReady = false;
+      composer.sessionChanged();
       state.hasConversation = false;
-      state.assistantEl = null;
-      state.textNode = null;
-      state.segmentText = "";
-      state.lastSegmentText = "";
-      $("messages").replaceChildren();
-      $("btnSend").disabled = true;
-      $("btnClose").disabled = true;
-      $("btnRefresh").disabled = true;
-      $("btnCancel").disabled = true;
-      $("taskPill").className = "pill";
-      $("taskPill").textContent = "idle";
-      $("taskId").textContent = "";
-      $("turnInfo").textContent = "";
-      setConnectionBadge(null);
+      $("btnSend").disabled = $("btnRefresh").disabled = true;
+      $("btnReconnect").hidden = $("btnClose").hidden = true;
       $("sessionInfo").innerHTML = '<span class="k">当前状态</span><span>等待建立连接</span>';
+      setConnectionBadge(null);
       clearTitleState();
     }
-    $("historySelect").value = "";
     await loadHistory();
-    setStatus("connStatus", "历史会话已删除", "ok");
-  } catch (error) { setStatus("connStatus", error.message, "err"); }
-};
+    setAnalysisStatus("会话已删除");
+  } catch (error) { setAnalysisStatus(error.message, true); }
+}
 
-$("btnHistory").onclick = async () => {
-  const id = $("historySelect").value;
-  if (!id) return;
-  try {
-    state.streamAbort?.abort();
-    const [{ session }, { tasks }, { results }] = await Promise.all([
-      api("/v1/sessions/" + id), api("/v1/sessions/" + id + "/tasks"), api("/v1/sessions/" + id + "/results"),
-    ]);
-    state.sessionId = id;
-    state.taskId = null;
-    state.hasConversation = tasks.length > 0 || Boolean(session.current_task_id);
-    state.assistantEl = null;
-    state.textNode = null;
-    state.segmentText = "";
-    state.lastSegmentText = "";
-    $("messages").replaceChildren();
-    for (const task of tasks) {
-      if (task.id === session.current_task_id) continue;
-      addMessage("user").textContent = task.goal;
-      if (task.answer) addMessage("assistant").innerHTML = renderMarkdown(task.answer);
-      if (task.error) addMessage("assistant").textContent = task.error.code + ": " + task.error.message;
-      // Charts belong to the task that produced them; re-rendering them here is what makes a past task
-      // readable without re-running the model.
-      if (Array.isArray(task.artifacts) && task.artifacts.length) {
-        const body = addMessage("assistant");
-        for (const artifactId of task.artifacts) void renderArtifactInto(body, artifactId);
-      }
-    }
-    if (results.length) {
+function showSession(session, tasks) {
+  const version = ++sessionViewVersion;
+  pendingSessionId = null;
+  clearTranscript();
+  state.sessionId = session.session_id;
+  state.hasConversation = tasks.length > 0 || Boolean(session.current_task_id);
+  for (const task of tasks) {
+    if (task.id === session.current_task_id) continue;
+    addMessage("user", { text: task.goal, taskId: task.id });
+    if (task.answer) addMessage("assistant", { text: task.answer }).innerHTML = renderMarkdown(task.answer);
+    if (task.error) addMessage("assistant").textContent = task.error.code + ": " + task.error.message;
+    if (task.artifacts?.length) {
       const body = addMessage("assistant");
-      for (const result of results) {
-        const button = document.createElement("button");
-        button.textContent = (result.error ? "查询失败 · " : "") + (result.label || result.id);
-        button.onclick = () => openResult(result.id);
-        body.appendChild(button);
-      }
+      for (const artifactId of task.artifacts) void renderArtifactInto(body, artifactId);
     }
-    applySession(session);
-    $("btnRefresh").disabled = false;
-    $("btnClose").disabled = !["ready", "unavailable"].includes(session.status);
-    $("btnCancel").disabled = true;
-    $("taskPill").textContent = session.status;
-    if (session.current_task_id) {
-      const current = tasks.find((task) => task.id === session.current_task_id);
-      if (current) addMessage("user").textContent = current.goal;
-      state.taskId = session.current_task_id;
-      $("btnSend").disabled = true;
-      $("btnCancel").disabled = false;
-      state.assistantEl = null;
-      state.segmentText = "";
-      state.lastSegmentText = "";
-      streamTask(state.taskId);
-    }
-    setStatus("connStatus", state.sessionReady ? "已读取会话" : "历史已读取；继续分析请填写原连接或选择已保存配置，再点击恢复分析", "info");
-  } catch (error) { setStatus("connStatus", error.message, "err"); }
-};
+  }
+  state.taskId = session.current_task_id || null;
+  applySession(session);
+  $("taskPill").textContent = session.status;
+  if (state.taskId) {
+    const current = tasks.find((task) => task.id === state.taskId);
+    if (current) addMessage("user", { text: current.goal, taskId: current.id });
+    $("btnCancel").disabled = false;
+    $("taskId").textContent = state.taskId;
+    streamTask(state.taskId);
+  }
+  const previous = state.sessions.find((item) => item.session_id === session.session_id);
+  if (previous) Object.assign(previous, session);
+  renderAssets();
+  // Enter at the latest message, regardless of where the previous session was scrolled.
+  const messages = $("messages");
+  messages.scrollTop = messages.scrollHeight;
+  const initialScrollTop = messages.scrollTop;
+  requestAnimationFrame(() => {
+    // Finish after layout, but never override a newer session or an intentional scroll up.
+    if (version !== sessionViewVersion || state.sessionId !== session.session_id || messages.scrollTop !== initialScrollTop) return;
+    messages.scrollTop = messages.scrollHeight;
+  });
+}
+
+async function openSession(id) {
+  const version = ++sessionViewVersion;
+  pendingSessionId = id;
+  $("btnSend").disabled = true;
+  setAnalysisStatus("正在载入会话…");
+  // 清除未读标记
+  state.unreadSessions.delete(id);
+  try {
+    const [{ session }, { tasks }] = await Promise.all([
+      api("/v1/sessions/" + id), api("/v1/sessions/" + id + "/tasks"),
+    ]);
+    if (version !== sessionViewVersion) return;
+    showSession(session, tasks);
+  } catch (error) {
+    if (version !== sessionViewVersion) return;
+    pendingSessionId = null;
+    $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId);
+    setAnalysisStatus("加载会话失败：" + error.message, true);
+  }
+}
 
 $("btnReconnect").onclick = async () => {
-  const id = $("historySelect").value || state.sessionId;
-  if (!id) return;
+  const id = state.sessionId;
+  if (!id || pendingSessionId) return;
+  const button = $("btnReconnect");
+  button.disabled = true;
+  const selected = state.sessions.find((session) => session.session_id === id);
+  const profile = state.profiles.find((entry) => entry.id === selected?.connection_profile_id);
   try {
-    const { session } = await api("/v1/sessions/" + id + "/reconnect", { method: "POST", body: connectionRequest() });
-    state.streamAbort?.abort();
-    state.sessionId = id;
-    state.taskId = null;
-    state.hasConversation = Array.isArray(session.tasks) && session.tasks.length > 0;
-    applySession(session);
-    $("btnRefresh").disabled = false;
-    $("btnClose").disabled = false;
-    setStatus("connStatus", "连接已恢复，可继续原会话分析", "ok");
+    setAnalysisStatus("正在恢复数据库连接…");
+    await api("/v1/sessions/" + id + "/reconnect", { method: "POST" });
+    if (state.sessionId === id && !pendingSessionId) await openSession(id);
     void loadHistory();
-  } catch (error) { setStatus("connStatus", error.message, "err"); }
+  } catch (error) {
+    if (state.sessionId !== id || pendingSessionId) return;
+    setAnalysisStatus(error.message, true);
+    if (["RECONNECT_PROFILE_REQUIRED", "PROFILE_SECRET_STORAGE_DISABLED", "CONNECTION_FAILED", "SSH_HOST_KEY_UNPINNED", "SSH_HOST_KEY_MISMATCH"].includes(error.code)) {
+      openConnectionEditor(profile, false, id);
+      setStatus("connStatus", "请确认是原数据库连接，并补填所需凭据。", "info");
+    }
+  } finally { button.disabled = false; }
 };
 
 // ------------------------------------------------------------ custom selects
@@ -2546,6 +2884,17 @@ function openSelectMenu(select, trigger) {
   clearTimeout(menuHideTimer);
   openSelect = select;
   openTrigger = trigger;
+
+  // Check if trigger is inside a dialog and append menu to it for proper stacking
+  const parentDialog = trigger.closest('dialog');
+  const currentParent = selectMenu.parentElement;
+  const targetParent = parentDialog || document.body;
+
+  // Only move the menu if parent changes (avoid unnecessary DOM operations)
+  if (currentParent !== targetParent) {
+    targetParent.appendChild(selectMenu);
+  }
+
   selectMenu.setAttribute("aria-label", trigger.getAttribute("aria-label") || "");
   selectMenu.innerHTML = [...select.options].map((option, index) =>
     '<div class="select-option' + (index === select.selectedIndex ? " selected" : "") + '" role="option"' +
@@ -2642,6 +2991,7 @@ window.addEventListener("scroll", (event) => {
   if (openSelect && !selectMenu.contains(event.target)) closeSelectMenu(true);
 }, true);
 document.querySelectorAll("select").forEach(enhanceSelect);
+void initAccount();
 // Optional panels must not block the chat's bootstrap. An older running backend can serve the new
 // HTML before it has the new module route; a static import would then disable every page control.
 let modelManager = null;

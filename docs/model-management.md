@@ -23,6 +23,16 @@ Data Agent 使用 pi SDK 调用模型，但**不依赖 pi CLI 的个人配置目
 - 当前默认渠道不能直接删除；先切换到其他渠道。当前默认模型也不能直接从列表移除。
 - 未保存更改在切换编辑对象时会有确认提示。
 
+### 聊天输入框与会话级模型
+
+- 输入框下方的模型按钮只切换**当前会话**，不会修改全局默认模型，也不会改变其他已打开会话。搜索支持渠道名、模型名与模型 ID；可收藏模型，并用方向键、Enter、Esc 操作选择器。
+- 模型切换只允许在任务空闲时进行。渠道凭证缺失、模型不存在或切换失败时保持原选择，不会自动换用其他渠道的凭证。
+- 选择上下文容量更小的模型，或当前上下文达到目标容量的 80% 时，会先显示确认提示。提示使用 SDK 的当前上下文估算，而非累计 Tokens；用量未知时明确标注未知。达到/超过目标容量时，下次请求可能自动压缩历史或失败。切换本身不删除原始对话。
+- 会话选择保存在历史快照中，刷新页面、恢复连接或重启服务后继续使用所选渠道和模型。管理员后来修改凭证只影响新建/主动切换/重连的运行时，其他活跃会话保留原凭证快照。
+- 普通账号可为自己的会话选择管理员已配置的模型；不能新增渠道、查看凭证或修改全局默认。会话接口不要求开启全局模型编辑权限。
+
+输入框使用 Enter 发送、Shift + Enter 换行（保留 Ctrl/⌘ + Enter 发送），支持中文输入法组合输入及自动增高。分析运行中可点击用户消息的「复制」「编辑重发」；编辑仅回填草稿，不中断任务、不改写旧消息。任务结束后发送修改后的草稿会追加新消息。取消编辑会恢复之前的草稿。模型回答边生成边渲染 Markdown，支持复制 Markdown 原文和单独复制代码块；上翻阅读历史时不会强制滚动到底部。
+
 ### 高级兼容性
 
 渠道和模型可配置 `compat` JSON（目前支持标量配置项，如 `supportsDeveloperRole`、`supportsReasoningEffort`、`maxTokensField`、`thinkingFormat`）。模型可额外配置 `thinkingLevelMap`，例如：
@@ -66,7 +76,8 @@ Data Agent 使用 pi SDK 调用模型，但**不依赖 pi CLI 的个人配置目
 
 ```dotenv
 NODE_ENV=production
-DATA_AGENT_API_TOKEN=<足够长的随机服务令牌>
+DATA_AGENT_REQUIRE_AUTH=1
+DATA_AGENT_ADMIN_PASSWORD=<仅首次启动使用，至少 8 个字符>
 DATA_AGENT_PROFILE_SECRET_KEY=<独立生成并妥善保管的加密主密钥>
 DATA_AGENT_ALLOW_MODEL_EDIT=1
 DATA_AGENT_PI_IMPORT=0
@@ -75,7 +86,7 @@ DATA_AGENT_DATA_DIR=/data
 
 不必设置 `DATA_AGENT_MODEL_PROVIDER` / `DATA_AGENT_MODEL_ID` / key。初始可无模型凭证启动，进入网页后添加渠道并设为默认。
 
-这些是**服务器全局管理配置**，不是按 `X-Caller-Id` 隔离的个人配置。服务 Bearer token 的持有者在启用模型编辑时可修改渠道、读取内网模型地址。不要向不可信分析用户发放该管理权限；多租户生产应在反向代理层限制这些路由，或关闭 `DATA_AGENT_ALLOW_MODEL_EDIT`。不要把未认证的开发服务暴露到公网，远程访问请使用 HTTPS/VPN。
+这些是**服务器全局配置**。账号模式下只有管理员可访问模型管理；普通用户共用已配置的模型，但看不到其他账号的连接或分析历史。关闭账号模式时，可继续用 `DATA_AGENT_API_TOKEN`；启用模型编辑后，持有该 token 的客户端可以修改全局配置。账号初始化、密码重置及 HTTPS 部署说明见 [README](../README.md#account-login-and-private-connections)。
 
 Docker Compose 已挂载 `/data`，无需挂载任何个人 pi 目录。请在 `.env.prod` 设置上述变量；非生产环境仍可用 `.env` 固定模型，旧式单模型编辑 API 继续兼容。
 
@@ -92,6 +103,10 @@ Docker Compose 已挂载 `/data`，无需挂载任何个人 pi 目录。请在 `
 | POST | `/v1/model/providers/:id/discover` | 用草稿配置读取模型列表 |
 | POST | `/v1/model/import-pi` | `{sourceId, targetId}` 一次性复制自定义 pi 渠道 |
 | POST | `/v1/model/select` | `{provider, modelId, thinkingLevel?}` 设置默认模型并持久化 |
+| GET | `/v1/sessions/:id/models` | 会话所有者可见的模型目录，不含密钥、端点或操作系统路径 |
+| POST | `/v1/sessions/:id/model` | `{provider, modelId, thinkingLevel?}` 仅切换该会话；忙碌时返回 409 |
+
+最后两个接口属于会话操作：按会话所有者鉴权，普通账号也可调用，不受 `DATA_AGENT_ALLOW_MODEL_EDIT` 限制。
 
 保存示例：
 

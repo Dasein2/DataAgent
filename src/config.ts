@@ -62,8 +62,17 @@ export interface AppConfig {
   analysis?: Partial<AnalysisOptions>;
   env: "development" | "production";
   profileSecretKey?: string;
+  requireAuth?: boolean;
+  adminPassword?: string;
+  secureAuthCookie?: boolean;
   /** Allow the console to override model settings at runtime. Off by default in production. */
   allowModelEdit: boolean;
+  /**
+   * Express `trust proxy`. Unset keeps `req.ip` on the socket peer, which is the only spoof-proof
+   * choice when the port is reachable directly. Behind a reverse proxy set it to the proxy's address
+   * or hop count, and bind the published port to loopback so no client can forge X-Forwarded-For.
+   */
+  trustProxy?: boolean | number | string;
   /**
    * The operator's own pi `models.json` / `settings.json`, read (never written) so the console can
    * offer the channels they already configured. Undefined means "do not look outside the data dir".
@@ -92,6 +101,18 @@ function bool(name: string, fallback: boolean): boolean {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   return raw === "1" || raw.toLowerCase() === "true";
+}
+
+/** Express accepts a boolean, a hop count or an address/subnet string in `trust proxy`. */
+function trustProxy(name: string): boolean | number | string | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  // `1` is a hop count; `true` trusts every hop in the chain, which is only safe when nothing but
+  // the proxy can reach this port. Never collapse the two.
+  if (/^\d+$/.test(raw)) return Number(raw);
+  if (raw.toLowerCase() === "true") return true;
+  if (raw === "0" || raw.toLowerCase() === "false") return false;
+  return raw;
 }
 
 function loadDotEnv(path: string): void {
@@ -123,8 +144,9 @@ export function loadConfig(): AppConfig {
 
   const env = (process.env.NODE_ENV === "production" ? "production" : "development") as AppConfig["env"];
   const apiToken = process.env.DATA_AGENT_API_TOKEN?.trim() ?? "";
-  if (!apiToken && env === "production") {
-    throw new Error("DATA_AGENT_API_TOKEN is required when NODE_ENV=production");
+  const requireAuth = bool("DATA_AGENT_REQUIRE_AUTH", Boolean(process.env.DATA_AGENT_ADMIN_PASSWORD));
+  if (!requireAuth && !apiToken && env === "production") {
+    throw new Error("Set DATA_AGENT_REQUIRE_AUTH=1 or DATA_AGENT_API_TOKEN when NODE_ENV=production");
   }
 
   const dataDir = resolve(process.env.DATA_AGENT_DATA_DIR ?? resolve(root, "data"));
@@ -182,11 +204,15 @@ export function loadConfig(): AppConfig {
     allowPrivateNetwork: bool("DATA_AGENT_ALLOW_PRIVATE_NETWORK", true),
     env,
     profileSecretKey: process.env.DATA_AGENT_PROFILE_SECRET_KEY,
+    requireAuth,
+    adminPassword: requireAuth ? process.env.DATA_AGENT_ADMIN_PASSWORD : undefined,
+    secureAuthCookie: bool("DATA_AGENT_SECURE_AUTH_COOKIE", env === "production"),
     piModelsPath,
     piSettingsPath,
     // Repointing the model (especially `baseUrl`) sends database answers to another endpoint, so a
     // shared production token must not be able to do it by accident.
     allowModelEdit: bool("DATA_AGENT_ALLOW_MODEL_EDIT", env !== "production"),
+    trustProxy: trustProxy("DATA_AGENT_TRUST_PROXY"),
     model: {
       // Deliberately NOT PI_*: those are inherited by the pi harness itself and would collide.
       provider: modelProvider,
@@ -215,7 +241,9 @@ export function loadConfig(): AppConfig {
       maxLocalRows: num("DATA_AGENT_MAX_LOCAL_ROWS", 100_000),
       maxLocalBytes: num("DATA_AGENT_MAX_LOCAL_BYTES", 64 * 1024 * 1024),
       maxSessionBytes: num("DATA_AGENT_MAX_SESSION_BYTES", 1024 * 1024 * 1024),
-      retentionDays: nonnegative("DATA_AGENT_RETENTION_DAYS", 0),
+      // Unbounded growth is a production outage, so production defaults to 30 days. Development
+      // keeps evidence around until asked; set 0 explicitly to disable it anywhere.
+      retentionDays: nonnegative("DATA_AGENT_RETENTION_DAYS", env === "production" ? 30 : 0),
       maxSeries: num("DATA_AGENT_MAX_CHART_SERIES", 30),
       masking: (() => {
         const rules: unknown = JSON.parse(process.env.DATA_AGENT_COLUMN_MASKS ?? "[]");

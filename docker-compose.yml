@@ -1,8 +1,15 @@
 # Production-ish deployment of the analysis service.
-#   cp .env.example .env.prod   # set NODE_ENV=production, API_TOKEN, PROFILE_SECRET_KEY
-#   # Set DATA_AGENT_ALLOW_MODEL_EDIT=1 to configure independent channels in the web console.
-#   # No pi directory mount is required; see docs/model-management.md.
+#   cp .env.example .env.prod   # choose account login or API_TOKEN; see README
 #   docker compose up -d --build
+#
+# The published port is bound to loopback on purpose: account mode issues Secure `__Host-` cookies,
+# which a browser only stores over HTTPS, and a direct 0.0.0.0 binding would let any client forge
+# X-Forwarded-For and bypass the login rate limit. Terminate TLS in front of it (see README, or the
+# Caddy/Nginx snippets in docs/) and keep DATA_AGENT_TRUST_PROXY unset unless that proxy is the only
+# way in.
+#
+# Set DATA_AGENT_ALLOW_MODEL_EDIT=1 to configure independent channels in the web console.
+# No pi directory mount is required; see docs/model-management.md.
 services:
   data-agent:
     build: .
@@ -12,16 +19,32 @@ services:
       DATA_AGENT_HOST: 0.0.0.0
       DATA_AGENT_PORT: "8787"
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     volumes:
       - data-agent-data:/data
     user: node
     read_only: true
     tmpfs:
-      - /tmp
+      # Model probing and PGlite local SQL use temp files only; keep them off the data volume.
+      - /tmp:size=256m
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    # A running task is cancelled on SIGTERM and recorded as TASK_INTERRUPTED, so give it room to
+    # persist that record instead of being killed outright.
+    stop_grace_period: 30s
+    # Defaults allow 20 sessions x 512 MB results; without a ceiling a burst of large exports can
+    # take down the host. Size this to the box, not to the application defaults.
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "2"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

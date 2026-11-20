@@ -3,14 +3,22 @@ import { readFile } from "node:fs/promises";
 import { createContext, runInContext, Script } from "node:vm";
 import { it } from "node:test";
 
+it("catalog qualifies names using the engine delimiter and escapes embedded delimiters", async () => {
+  const source = await readFile(new URL("../web/catalog.js", import.meta.url), "utf8");
+  const context = createContext();
+  runInContext(source.replaceAll("export function", "function"), context);
+  assert.equal(runInContext(`qualifiedTableName("postgres", "Sales Data", 'a"b')`, context), '"Sales Data"."a""b"');
+  assert.equal(runInContext('qualifiedTableName("doris", "Sales Data", "a`b")', context), "`Sales Data`.`a``b`");
+});
+
 it("console and workbench modules parse, and chart downloads retain live authentication state", async () => {
   const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
   const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script);
   new Script(script.replace(/^import[^\n]*;\s*$/gm, ""));
-  for (const file of ["charts.js", "explore.js", "workbench.js"]) {
+  for (const file of ["charts.js", "explore.js", "workbench.js", "business-context.js", "catalog.js", "assets.js"]) {
     const source = await readFile(new URL("../web/" + file, import.meta.url), "utf8");
-    new Script(source.replace(/export (?=(?:async )?function)/g, ""));
+    new Script(source.replace(/^import[^\n]*;\s*$/gm, "").replace(/export (?=(?:async )?function)/g, ""));
   }
   const charts = await readFile(new URL("../web/charts.js", import.meta.url), "utf8");
   const state = { token: "first-token" };
@@ -46,7 +54,7 @@ it("console and workbench modules parse, and chart downloads retain live authent
     },
     state,
   });
-  runInContext(charts.replace("export function", "function") + "\nvar chartUi = createCharts({ state });", context);
+  runInContext(charts.replaceAll("export function", "function") + "\nvar chartUi = createCharts({ state });", context);
   await runInContext('chartUi.downloadFile("/v1/results/res_fixture/data.csv", "fallback.csv")', context);
   state.token = "rotated-token";
   await runInContext('chartUi.downloadFile("/v1/artifacts/art_fixture/data.csv", "fallback.csv")', context);

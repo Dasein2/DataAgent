@@ -20,6 +20,38 @@ function engineFixture(engine: "mysql" | "doris" | "starrocks", rows: unknown[][
 }
 
 for (const engine of ["mysql", "doris", "starrocks"] as const) {
+  it(`${engine}: counts visible tables by scope in one unpaged query`, async () => {
+    const { instance } = engineFixture(engine, []);
+    const queries: string[] = [];
+    Object.assign(instance, { buffered: async (sql: string) => {
+      queries.push(sql);
+      return { rows: [["analytics", "122"], ["blocked", "99"]] };
+    } });
+    const counts = await instance.catalogTableCounts(["analytics", "empty"]);
+    assert.deepEqual(counts, { analytics: 122, empty: 0 });
+    assert.equal(queries.length, 1);
+    assert.ok(queries[0]?.includes("COUNT(*) FROM information_schema.TABLES"));
+    assert.ok(queries[0]?.includes("TABLE_SCHEMA IN ('analytics','empty')"));
+    assert.ok(queries[0]?.includes("IN ('table','foreign_table') GROUP BY TABLE_SCHEMA"));
+    assert.doesNotMatch(queries[0]!, /LIMIT|OFFSET/);
+  });
+  it(`${engine}: keeps the column match representative and count in paged catalog results`, async () => {
+    const { instance } = engineFixture(engine, []);
+    const queries: string[] = [];
+    Object.assign(instance, { buffered: async (sql: string) => {
+      queries.push(sql);
+      return { rows: [["analytics", "events", "table", null, null, 4, "user_id", 2]] };
+    } });
+    const objects = await instance.listObjects({ search: "user_id", scopes: ["analytics", "information_schema"],
+      searchColumns: true, includeMatchDetails: true, kinds: ["table"], offset: 50, limit: 51 });
+    assert.deepEqual(objects[0]?.columnMatch, { name: "user_id", count: 2 });
+    assert.equal(objects[0]?.match, "column");
+    assert.equal(queries.length, 1);
+    assert.match(queries[0]!, /t.TABLE_SCHEMA IN \('analytics'\)/);
+    assert.match(queries[0]!, /WHERE object_kind IN \('table'\)[\s\S]*LIMIT 51 OFFSET 50/);
+    await instance.listObjects({ schema: "analytics", limit: 50 });
+    assert.doesNotMatch(queries[1]!, /information_schema.COLUMNS/);
+  });
   it(`${engine}: propagates a missing-table error instead of returning zero rows`, async () => {
     const error = new Error("Table analytics.missing does not exist");
     const { instance } = engineFixture(engine, [], error);

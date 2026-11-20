@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renam
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { ConnectionConfig } from "../db/types.js";
+import type { BusinessContextFile } from "../business-context/types.js";
 import type { TaskRecord } from "./runtime.js";
 import type { TaskEvent } from "./events.js";
 import { AppError } from "../errors.js";
@@ -9,6 +10,8 @@ import { AppError } from "../errors.js";
 export interface HistoricalSession {
   owner: string;
   connectionKey?: string;
+  connectionProfileId?: string;
+  businessContext?: { scope: string; files: BusinessContextFile[] };
   snapshot: Record<string, any>;
 }
 
@@ -85,11 +88,15 @@ export class HistoryStore {
     renameSync(tmp, path);
   }
 
-  saveSession(owner: string, snapshot: Record<string, any>, key?: string): void {
+  saveSession(owner: string, snapshot: Record<string, any>, key?: string, businessContext?: HistoricalSession["businessContext"], profileId?: string): void {
     const id = snapshot.session_id as string;
     const existing = this.sessions.get(id);
     if (existing && existing.owner !== owner) throw new AppError("FORBIDDEN", "Session owner mismatch");
-    const record = { owner, snapshot: structuredClone(snapshot), connectionKey: key ?? existing?.connectionKey };
+    const record = {
+      owner, snapshot: structuredClone(snapshot), connectionKey: key ?? existing?.connectionKey,
+      connectionProfileId: profileId ?? existing?.connectionProfileId,
+      businessContext: businessContext ? structuredClone(businessContext) : existing?.businessContext,
+    };
     this.write("sessions", id, record);
     this.sessions.set(id, record);
   }
@@ -100,8 +107,11 @@ export class HistoryStore {
     return structuredClone(record);
   }
 
-  listSessions(owner: string): Record<string, any>[] {
-    return [...this.sessions.values()].filter((record) => record.owner === owner).map((record) => structuredClone(record.snapshot));
+  listSessions(owner: string) {
+    return [...this.sessions.values()].filter((record) => record.owner === owner).map((record) => ({
+      snapshot: structuredClone(record.snapshot), connectionKey: record.connectionKey,
+      connectionProfileId: record.connectionProfileId, scope: record.businessContext?.scope,
+    }));
   }
 
   retentionCandidates() {
