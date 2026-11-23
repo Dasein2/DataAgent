@@ -47,7 +47,8 @@ ssh -N -L 8787:127.0.0.1:8787 root@198.44.178.65
 Open **http://localhost:8787/** (not the public server IP). Secure cookies are preserved;
 modern browsers treat localhost as a trustworthy origin. If your browser rejects the cookie,
 use a properly configured HTTPS endpoint rather than disabling cookie security. The admin
-bootstrap password is in `/opt/data-agent-v1/bootstrap-admin.txt` (root-only); change it after
+bootstrap password is in `/opt/data-agent-v1-ops/bootstrap-admin.txt` (root-only, outside the
+checkout and Docker build context); change it after
 first login and remove that file. No production database or personal model credentials are
 copied automatically. Configure the intended model channel through the authenticated console.
 
@@ -61,6 +62,11 @@ Stop **only** this Compose project before a filesystem backup of SQLite and its 
 `docker system prune`, `docker compose down -v`, global service restarts, or a host reboot.
 Keep the profile encryption key together with the encrypted backup, outside the repository.
 A running-volume tar is not a transaction-consistent SQLite backup.
+
+Private/loopback database targets are disabled by default (`DATA_AGENT_ALLOW_PRIVATE_NETWORK=false`)
+to protect the other host services. Enable this only after reviewing the intended database target.
+Model editing is enabled for the administrator so the first channel can be configured; ordinary
+accounts cannot edit global channels.
 
 Before an upgrade, save `.env.prod`, back up `data-agent-v1_data`, record the existing image ID,
 and read schema changes. Build the new commit under limits, update `DATA_AGENT_REVISION`, then
