@@ -29,6 +29,7 @@ import { discoverModels } from "./model-discovery.js";
 import { AnalysisSession, type TaskRecord } from "./runtime.js";
 import { buildTitleTranscriptFromTasks, generateTitleFromModel, type GeneratedSessionTitle } from "./session-title.js";
 import { HistoryStore, connectionKey } from "./history.js";
+import { taskActivity } from "./task-activity.js";
 import { BusinessContextStore, businessContextScope } from "../business-context/store.js";
 import type { BusinessContextFile } from "../business-context/types.js";
 import { ProfileStore } from "../db/profiles-store.js";
@@ -1073,6 +1074,21 @@ export class AnalysisService {
       if (task) return { session, task };
     }
     return { task: this.history.getTask(taskId, ownerKey) };
+  }
+
+  listTasksWithActivity(sessionId: string, ownerKey: string): TaskRecord[] {
+    return this.history.listTasks(sessionId, ownerKey).map((task) => {
+      if (task.activity || ["queued", "running"].includes(task.status)) return task;
+      // Backfill a small optional summary once; keep large details on demand.
+      task.activity = taskActivity(task, this.history.listEvents(task.id)).summary;
+      this.history.saveTask(ownerKey, task);
+      return task;
+    });
+  }
+
+  taskActivity(taskId: string, ownerKey: string) {
+    const { task } = this.findTask(taskId, ownerKey);
+    return taskActivity(task, this.history.listEvents(taskId));
   }
 
   watchTask(taskId: string, ownerKey: string, fn: (event: TaskEvent) => void, afterSeq = 0): () => void {

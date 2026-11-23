@@ -155,13 +155,24 @@ it("serves historical results/tasks/events and server profiles over HTTP after r
     const audit = readFileSync(join(config.dataDir, "audit", "exports.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(audit.length, 2);
     assert.ok(audit.every((entry) => entry.owner_key === "alice"));
+    for (const file of ["task-activity.js", "task-tools.js"]) {
+      const module = await request("/" + file);
+      assert.equal(module.status, 200);
+      assert.match(module.headers.get("content-type")!, /javascript/);
+    }
     const vendor = await request("/vendor/echarts.min.js");
     assert.equal(vendor.status, 200);
     assert.ok((await vendor.text()).length > 1_000_000);
     const failedResponse = await request(`/v1/results/${failedMeta.id}`);
     assert.equal(failedResponse.status, 409); assert.equal((await failedResponse.json()).error.code, "RESULT_FAILED");
     assert.equal((await (await request(`/v1/sessions/${task().session_id}`)).json()).session.status, "closed");
-    assert.equal((await (await request(`/v1/sessions/${task().session_id}/tasks`)).json()).tasks[0].status, "succeeded");
+    const tasksWithActivity = (await (await request(`/v1/sessions/${task().session_id}/tasks`)).json()).tasks;
+    assert.equal(tasksWithActivity[0].status, "succeeded");
+    assert.equal(tasksWithActivity[0].activity.available, true);
+    const activity = await request(`/v1/tasks/${task().id}/activity`);
+    assert.equal(activity.status, 200);
+    assert.equal((await activity.json()).summary.available, true);
+    assert.equal((await request(`/v1/tasks/${task().id}/activity`, "bob")).status, 404);
     assert.equal((await (await request(`/v1/sessions/${task().session_id}/results`)).json()).results[0].id, meta.id);
     for (const path of [`/v1/results/${meta.id}`, `/v1/tasks/${task().id}`, `/v1/sessions/${task().session_id}/tasks`, `/v1/tasks/${task().id}/events`]) {
       assert.equal((await request(path, "bob")).status, 404);

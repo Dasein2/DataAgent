@@ -311,6 +311,17 @@
   .msg.assistant .body pre { background: #f7f6f2; padding: 13px; }
   .msg.assistant .body code { font-size: 11.5px; background: #f3f0e9; border-radius: 3px; padding: 1px 3px; }
   .msg.assistant .body pre code { padding: 0; background: none; }
+  .task-process { margin: 0 0 14px; padding: 0; border: 0; min-width: 0; border-radius: 7px; background: var(--panel-2); }
+  .task-process > .task-process-head::after { content: none; }
+  .task-process-head { display: flex; align-items: center; gap: 9px; padding: 11px 13px; cursor: pointer; list-style: none; color: #35666a; font-size: 12px; line-height: 1.65; flex-wrap: wrap; }
+  .task-process-head::-webkit-details-marker { display: none; }
+  .task-process-head::before { content: "›"; font-size: 20px; line-height: 1; transition: transform .15s; }
+  .task-process[open] > .task-process-head::before { transform: rotate(90deg); }
+  .task-process-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  .task-process-status { color: var(--muted); font-size: 10px; margin-left: auto; }
+  .task-process-body { border-top: 1px solid var(--border); padding: 10px 12px; min-width: 0; }
+  .task-process-body > .text { margin: 5px 0 12px; }
+  .task-process-body .tool:last-child { margin-bottom: 0; }
   .tool { background: #faf9f6; border-radius: 8px; padding: 10px 12px; font-size: 11px; }
   .chart-card { border-radius: 10px; padding: 16px; box-shadow: var(--shadow); margin: 12px 0; }
   .chart-card .cc-head { flex-wrap: wrap; gap: 4px 12px; margin-bottom: 12px; }
@@ -803,6 +814,8 @@
 
 <script type="module">
 import { followTask } from "/task-stream.js";
+import { createTaskActivity } from "/task-activity.js";
+import { createProcessRenderer } from "/task-tools.js";
 import { createExplorer } from "/explore.js";
 import { initWorkbench } from "/workbench.js";
 import { createCharts } from "/charts.js";
@@ -833,10 +846,15 @@ const state = {
   // Text of the segment currently being streamed; reset whenever a tool card splits the transcript.
   segmentText: "",
   lastSegmentText: "",
+  activity: null,
+  taskMeta: null,
+  lastTextNode: null,
+  trailingText: false,
 };
 const { downloadFile, artifactTable, buildChartCard, renderArtifactInto } = createCharts({ api, state, authHeaders, escapeHtml, cellToString, openRef, refreshContext: () => workbench.refreshContext() });
 const exploreResult = createExplorer({ api, downloadFile, refreshContext: () => workbench.refreshContext() });
 const workbench = initWorkbench({ api, state, openResult, buildChartCard, openSession });
+const renderProcessEvent = createProcessRenderer({ escapeHtml, renderMarkdown, openResult, statusNote });
 const assets = initAssets({
   list: $("assetList"),
   search: $("assetSearch"),
@@ -862,6 +880,7 @@ document.querySelectorAll("[data-prompt]").forEach((button) => {
 });
 
 setInterval(() => {
+  state.activity?.tick();
   const since = Number($("taskActivity").dataset.since);
   if (since) { const label = $("taskActivity").textContent.split(" · ")[0]; $("taskActivity").textContent = label + " · " + Math.floor((Date.now() - since) / 1000) + "s"; }
 }, 1000);
@@ -1961,6 +1980,8 @@ $("btnSend").onclick = async () => {
   state.textNode = null;
   state.segmentText = "";
   state.lastSegmentText = "";
+  state.activity = state.taskMeta = state.lastTextNode = null;
+  state.trailingText = false;
   $("btnSend").disabled = true;
   $("btnCancel").disabled = false;
   try {
@@ -1970,6 +1991,7 @@ $("btnSend").onclick = async () => {
     state.hasConversation = true;
     setTitleButtonSource(titleNamingSessionId === state.sessionId ? "naming" : "idle");
     state.taskId = data.task.id;
+    state.taskMeta = data.task;
     userBody.closest(".msg").dataset.taskId = data.task.id;
     composer.update();
     $("taskId").textContent = data.task.id;
@@ -2016,16 +2038,19 @@ function streamTask(taskId) {
 }
 function handleEvent(event) {
   const data = event.data || {};
+  if (["task_started", "message_delta", "tool_started", "tool_finished", "retry", "notice"].includes(event.type)) ensureAssistant();
+  state.activity?.observe(event);
   switch (event.type) {
     case "task_started":
       $("taskPill").className = "pill running";
       $("taskPill").textContent = "running";
       break;
     case "turn_started":
+      closeSegment();
       $("turnInfo").textContent = "turn " + data.turn;
       break;
     case "message_delta":
-      ensureAssistant();
+      ensureAssistantText();
       state.segmentText += data.text;
       composer.appendSource(state.assistantEl, data.text);
       scheduleStreamRender();
@@ -2037,32 +2062,9 @@ function handleEvent(event) {
       $("taskActivity").textContent = "正在执行 " + data.tool;
       $("taskActivity").dataset.since = String(Date.now());
       ensureAssistant();
-      const body = state.assistantEl;
-      // Tool cards are appended after the current text node; start a fresh text segment so later
-      // assistant output (including the final report) renders below the card instead of above it.
       closeSegment();
-      const el = document.createElement("div");
-      el.dataset.call = data.call_id;
-      const args = data.args || {};
-      const detail = args.sql || args.name || args.search || args.result_id || "";
-      // Collapsed by default: the head keeps the tool name plus a one-line preview, so the chat still
-      // records what ran; the full SQL and its output wait in the body until the user expands them.
-      el.className = "tool has-head";
-      const full = String(detail).replace(/\s+/g, " ");
-      // Ellipsis in the string, not just in CSS: a clipped 180-char slice ends mid-token and reads
-      // like the SQL itself stopped there.
-      const preview = full.length > 180 ? full.slice(0, 180) + "…" : full;
-      el.innerHTML = '<button type="button" class="tool-head" aria-expanded="false">' +
-          '<span class="chev" aria-hidden="true">▸</span>' +
-          '<span class="name">' + escapeHtml(data.tool) + '</span>' +
-          '<span class="preview">' + escapeHtml(preview) + '</span>' +
-          '<span class="meta">running…</span>' +
-        '</button>' +
-        '<div class="tool-body" hidden>' +
-          (detail ? '<pre class="tool-sql">' + escapeHtml(String(detail).slice(0, 1200)) +
-            (String(detail).length > 1200 ? "\n…（已截断，共 " + String(detail).length + " 字符）" : "") + "</pre>" : "") +
-        '</div>';
-      body.appendChild(el);
+      state.trailingText = false;
+      renderProcessEvent(event, state.activity.body);
       break;
     }
     case "tool_finished": {
@@ -2070,45 +2072,15 @@ function handleEvent(event) {
       $("taskActivity").textContent = "整理分析证据…";
       delete $("taskActivity").dataset.since;
       if (data.details?.budget) workbench.updateBudget(data.details.budget);
-      const el = document.querySelector('.tool[data-call="' + data.call_id + '"]');
-      if (el) {
-        el.classList.toggle("error", Boolean(data.is_error));
-        const meta = el.querySelector(".meta");
-        if (meta) meta.textContent = (data.is_error ? "error" : "ok") + (data.duration_ms != null ? " · " + data.duration_ms + "ms" : "");
-        const body = el.querySelector(".tool-body") || el;
-        if (data.summary) {
-          const pre = document.createElement("pre");
-          pre.className = "tool-output";
-          pre.textContent = String(data.summary).slice(0, 800);
-          body.appendChild(pre);
-        }
-        const resultId = data.details && data.details.result_id;
-        if (resultId) {
-          const btn = document.createElement("button");
-          btn.className = "ghost";
-          btn.style.marginTop = "6px";
-          btn.textContent = "查看结果 " + resultId;
-          btn.onclick = () => openResult(resultId);
-          body.appendChild(btn);
-        }
-        const chartId = data.details && data.details.chart_id;
-        if (chartId && !data.is_error) {
-          void renderArtifactInto(body, chartId);
-          // A chart is the answer, not raw output: show it without an extra click.
-          setToolOpen(el, true);
-        } else if (chartId) {
-          // A failed chart is still worth showing: the code tells the user what to fix.
-          const note = document.createElement("div");
-          note.className = "cc-note";
-          note.textContent = "chart " + chartId + " failed";
-          body.appendChild(note);
-        }
-        // A failure has no readable preview in the head, so open it for the user.
-        if (data.is_error) setToolOpen(el, true);
-      }
+      ensureAssistant();
+      renderProcessEvent(event, state.activity.body);
+      const chartId = data.details?.chart_id;
+      // Charts remain next to the conclusion, never hidden in the process disclosure.
+      if (chartId && !data.is_error) void renderArtifactInto(state.assistantEl, chartId);
       break;
     }
     case "usage":
+      closeSegment();
       workbench.updateUsage(data);
       if (state.session?.agent && data.context_usage) state.session.agent.context_usage = data.context_usage;
       composer.update();
@@ -2119,22 +2091,23 @@ function handleEvent(event) {
       $("taskActivity").textContent = "";
       delete $("taskActivity").dataset.since;
       void workbench.refreshContext();
-      state.taskId = null;
+      ensureAssistant();
       closeSegment();
       const finalAnswer = typeof data.answer === "string" ? data.answer.trim() : "";
-      if (finalAnswer && finalAnswer !== state.lastSegmentText.trim()) {
-        ensureAssistant();
-        const node = document.createElement("div");
+      const trailingAnswer = finalAnswer && state.trailingText && state.lastSegmentText.trim() === finalAnswer;
+      if (finalAnswer) {
+        const node = trailingAnswer ? state.lastTextNode : document.createElement("div");
         node.className = "text final";
-        node.innerHTML = renderMarkdown(finalAnswer);
+        if (!trailingAnswer) node.innerHTML = renderMarkdown(finalAnswer);
         state.assistantEl.appendChild(node);
+        composer.setSource(state.assistantEl, finalAnswer);
       }
-      // Cards normally arrive with tool_finished; this covers a client that attached after the fact.
-      if (Array.isArray(data.artifacts) && data.artifacts.length) {
-        ensureAssistant();
+      if (Array.isArray(data.artifacts)) {
         for (const artifactId of data.artifacts) void renderArtifactInto(state.assistantEl, artifactId);
       }
-      if (finalAnswer) composer.setSource(state.assistantEl, finalAnswer);
+      if (data.error) state.assistantEl.appendChild(statusNote(data.error.code + ": " + data.error.message, "error"));
+      state.activity.finish(data, { answerOutside: Boolean(trailingAnswer) });
+      state.taskId = null;
       composer.update();
       if (follow) $("messages").scrollTop = $("messages").scrollHeight;
       const status = data.status || "finished";
@@ -2142,24 +2115,15 @@ function handleEvent(event) {
       $("taskPill").textContent = status;
       $("btnSend").disabled = !state.sessionReady;
       $("btnCancel").disabled = true;
-      if (data.error) {
-        ensureAssistant();
-        state.assistantEl.appendChild(statusNote(data.error.code + ": " + data.error.message, "error"));
-      }
       $("btnRefresh").click();
       break;
     }
-    case "retry": {
+    case "retry":
+    case "notice":
       ensureAssistant();
-      state.assistantEl.appendChild(statusNote("retry #" + data.attempt + ": " + data.error, "warn"));
+      closeSegment();
+      renderProcessEvent(event, state.activity.body);
       break;
-    }
-    case "notice": {
-      ensureAssistant();
-      const code = data.code + (data.max_turns ? " (max " + data.max_turns + " turns)" : "");
-      state.assistantEl.appendChild(statusNote(code + (data.text ? ": " + data.text : ""), "warn"));
-      break;
-    }
     default:
       break;
   }
@@ -2230,17 +2194,27 @@ function closeSegment() {
   if (state.textNode && state.segmentText.trim()) {
     renderSegment(state.textNode, state.segmentText, false);
     state.lastSegmentText = state.segmentText;
-  }
+    state.lastTextNode = state.textNode;
+    state.trailingText = true;
+  } else if (state.textNode) state.textNode.remove();
   state.textNode = null;
   state.segmentText = "";
 }
 
 function ensureAssistant() {
-  if (!state.assistantEl) state.assistantEl = addMessage("assistant");
+  if (!state.assistantEl) {
+    state.assistantEl = addMessage("assistant", { taskId: state.taskId });
+    state.activity = createTaskActivity(state.assistantEl, { task: { ...state.taskMeta, id: state.taskId, status: "running" } });
+  }
+  return state.assistantEl;
+}
+
+function ensureAssistantText() {
+  ensureAssistant();
   if (!state.textNode) {
     state.textNode = document.createElement("div");
     state.textNode.className = "text";
-    state.assistantEl.appendChild(state.textNode);
+    state.activity.body.appendChild(state.textNode);
     state.segmentText = "";
   }
   return state.textNode;
@@ -2688,6 +2662,8 @@ function clearTranscript() {
   state.textNode = null;
   state.segmentText = "";
   state.lastSegmentText = "";
+  state.activity = state.taskMeta = state.lastTextNode = null;
+  state.trailingText = false;
   $("messages").replaceChildren(welcome);
   $("btnCancel").disabled = true;
   $("taskPill").className = "pill";
@@ -2747,18 +2723,27 @@ function showSession(session, tasks) {
   for (const task of tasks) {
     if (task.id === session.current_task_id) continue;
     addMessage("user", { text: task.goal, taskId: task.id });
-    if (task.answer) addMessage("assistant", { text: task.answer }).innerHTML = renderMarkdown(task.answer);
-    if (task.error) addMessage("assistant").textContent = task.error.code + ": " + task.error.message;
-    if (task.artifacts?.length) {
-      const body = addMessage("assistant");
-      for (const artifactId of task.artifacts) void renderArtifactInto(body, artifactId);
+    const body = addMessage("assistant", { taskId: task.id, text: task.answer || "" });
+    body.replaceChildren();
+    if (task.activity?.messages || task.activity?.tool_calls) {
+      createTaskActivity(body, {
+        task, load: () => api("/v1/tasks/" + encodeURIComponent(task.id) + "/activity"),
+        onEvents: (events, host) => { for (const event of events) renderProcessEvent(event, host); },
+      });
     }
+    if (task.answer) {
+      const answer = document.createElement("div"); answer.className = "text final";
+      answer.innerHTML = renderMarkdown(task.answer); body.append(answer);
+    }
+    if (task.error) body.append(statusNote(task.error.code + ": " + task.error.message, "error"));
+    for (const artifactId of task.artifacts || []) void renderArtifactInto(body, artifactId);
   }
   state.taskId = session.current_task_id || null;
   applySession(session);
   $("taskPill").textContent = session.status;
   if (state.taskId) {
     const current = tasks.find((task) => task.id === state.taskId);
+    state.taskMeta = current || { id: state.taskId };
     if (current) addMessage("user", { text: current.goal, taskId: current.id });
     $("btnCancel").disabled = false;
     $("taskId").textContent = state.taskId;

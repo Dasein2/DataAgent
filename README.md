@@ -257,6 +257,16 @@ The console reconnects interrupted streams with `Last-Event-ID`, suppresses dupl
 task state between retries so a missed terminal event does not leave the controls stuck. Loading a
 historical session also resumes an active task's progress.
 
+Each question groups intermediate text, tool cards, retries and notices into one execution-process
+disclosure. Running tasks start expanded; completion (including cancellation/failure) collapses it.
+The final answer, charts and terminal error remain outside. The summary shows intermediate message
+count, distinct tool calls and wall-clock elapsed time, with retry/tool-error counts. SSE text deltas
+are not counted as separate messages and hidden reasoning is never included. Plain answers without
+intermediate content do not show an empty disclosure. Historical details load only when expanded via
+`GET /v1/tasks/:id/activity` (owner-authorized, compacted deltas); reopening the fold preserves its DOM.
+Old retained event histories receive optional summary metadata when first listed. Deleted or missing
+history cannot be reconstructed from the final answer alone.
+
 ## Agent tools
 
 21 tool definitions. The model’s toolset is selected once when creating or reconnecting a session:

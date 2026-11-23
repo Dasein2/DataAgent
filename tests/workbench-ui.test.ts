@@ -16,7 +16,7 @@ it("console and workbench modules parse, and chart downloads retain live authent
   const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script);
   new Script(script.replace(/^import[^\n]*;\s*$/gm, ""));
-  for (const file of ["charts.js", "explore.js", "workbench.js", "business-context.js", "catalog.js", "assets.js"]) {
+  for (const file of ["charts.js", "explore.js", "workbench.js", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js"]) {
     const source = await readFile(new URL("../web/" + file, import.meta.url), "utf8");
     new Script(source.replace(/^import[^\n]*;\s*$/gm, "").replace(/export (?=(?:async )?function)/g, ""));
   }

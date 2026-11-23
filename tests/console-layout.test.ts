@@ -113,7 +113,11 @@ function historyHarness() {
     state, sessionViewVersion: 0, pendingSessionId: null,
     $: (id: string) => elements[id],
     clearTranscript() { height = 0; scrollTop = 0; rendered.length = 0; state.taskId = null; },
-    addMessage(who: string, options: any = {}) { const body = { who, options }; rendered.push(body); height += 100; return body; },
+    document: { createElement: () => ({ className: "", innerHTML: "" }) },
+    addMessage(who: string, options: any = {}) {
+      const body = { who, options, innerHTML: "", replaceChildren() { this.innerHTML = ""; }, append(node: any) { this.innerHTML += node.innerHTML || ""; } };
+      rendered.push(body); height += 100; return body;
+    },
     renderMarkdown: (text: string) => text,
     applySession() {}, renderAssets() {}, streamTask() {},
     renderArtifactInto() { return Promise.resolve(); },

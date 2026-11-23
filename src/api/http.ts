@@ -379,7 +379,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   });
 
   app.get("/v1/sessions/:id/tasks", (req, res) => {
-    res.json({ tasks: service.history.listTasks(req.params.id, ownerOf(req)) });
+    res.json({ tasks: service.listTasksWithActivity(req.params.id, ownerOf(req)) });
   });
 
   app.delete("/v1/sessions/:id", async (req, res) => {
@@ -428,6 +428,10 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     if (!text) throw new AppError("INVALID_INPUT", "text is required");
     await session.steer(text);
     res.json({ ok: true });
+  });
+
+  app.get("/v1/tasks/:id/activity", (req, res) => {
+    res.json(service.taskActivity(req.params.id, ownerOf(req)));
   });
 
   app.get("/v1/tasks/:id/events", (req, res) => {
@@ -639,7 +643,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       () => res.status(404).end(),
     );
   });
-  for (const file of ["chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js"]) {
+  for (const file of ["chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js"]) {
     app.get("/" + file, (_req, res) => { void readFile(new URL(file, webRoot), "utf8").then(code => res.type(file.endsWith("css") ? "text/css" : "application/javascript").send(code), () => res.status(404).end()); });
   }
   // Vendored ECharts: served from this origin so the console needs no CDN and no build step.

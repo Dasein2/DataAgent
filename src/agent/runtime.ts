@@ -19,6 +19,7 @@ import { createDatabaseTools, selectTools, toolCatalog, type ToolInfo, type Tool
 import { EventBroker, type TaskEvent } from "./events.js";
 import type { ModelHandle } from "./model.js";
 import type { HistoryStore } from "./history.js";
+import { taskActivity, type ActivitySummary } from "./task-activity.js";
 import { generateSessionTitle, type GeneratedSessionTitle } from "./session-title.js";
 import { businessContextPrompt, contextSummary } from "../business-context/store.js";
 import type { BusinessContextFile } from "../business-context/types.js";
@@ -51,6 +52,8 @@ export interface TaskRecord {
   artifacts?: string[];
   /** Last non-empty assistant message; the report a polling client can read without SSE. */
   answer?: string;
+  /** UI execution-process summary; optional for older saved tasks. */
+  activity?: ActivitySummary;
 }
 
 interface QueueItem {
@@ -499,6 +502,7 @@ export class AnalysisSession {
   }
 
   private finishTask(task: TaskRecord, durationMs?: number): void {
+    task.activity = taskActivity(task, this.history?.listEvents(task.id) ?? this.broker.list(task.id)).summary;
     this.saveTask(task);
     this.broker.publish(task.id, "task_finished", {
       status: task.status,
@@ -507,6 +511,7 @@ export class AnalysisSession {
       answer: task.answer ?? "",
       error: task.error ?? null,
       duration_ms: durationMs,
+      activity: task.activity,
       turns: task.turns,
       usage: task.usage,
       results: task.results,
