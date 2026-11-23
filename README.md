@@ -343,6 +343,35 @@ host, port, database, user, environment and workspace must match the original se
 restores conversation context and dataset registry; it opens a fresh database connection and resets
 its query budget. Interrupted SQL and tasks are never replayed automatically.
 
+### Connection-level SQL timeout
+
+In the connection dialog, **单条 SQL 超时** defaults to **自动**. **手动设置** accepts
+1–3600 seconds (API: `connection.queryTimeoutMs`, 1000–3600000 ms). Save the profile,
+then create/reconnect a session; a running session keeps its original policy. Credentials
+are preserved when editing only this setting on a saved profile. Test Connection and session
+details expose the effective value, detected server setting, fallback source and any caps.
+
+Auto mode reads the actual session setting at connect time: PostgreSQL `statement_timeout`
+(milliseconds / PostgreSQL units), MySQL `max_execution_time` (ms), Doris/StarRocks
+`query_timeout` (seconds). Probes read settings only: no performance benchmark, source scan,
+server/global setting changes, or automatic retry with a larger timeout. Unsupported settings,
+permission failures and malformed values are shown as `unavailable`, not invented defaults.
+A detected zero means no server limit, not unlimited agent execution. In those cases, auto
+mode falls back to 300 s for Doris/StarRocks and `DATA_AGENT_QUERY_TIMEOUT_MS` (default 60 s)
+for PostgreSQL/MySQL. These are safety defaults, not a claim about database capacity.
+
+The effective limit is the minimum of the selected/auto value, a detected positive server
+limit, `DATA_AGENT_MAX_QUERY_TIMEOUT_MS` (default 600000 ms), and the task wall-clock limit
+(`DATA_AGENT_TASK_TIMEOUT_MS`, default 900000 ms). The task may have less time remaining
+when a query starts. PostgreSQL per-statement settings never increase the detected role/session
+limit. Preflight remains bounded to at most 5 s; metadata has its own bounded operations.
+
+For a saved-profile request, top-level `queryTimeoutMs: <milliseconds>` overrides only this
+policy for testing/connecting/saving; `queryTimeoutMs: null` restores auto mode. Omit the field
+to retain the profile policy. The SQL/model tools cannot increase the limit. Reconnect to
+re-read settings after a DBA changes them. A larger limit does **not** fix missing partition
+filters, server overload or slow SQL.
+
 Doris/StarRocks cancellation uses `KILL <connection id>`. Cancellation, query timeout and result
 truncation can therefore make the session `unavailable`; subsequent database work is refused with
 `SESSION_UNAVAILABLE`. Read saved results, then use **恢复分析** (or create a new session) to continue.

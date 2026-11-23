@@ -506,6 +506,11 @@
         <div><label for="profileName">连接名称</label><input id="profileName" maxlength="60" placeholder="例如 analytics" /></div>
         <div><label for="profileGroup">分组</label><input id="profileGroup" maxlength="60" placeholder="未分组" list="profileGroups" /><datalist id="profileGroups"></datalist></div>
       </div>
+      <div class="row">
+        <div><label for="queryTimeoutMode">单条 SQL 超时</label><select id="queryTimeoutMode"><option value="auto">自动 · 根据数据库连接</option><option value="manual">手动设置</option></select></div>
+        <div id="queryTimeoutSecondsField" hidden><label for="queryTimeoutSeconds">超时秒数</label><input id="queryTimeoutSeconds" type="number" min="1" max="3600" step="1" value="300" /></div>
+      </div>
+      <div class="hint">自动读取数据库会话超时；未设置或探测不可用时，Doris / StarRocks 默认 300 秒，其他引擎使用平台默认。最终受服务端设置、平台硬上限及任务时限约束；测试连接可查看实际值。修改后需新建或重连会话。</div>
       <label class="checkbox-label" id="legacyProfileOptIn">
         <input id="profileRememberPassword" type="checkbox" />
         连同密码一起保存
@@ -1030,6 +1035,11 @@ function connectionPayload() {
     password: $("password").value,
     environment: $("environment").value,
   };
+  if ($("queryTimeoutMode").value === "manual") {
+    const seconds = Number($("queryTimeoutSeconds").value);
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) throw new Error("SQL 超时请输入 1–3600 的整数秒数");
+    conn.queryTimeoutMs = seconds * 1000;
+  }
   const ws = $("workspace").value.trim();
   if (ws) conn.workspace = { name: ws };
   if ($("allowWeakReadOnly").checked) conn.allowWeakReadOnly = true;
@@ -1100,7 +1110,7 @@ async function refreshProfiles(version) {
 function connectionRequest() {
   const connection = connectionPayload();
   if (!state.selectedProfile) return { connection };
-  return { profile: state.selectedProfile, credentials: {
+  return { profile: state.selectedProfile, queryTimeoutMs: connection.queryTimeoutMs ?? null, credentials: {
     password: connection.password,
     ssh: ((connection.ssh && connection.ssh.hops) || []).map((hop) => hop.auth),
   } };
@@ -1160,6 +1170,10 @@ $("connectionDialog").addEventListener("close", () => {
   if (openSelect) closeSelectMenu(true);
 });
 
+$("queryTimeoutMode").onchange = () => {
+  $("queryTimeoutSecondsField").hidden = $("queryTimeoutMode").value !== "manual";
+};
+
 function applyProfile(profile) {
   if (!profile) return;
   state.selectedProfile = profile.localOnly ? null : profile.name;
@@ -1174,6 +1188,9 @@ function applyProfile(profile) {
   $("user").value = profile.user || "";
   $("password").value = profile.password || "";
   $("environment").value = profile.environment === "non_production" ? "non_production" : "production";
+  $("queryTimeoutMode").value = profile.queryTimeoutMs == null ? "auto" : "manual";
+  $("queryTimeoutSeconds").value = profile.queryTimeoutMs == null ? 300 : profile.queryTimeoutMs / 1000;
+  $("queryTimeoutSecondsField").hidden = profile.queryTimeoutMs == null;
   $("workspace").value = (profile.workspace && profile.workspace.name) || "";
   const weak = $("weakReadOnlyWrap").style.display !== "none";
   $("allowWeakReadOnly").checked = weak && Boolean(profile.allowWeakReadOnly);
@@ -1552,6 +1569,7 @@ $("btnTest").onclick = async () => {
       "source=" + caps.sourceAccess + " proof=" + caps.readOnlyProof + " workspace=" + (caps.workspaceName || "none") + " (" + caps.workspaceAccess + ")",
       caps.workspaceNote ? "note=" + caps.workspaceNote : "",
       (caps.notes || []).length ? "notes=" + caps.notes.join(" | ") : "",
+      caps.queryTimeout ? "SQL 超时=" + (caps.queryTimeout.effectiveMs / 1000) + "秒 · " + (caps.queryTimeout.mode === "auto" ? "自动" : "手动") + " · 来源=" + caps.queryTimeout.source + " · 数据库探测=" + caps.queryTimeout.server.status + (caps.queryTimeout.clampedBy.length ? " · 限制=" + caps.queryTimeout.clampedBy.join(", ") : "") : "",
       "scopes=" + (result.scopes || []).slice(0, 8).join(", "),
     ].filter(Boolean).join("\n"), "ok");
   } catch (error) {
@@ -1615,6 +1633,7 @@ function applySession(session) {
     ["environment", session.environment],
     ["source", caps.sourceAccess + " (" + (caps.readOnlyProof || "unknown") + ")"],
     ["version", caps.serverVersion || "unknown"],
+    ["SQL timeout", caps.queryTimeout ? (caps.queryTimeout.effectiveMs / 1000) + "s (" + caps.queryTimeout.mode + ", " + caps.queryTimeout.source + "; server=" + caps.queryTimeout.server.status + (caps.queryTimeout.clampedBy.length ? "; capped=" + caps.queryTimeout.clampedBy.join(",") : "") + ")" : "—"],
     ["workspace", (caps.workspaceName || "none") + " / " + (caps.workspaceAccess || "")],
     ["queries", (session.queries ? session.queries.used : 0) + " / " + (session.queries ? session.queries.limit : "—")],
     ["datasets", String(session.datasets ?? 0)],

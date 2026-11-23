@@ -159,7 +159,12 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   const requestConnection = (req: Request): ConnectionConfig => {
     if (typeof req.body?.profile === "string") {
       const stored = service.profiles.reveal(ownerOf(req), req.body.profile);
-      // Only credential overrides are accepted; changing the target requires saving a new profile.
+      // Credentials + timeout policy may change; the saved database target stays fixed.
+      // null explicitly restores auto mode, including when saving an existing manual profile.
+      if (Object.hasOwn(req.body, "queryTimeoutMs")) {
+        if (req.body.queryTimeoutMs === null) delete stored.queryTimeoutMs;
+        else stored.queryTimeoutMs = ConnectionConfig.shape.queryTimeoutMs.parse(req.body.queryTimeoutMs);
+      }
       const overrides = req.body?.credentials ?? {};
       if (typeof overrides.password === "string" && overrides.password) stored.password = overrides.password;
       const ssh = stored.ssh as { hops: Array<{ auth: Record<string, unknown> }> } | undefined;
@@ -287,6 +292,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
         max_queries: config.budgets.maxQueries,
         task_timeout_ms: config.budgets.taskTimeoutMs,
         query_timeout_ms: config.budgets.queryTimeoutMs,
+        max_query_timeout_ms: config.budgets.maxQueryTimeoutMs ?? 600_000,
         preview_rows: config.budgets.previewRows,
         cell_chars: config.budgets.cellChars,
         max_datasets: config.budgets.maxDatasets,

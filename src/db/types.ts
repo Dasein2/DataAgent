@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { BusinessContextIds } from "../business-context/types.js";
+import type { QueryTimeoutPolicy } from "./query-timeout.js";
 
 export const EngineKind = z.enum(["postgres", "mysql", "doris", "starrocks"]);
 export type EngineKind = z.infer<typeof EngineKind>;
@@ -57,6 +58,8 @@ export const ConnectionConfig = z.object({
    * explicitly accepts service-only enforcement here.
    */
   allowWeakReadOnly: z.boolean().default(false),
+  /** Omitted = auto (server setting / engine fallback). Never disables platform/task caps. */
+  queryTimeoutMs: z.number().int().min(1_000).max(3_600_000).optional(),
   workspace: WorkspaceConfig.optional(),
   label: z.string().max(120).optional(),
   timezone: z.string().max(80).refine(v => { try { new Intl.DateTimeFormat("en", { timeZone: v }); return true; } catch { return false; } }, "Invalid IANA timezone").optional(),
@@ -85,6 +88,8 @@ export interface SessionCapabilities {
   /** Anything the operator should know: degraded capabilities, engine mismatch, weak read-only. */
   notes: string[];
   sourceAccess: "read_only";
+  /** Effective connection-level SQL limit and its connect-time evidence. */
+  queryTimeout?: QueryTimeoutPolicy;
   timezone?: string;
   timezoneNote?: string;
   workspaceAccess: WorkspaceAccess;

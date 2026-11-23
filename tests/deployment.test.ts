@@ -22,6 +22,8 @@ const CONFIG_ENV = [
   "DATA_AGENT_TRUST_PROXY",
   "DATA_AGENT_RETENTION_DAYS",
   "DATA_AGENT_PI_IMPORT",
+  "DATA_AGENT_QUERY_TIMEOUT_MS",
+  "DATA_AGENT_MAX_QUERY_TIMEOUT_MS",
   "DATA_AGENT_MODEL_PROVIDER",
   "DATA_AGENT_MODEL_ID",
 ];
@@ -74,6 +76,20 @@ test("production retention defaults to 30 days and stays explicitly disableable"
   });
   await withConfigEnv({ NODE_ENV: "development" }, async () => {
     assert.equal(loadConfig().analysis?.retentionDays, 0);
+  });
+});
+
+test("SQL timeout fallback and hard ceiling are separately configurable", async () => {
+  await withConfigEnv({ NODE_ENV: "development" }, async () => {
+    assert.equal(loadConfig().budgets.queryTimeoutMs, 60_000);
+    assert.equal(loadConfig().budgets.maxQueryTimeoutMs, 600_000);
+  });
+  await withConfigEnv({ NODE_ENV: "development", DATA_AGENT_QUERY_TIMEOUT_MS: "30000", DATA_AGENT_MAX_QUERY_TIMEOUT_MS: "180000" }, async () => {
+    assert.equal(loadConfig().budgets.queryTimeoutMs, 30_000);
+    assert.equal(loadConfig().budgets.maxQueryTimeoutMs, 180_000);
+  });
+  await withConfigEnv({ NODE_ENV: "development", DATA_AGENT_MAX_QUERY_TIMEOUT_MS: "0" }, async () => {
+    assert.throws(() => loadConfig(), /positive/);
   });
 });
 

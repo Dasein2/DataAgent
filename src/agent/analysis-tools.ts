@@ -169,6 +169,8 @@ export function recoveryHint(error: unknown): string {
   if (!(error instanceof AppError))
     return "Narrow the request and inspect session capabilities; do not repeat the same failing call.";
   switch (error.code) {
+    case "QUERY_TIMEOUT":
+      return "The connection SQL time limit was reached. Do not widen/repeat the scan. Check session_info; if unavailable, stop and request reconnect. Otherwise inspect partition filters/plan or summarize saved evidence. Timeout changes require connection settings, not SQL.";
     case "QUERY_COST_EXCEEDED":
       return "Add selective WHERE/partition filters or use a read replica. LIMIT does not reduce all scan costs.";
     case "QUERY_BUDGET_EXCEEDED":

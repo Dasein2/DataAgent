@@ -33,6 +33,8 @@ import {
 } from "./base.js";
 import { getProfile, versionMismatchNote, type EngineProfile, type ReadOnlyProof } from "./profiles.js";
 
+import { parseServerQueryTimeout, timeoutVariable, type ServerQueryTimeout } from "../query-timeout.js";
+
 const TYPE_NAMES = new Map<number, string>(
   Object.entries(mysql.Types as unknown as Record<string, number>).map(([name, id]) => [id, name]),
 );
@@ -51,6 +53,7 @@ export class MysqlEngine implements Engine {
   private serverVersion = "";
   private readonly notes: string[] = [];
   private grantsChecked = false;
+  private serverTimeout?: ServerQueryTimeout;
   unavailableReason?: string;
   private cancelling?: Promise<boolean>;
   /** MySQL-only DDL fragments; Doris/StarRocks reject them. */
@@ -68,6 +71,10 @@ export class MysqlEngine implements Engine {
 
   readOnlyStatus(): ReadOnlyStatus {
     return { proof: this.proof, serverVersion: this.serverVersion, notes: [...this.notes] };
+  }
+
+  queryTimeoutStatus(): ServerQueryTimeout {
+    return this.serverTimeout ? { ...this.serverTimeout } : { status: "unavailable", variable: timeoutVariable(this.profile.id) };
   }
 
   quoteIdent(name: string): string {
@@ -125,6 +132,19 @@ export class MysqlEngine implements Engine {
     this.connection = await this.newConnection(stream);
     await this.probeVersion();
     await this.beginReadOnly();
+    await this.probeQueryTimeout();
+  }
+
+  private async probeQueryTimeout(): Promise<void> {
+    const variable = timeoutVariable(this.profile.id);
+    try {
+      // SHOW is bounded, session-scoped, read-only and does not touch business tables.
+      const { rows } = await this.buffered(`SHOW SESSION VARIABLES LIKE '${variable}'`, 5_000);
+      const row = rows.find((r) => String(r[0]).toLowerCase() === variable);
+      this.serverTimeout = parseServerQueryTimeout(this.profile.id, row?.[1]);
+    } catch {
+      this.serverTimeout = { status: "unavailable", variable };
+    }
   }
 
   private async probeVersion(): Promise<void> {

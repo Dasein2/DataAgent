@@ -15,6 +15,7 @@ import { createEngine } from "./engines/index.js";
 import type { Engine, ObjectFilter, QueryStats } from "./engines/base.js";
 import { describeEngine, getProfile, type EngineProfile } from "./engines/profiles.js";
 import { guardSql, type GuardResult } from "./guard.js";
+import { resolveQueryTimeout } from "./query-timeout.js";
 import type {
   ConnectionConfig,
   ObjectDescription,
@@ -186,6 +187,7 @@ export class DbSession {
       readOnlyProof: readOnly.proof,
       notes: readOnly.notes,
       sourceAccess: "read_only",
+      queryTimeout: resolveQueryTimeout(this.config, this.app.budgets, this.engine.queryTimeoutStatus?.()),
       timezone: this.config.timezone,
       timezoneNote:
         "Timezone is an analysis intent, not a database session override. Use explicit SQL timezone conversion; verify source timestamps and watermarks.",
@@ -211,6 +213,14 @@ export class DbSession {
 
   get capabilitiesView(): SessionCapabilities {
     return this.capabilities;
+  }
+
+  /** Per-call limits may shorten, never extend the connection policy. */
+  private queryTimeoutMs(requested?: number): number {
+    if (requested !== undefined && (!Number.isFinite(requested) || requested <= 0))
+      throw new AppError("INVALID_INPUT", "Query timeout must be a positive finite number");
+    const policy = this.capabilities?.queryTimeout ?? resolveQueryTimeout(this.config, this.app.budgets);
+    return Math.max(1, Math.floor(Math.min(requested ?? policy.effectiveMs, policy.effectiveMs)));
   }
 
   /** Declared capability table for this session's engine (data, not code). */
@@ -308,6 +318,7 @@ export class DbSession {
     return this.run(() =>
       this.results.serializeWrite(this.id, async () => {
         const guard = this.guard(sql);
+        const timeoutMs = this.queryTimeoutMs(options.timeoutMs);
         if (guard.kind === "explain")
           throw new AppError(
             "INVALID_INPUT",
@@ -351,10 +362,6 @@ export class DbSession {
           taskId: options.taskId,
           label: options.label,
         });
-        const timeoutMs = Math.min(
-          options.timeoutMs ?? this.app.budgets.queryTimeoutMs,
-          this.app.budgets.queryTimeoutMs,
-        );
         const controller = new AbortController();
         const state = { controller, cancelled: false };
         this.activeQuery = state;
@@ -481,10 +488,7 @@ export class DbSession {
         if (!this.capabilities.features.explain || (options.analyze && !this.capabilities.features.explainAnalyze))
           throw new AppError("FEATURE_UNSUPPORTED", "Requested plan capability is unavailable on this engine");
         this.queryCount += 1;
-        const timeoutMs = Math.min(
-          options.timeoutMs ?? this.app.budgets.queryTimeoutMs,
-          this.app.budgets.queryTimeoutMs,
-        );
+        const timeoutMs = this.queryTimeoutMs(options.timeoutMs);
         const plan = await this.planDirect(sql, timeoutMs, options.analyze, options.signal);
         const settings = analysisOptions(this.app);
         const usage = (await this.results.listBySession(this.id)).reduce((sum, r) => sum + r.bytes, 0);
@@ -642,7 +646,7 @@ export class DbSession {
         described.object.schema,
         name,
         Math.max(1, Math.min(200, sampleRows)),
-        timeoutMs ?? this.app.budgets.queryTimeoutMs,
+        this.queryTimeoutMs(timeoutMs),
         method,
       );
       await this.audit({
@@ -936,7 +940,7 @@ export class DbSession {
     this.assertQueryBudget();
     this.queryCount++;
     try {
-      const plan = await this.planDirect(sql, Math.min(5000, this.app.budgets.queryTimeoutMs), false, signal);
+      const plan = await this.planDirect(sql, this.queryTimeoutMs(5000), false, signal);
       const unknown = plan.estimatedScanRows == null && plan.estimatedCost == null;
       const blocked =
         (plan.estimatedScanRows ?? 0) > settings.maxEstimatedScanRows ||

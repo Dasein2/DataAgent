@@ -104,6 +104,16 @@ test("account cookies isolate profiles and history, and saved credentials suppor
       assert.ok(!store.includes(secret) && !JSON.stringify(saved).includes(secret));
     }
     assert.ok(!store.includes(connection.host));
+    // Changing timeout on a saved profile must not discard encrypted credentials or change target.
+    const manual = (await call(profilePath, 200, { cookie: admin, method: "PUT", body: { profile: "analytics", queryTimeoutMs: 180_000 } })).data.profile;
+    assert.equal(manual.config.queryTimeoutMs, 180_000);
+    assert.equal(manual.hasSecret, true);
+    const adminOwner = service!.accounts!.authenticate(admin.split("=")[1]!)!.ownerKey;
+    assert.deepEqual(service!.profiles.connectionById(adminOwner, manual.id), { ...connection, queryTimeoutMs: 180_000 });
+    await call(profilePath, 400, { cookie: admin, method: "PUT", body: { profile: "analytics", queryTimeoutMs: 0 } });
+    const automatic = (await call(profilePath, 200, { cookie: admin, method: "PUT", body: { profile: "analytics", queryTimeoutMs: null } })).data.profile;
+    assert.equal(automatic.config.queryTimeoutMs, undefined);
+    assert.deepEqual(service!.profiles.connectionById(adminOwner, automatic.id), connection);
     const db = await readFile(join(config.dataDir, "accounts.db"));
     assert.ok(!db.includes(config.adminPassword!));
     assert.ok(!db.includes(admin.split("=")[1]!));

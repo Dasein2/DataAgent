@@ -208,6 +208,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
           `session_id=${snapshot.session_id}`,
           `engine=${snapshot.engine} (${capabilities.engineLabel}) environment=${snapshot.environment} database=${snapshot.database}`,
           `server_version=${capabilities.serverVersion || "unknown"}`,
+          ...(capabilities.queryTimeout ? [`query_timeout=${JSON.stringify(capabilities.queryTimeout)}`] : []),
           `source_access=${capabilities.sourceAccess} read_only_proof=${capabilities.readOnlyProof}`,
           `timezone=${capabilities.timezone ?? "unspecified"} ${capabilities.timezoneNote ?? ""}`,
           `features=${Object.entries(capabilities.features)
@@ -222,6 +223,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
         return textOutput(text, {
           session_id: snapshot.session_id,
           engine: snapshot.engine,
+          query_timeout: capabilities.queryTimeout,
           environment: snapshot.environment,
           capabilities,
           queries: snapshot.queries,

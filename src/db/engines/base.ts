@@ -7,6 +7,7 @@ import type {
   ProfileResult,
 } from "../types.js";
 import type { EngineProfile, ReadOnlyProof } from "./profiles.js";
+import type { ServerQueryTimeout } from "../query-timeout.js";
 
 export interface ColumnMeta {
   name: string;
@@ -155,6 +156,8 @@ export interface Engine {
   readonly cancelSupported: boolean;
   /** How read-only access was proven for this connection plus anything degraded. */
   readOnlyStatus(): ReadOnlyStatus;
+  /** Captured during connect, before any application timeout override. No source scan. */
+  queryTimeoutStatus?(): ServerQueryTimeout;
   connect(): Promise<void>;
   close(): Promise<void>;
   /** Runs one guarded statement inside the pinned read-only transaction. */

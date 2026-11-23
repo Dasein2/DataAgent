@@ -1,5 +1,6 @@
 import pg from "pg";
 import QueryStream from "pg-query-stream";
+import { parseServerQueryTimeout, type ServerQueryTimeout } from "../query-timeout.js";
 import type {
   ColumnInfo,
   ConnectionConfig,
@@ -56,6 +57,7 @@ export class PostgresEngine implements Engine {
   private serverVersion = 0;
   private versionText = "";
   private readonly notes: string[] = [];
+  private serverTimeout: ServerQueryTimeout = { status: "unavailable", variable: "statement_timeout" };
   /** Backend PID captured while the connection is idle; needed to cancel a running query. */
   private backendPid = 0;
   /**
@@ -79,6 +81,10 @@ export class PostgresEngine implements Engine {
 
   readOnlyStatus(): ReadOnlyStatus {
     return { proof: "transaction", serverVersion: this.versionText, notes: [...this.notes] };
+  }
+
+  queryTimeoutStatus(): ServerQueryTimeout {
+    return { ...this.serverTimeout };
   }
 
   quoteIdent(name: string): string {
@@ -138,7 +144,14 @@ export class PostgresEngine implements Engine {
     this.versionText = String((versionText as unknown as Array<[string]>) [0]?.[0] ?? "");
     const mismatch = versionMismatchNote(this.profile.id, this.versionText);
     if (mismatch) this.notes.push(mismatch);
-    await this.client.query("SET statement_timeout = 0");
+    try {
+      const probe = { text: "SHOW statement_timeout", query_timeout: 5_000 };
+      const result = await this.client.query(probe);
+      this.serverTimeout = parseServerQueryTimeout("postgres", result.rows[0]?.statement_timeout);
+    } catch {
+      // Missing permission/unsupported setting: policy falls back without leaking error details.
+    }
+    // Keep the role/session limit intact. Per-statement SET LOCAL uses the resolved policy.
     await this.beginReadOnly();
   }
 
@@ -198,9 +211,13 @@ export class PostgresEngine implements Engine {
     return this.client;
   }
 
+  private statementTimeoutMs(requested: number): number {
+    return Math.max(1, Math.floor(Math.min(requested, this.serverTimeout.status === "detected" ? this.serverTimeout.timeoutMs! : Infinity)));
+  }
+
   private async buffered(sql: string, timeoutMs: number): Promise<{ fields: ColumnMeta[]; rows: unknown[][] }> {
     const raw = await this.readOnlyTransaction(async (client) => {
-      await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
+      await client.query(`SET LOCAL statement_timeout = ${this.statementTimeoutMs(timeoutMs)}`);
       return (await client.query({ text: sql, values: [], rowMode: "array" })) as unknown as {
         fields?: FieldDescription[];
         rows: unknown[][];
@@ -219,7 +236,7 @@ export class PostgresEngine implements Engine {
     await client.query("BEGIN TRANSACTION READ ONLY");
     const started = Date.now();
     try {
-      await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(limits.timeoutMs))}`);
+      await client.query(`SET LOCAL statement_timeout = ${this.statementTimeoutMs(limits.timeoutMs)}`);
       return await this.streamRows(client, sql, limits, sink, started);
     } finally {
       // A read-only transaction has nothing to persist, so ROLLBACK is equivalent to COMMIT — and it

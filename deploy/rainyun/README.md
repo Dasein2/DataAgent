@@ -79,6 +79,12 @@ to protect the other host services. Enable this only after reviewing the intende
 Model editing is enabled for the administrator so the first channel can be configured; ordinary
 accounts cannot edit global channels.
 
+Connection-level SQL timeouts are configured in **数据库连接 → 单条 SQL 超时**. Auto
+mode reads the connected server session limit, with a 300-second Doris/StarRocks fallback.
+`DATA_AGENT_MAX_QUERY_TIMEOUT_MS=600000` is the operator hard ceiling, not a reason to
+raise every query to ten minutes. Keep the task wall-clock budget enabled. New/reconnected
+sessions pick up the policy; existing sessions do not change in place.
+
 Before an upgrade, save `.env.prod`, back up `data-agent-v1_data`, record the existing image ID,
 and read schema changes. Build the new commit under limits, update `DATA_AGENT_REVISION`, then
 recreate only `data-agent`. Rollback requires the recorded image and, if schema/data changed,

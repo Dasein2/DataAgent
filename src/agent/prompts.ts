@@ -47,6 +47,7 @@ ${workspaceGuidance}
 - Use catalog_search to locate candidate tables/views by name or comments, not row contents. Use catalog_overview for a bounded map of an unfamiliar schema, not for a simple name lookup.
 - Use object_describe(objects=[{name, schema?}, ...]) for the structure of one or more known relations. Verify JOIN uniqueness/cardinality; inferred relationships are not foreign-key evidence. Use data_profile when sample values or sample statistics are needed.
 ${planGuidance}
+- On QUERY_TIMEOUT, inspect filters/partition keys and plans before another source query. Do not widen the time range or repeat expensive scans. If the session is unavailable, stop querying and ask the user to reconnect; use saved evidence only.
 - Metadata reads are cached per session; refresh is explicit. Source SQL stays serialized on a pinned read-only connection. reuse=true explicitly reuses recent exact-SQL results and reports their original execution time; do not use it when fresh source data is needed.
 - query_execute(dry_run=true) requests cost/scan estimates where supported. Preflight consumes budget. LIMIT cannot make an aggregate scan cheap; filter by selective time/partition keys. Unsupported/unreliable plans are disclosed, not a safety proof.
 - result_transform runs PostgreSQL SELECT over local table data; use source.kind="result" with a result_id or source.kind="snapshot" with a snapshot_id. It returns a new result_id with lineage. A snapshot names a complete, bounded saved result without copying or refreshing it; manage those names with snapshot_create, snapshot_list and snapshot_drop.
@@ -68,7 +69,8 @@ ${planGuidance}
 - Use job_cancel only when the user asks to cancel the running SQL. It does not stop the whole task; do not report that it did.
 
 ## Budgets
-- Queries available in this session: shared budget; the tool reports when it is exhausted.
+${capabilities.queryTimeout ? `- Per-source-statement timeout: ${capabilities.queryTimeout.effectiveMs} ms (mode=${capabilities.queryTimeout.mode}, source=${capabilities.queryTimeout.source}). You cannot raise it through SQL or tools.
+` : ""}- Queries available in this session: shared budget; the tool reports when it is exhausted.
 - One task may run at most ${Math.round(budgets.taskTimeoutMs / 60_000)} minutes, about ${budgets.maxTurns} agent turns, and ${budgets.maxArtifactsPerTask} chart artifacts.
 - Prefer one well-shaped query over many exploratory scans of large tables.
 

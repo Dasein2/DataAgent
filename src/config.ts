@@ -34,7 +34,10 @@ export interface BudgetConfig {
   maxTurns: number;
   maxQueries: number;
   taskTimeoutMs: number;
+  /** Auto-mode fallback for PostgreSQL/MySQL when no server limit is available. */
   queryTimeoutMs: number;
+  /** Absolute SQL timeout cap for every connection, including manual overrides. */
+  maxQueryTimeoutMs?: number;
   maxResultRows: number;
   previewRows: number;
   cellChars: number;
@@ -256,6 +259,7 @@ export function loadConfig(): AppConfig {
       maxQueries: num("DATA_AGENT_MAX_QUERIES", 60),
       taskTimeoutMs: num("DATA_AGENT_TASK_TIMEOUT_MS", 15 * 60 * 1000),
       queryTimeoutMs: num("DATA_AGENT_QUERY_TIMEOUT_MS", 60 * 1000),
+      maxQueryTimeoutMs: num("DATA_AGENT_MAX_QUERY_TIMEOUT_MS", 10 * 60 * 1000),
       maxResultRows: num("DATA_AGENT_MAX_RESULT_ROWS", 1_000_000),
       previewRows: num("DATA_AGENT_PREVIEW_ROWS", 30),
       cellChars: num("DATA_AGENT_CELL_CHARS", 200),
