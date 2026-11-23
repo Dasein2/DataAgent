@@ -1,0 +1,48 @@
+# RainYun 2-vCPU / 4-GB host: keep the existing Caddy and application untouched.
+# Run from the repository root:
+# docker compose --env-file .env.prod -p data-agent-v1 -f deploy/rainyun/compose.yml up -d --build
+# This intentionally uses the host network with a LOOPBACK-ONLY listener. The dedicated host's
+# Docker daemon has bridge/iptables/IP forwarding disabled, so installation adds no firewall rules.
+# Do not change DATA_AGENT_HOST to 0.0.0.0 or publish this plaintext port on the internet.
+services:
+  data-agent:
+    image: data-agent:v1.0-${DATA_AGENT_REVISION:-local}
+    build:
+      context: ../..
+      network: host
+    env_file: ../../.env.prod
+    environment:
+      NODE_ENV: production
+      DATA_AGENT_DATA_DIR: /data
+      DATA_AGENT_HOST: 127.0.0.1
+      DATA_AGENT_PORT: "8787"
+    network_mode: host
+    volumes:
+      - data:/data
+    user: node
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    cpus: "1.25"
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+volumes:
+  data:
