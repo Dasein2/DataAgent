@@ -29,6 +29,17 @@ Resource limits reduce interference; they cannot guarantee zero latency impact o
 cd /opt/data-agent-v1
 # .env.prod contains NODE_ENV=production, account auth, a stable profile secret, and budgets.
 # DATA_AGENT_REVISION is the checked-out short Git revision.
+# Initial build / later rebuild, after the documented slice has been installed:
+REV=$(git rev-parse --short HEAD)
+sudo systemd-run --wait --collect --unit=data-agent-v1-build-$(date +%s) \
+  --property=CPUQuota=75% --property=MemoryMax=1536M --property=MemorySwapMax=0 \
+  --property=Nice=10 --setenv=DOCKER_BUILDKIT=0 \
+  --working-directory=/opt/data-agent-v1 \
+  /usr/bin/docker build --network=host --cgroup-parent=data-agent-build.slice \
+  --memory=1536m --memory-swap=1536m --cpu-period=100000 --cpu-quota=75000 \
+  --label=org.opencontainers.image.revision=$(git rev-parse HEAD) \
+  -t data-agent:v1.0-$REV .
+# Set DATA_AGENT_REVISION=$REV in .env.prod before starting the matching image.
 docker compose --env-file .env.prod -p data-agent-v1 -f deploy/rainyun/compose.yml up -d --no-build
 docker compose --env-file .env.prod -p data-agent-v1 -f deploy/rainyun/compose.yml ps
 curl -fsS http://127.0.0.1:8787/healthz

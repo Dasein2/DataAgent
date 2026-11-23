@@ -1,6 +1,7 @@
 # RainYun 2-vCPU / 4-GB host: keep the existing Caddy and application untouched.
 # Run from the repository root:
-# docker compose --env-file .env.prod -p data-agent-v1 -f deploy/rainyun/compose.yml up -d --build
+# Build with the constrained command documented in README.md, then:
+# docker compose --env-file .env.prod -p data-agent-v1 -f deploy/rainyun/compose.yml up -d --no-build
 # This intentionally uses the host network with a LOOPBACK-ONLY listener. The dedicated host's
 # Docker daemon has bridge/iptables/IP forwarding disabled, so installation adds no firewall rules.
 # Do not change DATA_AGENT_HOST to 0.0.0.0 or publish this plaintext port on the internet.
