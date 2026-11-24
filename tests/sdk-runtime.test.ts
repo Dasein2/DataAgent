@@ -8,6 +8,10 @@ import { ConnectionConfig, type SessionCapabilities } from "../src/db/types.js";
 import { getProfile, describeEngine } from "../src/db/engines/profiles.js";
 import { AnalysisService } from "../src/agent/service.js";
 import { createHttpApp } from "../src/api/http.js";
+import { DorisEngine } from "../src/db/engines/mysql.js";
+import { TtlCache } from "../src/analysis/cache.js";
+import { MetadataPool } from "../src/analysis/pool.js";
+import { SOURCE_TOOLS } from "../src/agent/tools.js";
 import { cleanup, testConfig, until } from "./support.js";
 
 const connection = ConnectionConfig.parse({ engine: "postgres", host: "fixture.test", port: 5432, database: "fixture", user: "analyst", password: "never-persist-this-password" });
@@ -27,10 +31,121 @@ function stubDatabase() {
       expiresAt: new Date(Date.now() + 60_000), touch() {},
       snapshot: () => ({ session_id: id, database: "fixture", status: closed ? "closed" : "ready", capabilities, queries: { used: 0, limit: 60 } }),
       close: async () => { closed = true; }, cancel: async () => true, listResults: async () => [],
+      observeOperations: (_: unknown, run: () => Promise<void>) => run(),
     } as any;
   };
   return () => { DbSession.open = original; };
 }
+
+for (const concurrent of [false, true]) it(`removes source declarations after a Doris stream failure (${concurrent ? "with in-flight and queued calls" : "single attempt"}); saved data still computes`, async () => {
+  const app = await testConfig(); app.analysis = { preflight: "off" }; app.budgets.taskTimeoutMs = 15_000;
+  const saved: { id?: string } = {};
+  const original = DbSession.open;
+  let service: AnalysisService | undefined;
+  let dispatches = 0, closes = 0, metadataDispatches = 0;
+  let startMetadata!: () => void, releaseMetadata!: () => void;
+  const metadataStarted = new Promise<void>(resolve => { startMetadata = resolve; });
+  const holdMetadata = new Promise<void>(resolve => { releaseMetadata = resolve; });
+  const calls: any[] = [];
+  const oldSql = "SELECT region, amount FROM fixture.orders";
+  const data = ConnectionConfig.parse({ ...connection, engine: "doris", port: 9030 });
+  DbSession.open = async ({ config, app, results }) => {
+    const id = "sess_dorisreplay";
+    const db = new (DbSession as any)(id, config, app, results) as DbSession;
+    const engine = new DorisEngine(config);
+    Object.assign(engine, { inReadOnly: true, connection: { query: () => { dispatches++; return undefined; }, destroy: () => { closes++; } } });
+    if (concurrent) {
+      const metadataPool = new MetadataPool(2, async () => {
+        const lane = new DorisEngine(config);
+        Object.assign(lane, { connection: { end: (cb: Function) => cb(), promise: () => ({ query: async ({ sql }: { sql: string }) => {
+          metadataDispatches++;
+          if (sql.includes("first_hold")) { startMetadata(); await holdMetadata; }
+          else if (sql.includes("second_lost")) {
+            await metadataStarted;
+            // Simulate a socket close observed on the source while independent metadata lanes run.
+            engine.unavailableReason = "Fixture source socket closed";
+          }
+          return [[], []];
+        } }) } });
+        return lane;
+      });
+      Object.assign(db, { metadataPool });
+    }
+    Object.assign(db, { engine, allowedScopes: ["fixture"], metadataCache: new TtlCache(300), capabilities: {
+      ...capabilities, engine: "doris", engineLabel: "Doris", readOnlyProof: "grants", engineProfile: describeEngine(getProfile("doris")),
+    } });
+    const writer = await results.create({ sessionId: id, sql: oldSql, previewRows: 4 });
+    writer.setColumns([{ name: "region", type: "text" }, { name: "amount", type: "integer" }]);
+    for (const row of [["华南", 2], ["华南", 3], ["华北", 15]]) await writer.append(row);
+    saved.id = (await writer.finish("none", 1)).id;
+    return db;
+  };
+  const endpoint = createServer(async (req, res) => {
+    let raw = ""; for await (const chunk of req) raw += chunk;
+    calls.push(JSON.parse(raw));
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const send = (delta: any, finish_reason: string | null) => res.write(`data: ${JSON.stringify({ id: "replay", model: "local", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+    const tool = (index: number, name: string, args: object) => ({ index, id: `call_${calls.length}_${index}`, type: "function", function: { name, arguments: JSON.stringify(args) } });
+    if (calls.length <= 2) {
+      // Deliberately return stale tool calls after the schema has been removed.
+      const tools = calls.length === 1 ? (concurrent ? [
+        tool(0, "catalog_search", { search: "first_hold" }), tool(1, "catalog_search", { search: "second_lost" }), tool(2, "catalog_search", { search: "queued" }),
+      ] : [tool(0, "query_execute", { sql: "SELECT 1" })]) : [
+        tool(0, "query_execute", { sql: "SELECT 2" }), tool(1, "catalog_search", { search: "orders" }),
+        tool(2, "business_lookup", { question: "支付订单" }), tool(3, "result_compute", { result_id: saved.id,
+          operation: { group_by: ["region"], aggregates: [{ fn: "sum", field: "amount", as: "total" }], share: { field: "total", as: "share" }, sort: [{ field: "total", direction: "desc" }] } }),
+      ];
+      send({ role: "assistant", tool_calls: tools }, null); send({}, "tool_calls");
+    } else { send({ role: "assistant", content: "Saved results are available; reconnect for new queries." }, null); send({}, "stop"); }
+    res.end("data: [DONE]\n\n");
+  });
+  try {
+    await new Promise<void>(resolve => endpoint.listen(0, "127.0.0.1", resolve));
+    app.model = { provider: "replay", modelId: "local", api: "openai-completions", apiKey: "fixture", thinkingLevel: "off", baseUrl: `http://127.0.0.1:${(endpoint.address() as { port: number }).port}/v1` };
+    service = await AnalysisService.create(app);
+    const session = await service.createSession(data, "fixture-owner");
+    const task = session.submit("Use stored evidence after disconnect");
+    if (concurrent) {
+      await until(() => !!task.source_recovery, 10_000);
+      releaseMetadata();
+    }
+    await until(() => !!task.finished_at, 18_000);
+    assert.equal(task.status, "succeeded", JSON.stringify(task.error));
+    assert.equal(task.source_recovery?.code, "SESSION_UNAVAILABLE");
+    assert.equal(dispatches, concurrent ? 0 : 1); assert.equal(closes, concurrent ? 0 : 1);
+    assert.equal(task.source_requests?.source_select?.count, concurrent ? undefined : 1);
+    assert.equal(metadataDispatches, concurrent ? 2 : 0);
+    assert.equal(task.source_requests?.metadata?.count, concurrent ? 2 : undefined);
+    assert.equal(task.operations?.local?.count, 1);
+    assert.equal(calls.length, 3);
+    assert.ok(calls[0].tools.some((t: any) => t.function.name === "query_execute"));
+    for (const call of calls.slice(1)) assert.ok(call.tools.every((t: any) => !SOURCE_TOOLS.has(t.function.name)));
+    assert.equal(task.results.length, concurrent ? 1 : 2); // Local result, plus failed source attempt when applicable.
+    const result = await session.db.readResult(task.results.at(-1)!, 0, 5);
+    assert.deepEqual(result.rows.map(([region, total, share]) => [region, Number(total), Number(share)]), [["华北", 15, .75], ["华南", 5, .25]]);
+    assert.equal((await service.results.get(result.id))?.lineage?.parent_result_id, saved.id);
+    const events = service.broker.list(task.id);
+    const recovery = events.find(e => e.type === "notice" && e.data.code === "SESSION_UNAVAILABLE")!;
+    assert.ok(recovery);
+    assert.ok(events.filter(e => e.seq > recovery.seq && e.type === "source_request").every(e => e.data.phase !== "started"));
+    if (concurrent) {
+      const started = events.find(e => e.type === "source_request" && e.data.kind === "metadata" && e.data.phase === "started")!;
+      const finished = events.find(e => e.type === "source_request" && e.data.id === started.data.id && e.data.phase === "finished")!;
+      assert.ok(started.seq < recovery.seq && recovery.seq < finished.seq);
+      assert.deepEqual(task.source_recovery?.in_flight_requests, [started.data.id]);
+      assert.ok(task.source_recovery?.in_flight.includes("call_1_0"));
+      assert.ok(task.source_recovery?.in_flight.includes("call_1_2"));
+    } else assert.deepEqual(task.source_recovery?.in_flight_requests, []);
+    const evidence = await service.resultEvidence(`${saved.id}#row=2&col=1`, "fixture-owner");
+    assert.equal(evidence.value, 15); assert.equal(evidence.sql, oldSql);
+    await assert.rejects(service.resultEvidence(`${saved.id}#row=2&col=1`, "different-owner"), { code: "NOT_FOUND" });
+  } finally {
+    startMetadata(); releaseMetadata();
+    DbSession.open = original;
+    endpoint.closeAllConnections(); await new Promise<void>(resolve => endpoint.close(() => resolve()));
+    await service?.shutdown(); await cleanup(app);
+  }
+});
 
 it("serves scoped business documents and projects only the active revision into model requests", async () => {
   const config = await testConfig(); config.budgets.taskTimeoutMs = 10_000;
@@ -107,8 +222,8 @@ it("serves scoped business documents and projects only the active revision into 
     const liveTools = (await request(`/v1/tools?session_id=${session.id}`, 200)).tools;
     const liveNames = liveTools.map((t: any) => t.name).sort();
     const catalogue = (await request("/v1/tools", 200)).tools;
-    assert.equal(catalogue.length, 21);
-    assert.deepEqual(liveNames, catalogue.map((t: any) => t.name).filter((name: string) => !name.startsWith("dataset_")).sort());
+    assert.equal(catalogue.length, 24);
+    assert.deepEqual(liveNames, catalogue.map((t: any) => t.name).filter((name: string) => !name.startsWith("dataset_") && !name.startsWith("business_")).sort());
     assert.deepEqual(requests.at(-1).tools.map((t: any) => t.function.name).sort(), liveNames);
     for (const name of ["job_get", "job_cancel", "chart_list", "chart_archive", "chart_revise"]) {
       assert.ok(liveNames.includes(name), `ordinary sessions expose ${name}`);

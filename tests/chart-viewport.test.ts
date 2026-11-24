@@ -2,6 +2,49 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as echarts from "echarts";
 import { chartViewport } from "../web/charts.js";
+import { businessTrendOption } from "../web/business-report.js";
+
+const paymentDays = Array.from({ length: 10 }, (_, i) => ({ day: `2026-11-${i + 11}`, current: i < 8 ? null : { value: { value: i === 8 ? "450" : "360" } }, comparison: null }));
+
+test("business trend exports a static selected view with zoom on desktop and mobile", () => {
+  const days = paymentDays;
+  for (const width of [950, 340]) {
+    for (const type of ["bar", "line"]) {
+      const option = businessTrendOption({ days, type, index: 9, comparison: false, zoom: { start: 77, end: 100 }, animation: false });
+      assert.deepEqual(option.series[0]!.markPoint!.data[0]!.coord, ["2026-11-20", 360]);
+      assert.deepEqual(option.series[0]!.data.slice(-2), [450, 360]);
+      assert.deepEqual(option.dataZoom.map(z => [z.start, z.end]), [[77, 100], [77, 100]]);
+      const chart = echarts.init(null, undefined, { renderer: "svg", ssr: true, width, height: 240 });
+      try {
+        chart.setOption(option as echarts.EChartsOption);
+        const svg = chart.renderToSVGString();
+        assert.match(svg, /11-19/); assert.match(svg, /11-20/); assert.match(svg, /#256e64/);
+        assert.match(svg, /本期/); assert.doesNotMatch(svg, /@keyframes/);
+      } finally { chart.dispose(); }
+    }
+  }
+});
+
+test("a full business trend update keeps the zoom and data across series type changes", () => {
+  const chart = echarts.init(null, undefined, { renderer: "svg", ssr: true, width: 760, height: 275 });
+  try {
+    const option = (type: string, zoom?: { start: number; end: number }) => businessTrendOption({ days: paymentDays, type, index: 9, comparison: false, zoom, animation: false });
+    chart.setOption(option("line") as echarts.EChartsOption);
+    chart.dispatchAction({ type: "dataZoom", start: 84, end: 100 });
+    for (const type of ["bar", "line"]) {
+      const [zoom] = chart.getOption().dataZoom as { start: number; end: number }[];
+      assert.deepEqual([zoom!.start, zoom!.end], [84, 100]);
+      chart.setOption(option(type, { start: zoom!.start, end: zoom!.end }) as echarts.EChartsOption, true);
+      const [series] = chart.getOption().series as { type: string; data: unknown[] }[];
+      assert.equal(series!.type, type);
+      assert.deepEqual(series!.data.slice(-2), [450, 360]);
+      const svg = chart.renderToSVGString();
+      assert.match(svg, />11-19<\/text>/);
+      assert.match(svg, />11-20<\/text>/);
+      assert.doesNotMatch(svg, />11-11<\/text>/);
+    }
+  } finally { chart.dispose(); }
+});
 
 const grid = { left: 64, right: 32, top: 24, bottom: 32, containLabel: true };
 const labels = (prefix: string, count: number) => Array.from({ length: count }, (_, i) => `${prefix}${i}`);

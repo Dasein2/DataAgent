@@ -11,6 +11,8 @@ import type { AnalysisOptions } from "./options.js";
 import { checkLocalSize } from "./privacy.js";
 import { TtlCache } from "./cache.js";
 
+export const isLocalNumeric = (type: string) => /^(?:(?:tiny|small|medium|big)?int[248]?|integer|numeric|(?:new)?decimal|float[48]?|double(?: precision)?|real|tiny|short|long(?:long)?|int24|largeint)(?:\s*\(|\s+unsigned|$)/i.test(type);
+
 const quote = (s: string) => '"' + s.replace(/"/g, '""') + '"';
 const NUMERIC = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 const summaryCache = new TtlCache(300_000, 16);
@@ -136,9 +138,7 @@ export async function localSqlInProcess(
   try {
     await db.waitReady;
     const types = meta.columns.map((c) =>
-      /^(?:(?:tiny|small|medium|big)?int[248]?|integer|numeric|decimal|float[48]?|double(?: precision)?|real)(?:\s*\(|\s+unsigned|$)/i.test(
-        c.type,
-      )
+      isLocalNumeric(c.type)
         ? "numeric"
         : /bool/i.test(c.type)
           ? "boolean"

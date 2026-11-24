@@ -3,6 +3,8 @@ import { Readable } from "node:stream";
 import { it } from "node:test";
 import { MysqlEngine, DorisEngine, StarrocksEngine } from "../src/db/engines/mysql.js";
 import { ConnectionConfig } from "../src/db/types.js";
+import { MetadataPool } from "../src/analysis/pool.js";
+import { observeSourceRequests, type SourceRequest } from "../src/db/source-operations.js";
 
 const limits = { timeoutMs: 1_000, maxRows: 10, maxBytes: 10_000, maxCellChars: 100 };
 function engineFixture(engine: "mysql" | "doris" | "starrocks", rows: unknown[][], failure?: Error) {
@@ -18,6 +20,34 @@ function engineFixture(engine: "mysql" | "doris" | "starrocks", rows: unknown[][
     newConnection: async () => ({ query: (sql: string, cb: Function) => { cancellation = sql; cb(); }, end: (cb: Function) => cb() }) });
   return { instance, destroyed: () => destroyed, cancellation: () => cancellation };
 }
+
+it("rebuilds a failed Doris metadata lane once; counts driver dispatches and never replays source SQL", async () => {
+  const events: SourceRequest[] = [];
+  let created = 0, closes = 0;
+  const sql: string[] = [];
+  const pool = new MetadataPool(1, async () => {
+    const n = ++created;
+    const { instance } = engineFixture("doris", []);
+    Object.assign(instance, { connection: { destroy: () => { closes++; }, end: (cb: Function) => cb(), promise: () => ({
+      query: async ({ sql: statement }: { sql: string }) => {
+        sql.push(statement);
+        if (n === 1) throw Object.assign(new Error("connection is in closed state"), { code: "PROTOCOL_CONNECTION_LOST" });
+        return [[['analytics', 3]], []];
+      },
+    }) }, endReadOnly: async () => {} });
+    return instance;
+  });
+  try {
+    const counts = await observeSourceRequests(e => events.push(e), () => {}, () => pool.run(w => w.catalogTableCounts(["analytics"])));
+    assert.deepEqual(counts, { analytics: 3 });
+    assert.equal(created, 2); assert.equal(sql.length, 2); assert.ok(closes >= 1);
+    assert.equal(sql[0], sql[1]); assert.match(sql[1]!, /information_schema/);
+    assert.deepEqual(events.map(e => [e.phase, e.kind, e.phase === "finished" ? e.code : undefined]), [
+      ["started", "metadata", undefined], ["finished", "metadata", "SESSION_UNAVAILABLE"],
+      ["started", "metadata", undefined], ["finished", "metadata", undefined],
+    ]);
+  } finally { await pool.close(); }
+});
 
 for (const engine of ["mysql", "doris", "starrocks"] as const) {
   it(`${engine}: counts visible tables by scope in one unpaged query`, async () => {

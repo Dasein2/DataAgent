@@ -1,6 +1,10 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { sourceError } from "./source-errors.js";
+import { classifySourceRequests, observeSourceRequests, type SourceRequest } from "./source-operations.js";
+import { compileResultOperation, type ResultOperation } from "../analysis/operations.js";
 import { analysisOptions } from "../analysis/options.js";
 import { TtlCache } from "../analysis/cache.js";
 import { MetadataPool } from "../analysis/pool.js";
@@ -69,6 +73,9 @@ interface AuditEvent {
   detail?: string;
 }
 
+export type DbOperationKind = "metadata" | "preflight" | "source_select" | "local" | "verification";
+export type DbOperation = { kind: DbOperationKind; duration_ms: number; code?: string };
+
 const QUERYABLE_KINDS = new Set(["table", "view", "materialized_view", "foreign_table"]);
 const DATASET_NAME = /^ds_[a-z0-9_]{1,37}$/;
 
@@ -82,6 +89,9 @@ export class DbSession {
   private queryCount = 0;
   private metadataCache!: TtlCache;
   private metadataPool?: MetadataPool<Engine>;
+  private sourceUnavailable?: string;
+  private readonly operations = new AsyncLocalStorage<(event: DbOperation) => void>();
+  private readonly preflightCache = new TtlCache(30_000, 32);
   private readonly queryCache = new Map<string, { id: string; at: number }>();
   /** Tracks the in-flight statement so cancel() can classify it instead of reporting success. */
   private activeQuery?: { controller: AbortController; cancelled: boolean };
@@ -254,8 +264,8 @@ export class DbSession {
       created_at: this.createdAt.toISOString(),
       last_used_at: this.lastUsedAt.toISOString(),
       expires_at: this.expiresAt.toISOString(),
-      status: this.closed ? "closed" : this.engine.unavailableReason ? "unavailable" : "ready",
-      unavailable_reason: this.engine.unavailableReason,
+      status: this.closed ? "closed" : this.unavailableReason ? "unavailable" : "ready",
+      unavailable_reason: this.unavailableReason,
     };
   }
 
@@ -263,13 +273,38 @@ export class DbSession {
     this.lastUsedAt = new Date();
   }
 
+  private get unavailableReason() { return this.sourceUnavailable ?? this.engine.unavailableReason; }
+
+  observeOperations<T>(observe: (event: DbOperation) => void, execute: () => T, observeRequest: (event: SourceRequest) => void = () => {}): T {
+    return this.operations.run(observe, () => observeSourceRequests(observeRequest, () => this.assertSourceAvailable(), execute));
+  }
+
+  private assertSourceAvailable() {
+    if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
+    if (this.unavailableReason) throw new AppError("SESSION_UNAVAILABLE", this.unavailableReason);
+  }
+
+  async measure<T>(kind: DbOperationKind, execute: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    let code: string | undefined;
+    try { return await (kind === "local" || kind === "verification" ? execute() : classifySourceRequests(kind, execute)); } catch (error) {
+      code = sourceError(error).code;
+      throw error;
+    } finally {
+      this.operations.getStore()?.({ kind, duration_ms: Math.round(performance.now() - started), code });
+    }
+  }
+
   /** Serialises every database operation for this pinned connection. */
   private run<T>(operation: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new AppError("SESSION_CLOSED", "Session is closed"));
     const guarded = () => {
-      if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
-      if (this.engine.unavailableReason) throw new AppError("SESSION_UNAVAILABLE", this.engine.unavailableReason);
-      return operation();
+      this.assertSourceAvailable();
+      return operation().catch((error: unknown) => {
+        const normalized = sourceError(error, this.unavailableReason);
+        if (normalized.code === "SESSION_UNAVAILABLE") { this.sourceUnavailable = normalized.message; throw normalized; }
+        throw error;
+      });
     };
     const next = this.tail.then(guarded, guarded);
     this.tail = next.then(
@@ -313,6 +348,11 @@ export class DbSession {
       signal?: AbortSignal;
       reuse?: boolean;
       skipPreflight?: boolean;
+      /** Server-only: scope + immutable metric/metadata fingerprint. */
+      planKey?: string;
+      business?: ResultMeta["business"];
+      /** Server-only feature gate; may change while the SQL waits in the queue or preflight. */
+      assertPlanActive?: () => void;
     } = {},
   ): Promise<ResultMeta> {
     return this.run(() =>
@@ -337,9 +377,14 @@ export class DbSession {
             }
           }
         }
+        options.assertPlanActive?.();
         const warnings = [...guard.warnings];
         if (!options.skipPreflight && settings.preflight !== "off" && guard.kind === "select") {
-          const inspection = await this.preflightDirect(sql, options.signal);
+          const load = () => this.preflightDirect(sql, options.signal);
+          const inspection = options.planKey
+            ? await this.preflightCache.get(JSON.stringify([options.planKey, sql]), load)
+            : await load();
+          if (options.signal?.aborted) throw new AppError("QUERY_CANCELLED", "Query cancelled before execution");
           warnings.push(...inspection.warnings);
           if (inspection.blocked && settings.preflight === "enforce")
             throw new AppError(
@@ -382,8 +427,9 @@ export class DbSession {
 
         try {
           if (state.cancelled) throw new AppError("QUERY_CANCELLED", "Query cancelled before execution");
+          options.assertPlanActive?.();
           this.queryCount += 1;
-          const stats: QueryStats = await this.engine.query(
+          const stats: QueryStats = await this.measure(guard.kind === "select" ? "source_select" : "metadata", () => this.engine.query(
             sql,
             {
               timeoutMs,
@@ -414,14 +460,15 @@ export class DbSession {
                 },
               };
             })(),
-          );
+          ));
           if (state.cancelled) {
             throw new AppError("QUERY_CANCELLED", "Query cancelled by caller");
           }
           if (timedOut) throw new AppError("QUERY_TIMEOUT", `Query exceeded ${timeoutMs} ms and was cancelled`);
           const meta = await writer.finish(stats.truncated, stats.durationMs);
           meta.warnings = [...warnings, ...stats.warnings];
-          meta.timezone = this.config.timezone;
+          meta.timezone = options.business?.timezone ?? this.config.timezone;
+          meta.business = options.business;
           meta.privacy = {
             masked_columns: meta.columns
               .filter((c) => settings.masking.some((r) => r.column.toLowerCase() === c.name.toLowerCase()))
@@ -448,7 +495,9 @@ export class DbSession {
           const message = (error as Error).message;
           await writer.abort(message).catch(() => undefined);
           const cancelled = state.cancelled || Boolean(options.signal?.aborted);
-          const code = timedOut ? "QUERY_TIMEOUT" : cancelled ? "QUERY_CANCELLED" : "INTERNAL_ERROR";
+          const normalized = sourceError(error, this.unavailableReason);
+          if (normalized.code === "SESSION_UNAVAILABLE") this.sourceUnavailable = normalized.message;
+          const code = cancelled ? "QUERY_CANCELLED" : timedOut ? "QUERY_TIMEOUT" : normalized.code;
           await this.audit({
             action: "query_execute",
             outcome: cancelled ? "cancelled" : "error",
@@ -458,9 +507,7 @@ export class DbSession {
           });
           if (cancelled) throw new AppError("QUERY_CANCELLED", "Query cancelled by caller");
           if (timedOut) throw new AppError("QUERY_TIMEOUT", `Query exceeded ${timeoutMs} ms and was cancelled`);
-          if (error instanceof AppError) throw error;
-          if (guard.kind === "select") throw new AppError("INTERNAL_ERROR", `Query failed: ${message}`);
-          throw new AppError("INTERNAL_ERROR", `Statement failed: ${message}`);
+          throw normalized;
         } finally {
           clearTimeout(timer);
           options.signal?.removeEventListener("abort", onOuterAbort);
@@ -489,7 +536,7 @@ export class DbSession {
           throw new AppError("FEATURE_UNSUPPORTED", "Requested plan capability is unavailable on this engine");
         this.queryCount += 1;
         const timeoutMs = this.queryTimeoutMs(options.timeoutMs);
-        const plan = await this.planDirect(sql, timeoutMs, options.analyze, options.signal);
+        const plan = await this.measure(options.analyze ? "source_select" : "preflight", () => this.planDirect(sql, timeoutMs, options.analyze, options.signal));
         const settings = analysisOptions(this.app);
         const usage = (await this.results.listBySession(this.id)).reduce((sum, r) => sum + r.bytes, 0);
         if (usage + Buffer.byteLength(JSON.stringify([plan.planText])) + 1 > settings.maxSessionBytes)
@@ -512,6 +559,24 @@ export class DbSession {
 
   private catalogScopeNames(): string[] {
     return [...new Set([...this.allowedScopes, this.capabilities.workspaceName].filter((scope): scope is string => Boolean(scope)))];
+  }
+
+  businessPermissionKey() {
+    return this.run(() => this.measure("metadata", async () => {
+      if (!this.engine.businessPermissionKey) throw new AppError("FEATURE_UNSUPPORTED", "Business metrics are enabled only for the Doris pilot");
+      return this.engine.businessPermissionKey();
+    }));
+  }
+
+  describeBusiness(schema: string, name: string) {
+    return this.run(() => this.measure("metadata", async () => {
+      if (!this.catalogScopeNames().includes(schema)) throw new AppError("SQL_SCOPE_VIOLATION", "Table is outside the active catalog scope");
+      return this.engine.describeObject(schema, name);
+    }));
+  }
+
+  businessMasked(field: string) {
+    return analysisOptions(this.app).masking.some(r => r.column.toLowerCase() === field.toLowerCase());
   }
 
   async catalogScopes(refresh = false) {
@@ -627,7 +692,7 @@ export class DbSession {
     const result = await this.run(async () => {
       this.assertQueryBudget();
       this.queryCount++;
-      const described = await this.engine.describeObject(schema, name);
+      const described = await this.measure("metadata", () => this.engine.describeObject(schema, name));
       if (!this.isInScope(described.object.schema)) {
         throw new AppError(
           "SQL_SCOPE_VIOLATION",
@@ -642,13 +707,13 @@ export class DbSession {
           "FEATURE_UNSUPPORTED",
           "Random ORDER BY sampling may scan/sort the full table and is disabled in production. Use a selective source query or head sample.",
         );
-      const profile = await this.engine.profileObject(
+      const profile = await this.measure("source_select", () => this.engine.profileObject(
         described.object.schema,
         name,
         Math.max(1, Math.min(200, sampleRows)),
         this.queryTimeoutMs(timeoutMs),
         method,
-      );
+      ));
       await this.audit({
         action: "data_profile",
         outcome: "ok",
@@ -682,10 +747,14 @@ export class DbSession {
   }
 
   async resultSql(id: string, sql: string, allowPartial = false, taskId?: string) {
-    return localSql(this.results, await ownedResult(this.results, id, this.id), sql, analysisOptions(this.app), {
-      allowPartial,
-      taskId,
-    });
+    const meta = await ownedResult(this.results, id, this.id);
+    return this.measure("local", () => localSql(this.results, meta, sql, analysisOptions(this.app), { allowPartial, taskId }));
+  }
+
+  async resultCompute(id: string, operation: ResultOperation, taskId?: string) {
+    const meta = await ownedResult(this.results, id, this.id);
+    const sql = compileResultOperation(meta, operation);
+    return this.measure("local", () => localSql(this.results, meta, sql, analysisOptions(this.app), { taskId }));
   }
 
   private get snapshots() {
@@ -883,9 +952,9 @@ export class DbSession {
   private metadata<T>(operation: (engine: Engine) => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new AppError("SESSION_CLOSED", "Session is closed"));
     this.touch();
-    if (this.engine.unavailableReason)
-      return Promise.reject(new AppError("SESSION_UNAVAILABLE", this.engine.unavailableReason));
-    return this.metadataPool ? this.metadataPool.run(operation) : this.run(() => operation(this.engine));
+    if (this.unavailableReason) return Promise.reject(new AppError("SESSION_UNAVAILABLE", this.unavailableReason));
+    const measured = (engine: Engine) => this.measure("metadata", () => operation(engine));
+    return this.metadataPool ? this.metadataPool.run(measured, () => this.assertSourceAvailable()) : this.run(() => measured(this.engine));
   }
 
   private async planDirect(sql: string, timeoutMs: number, analyze = false, signal?: AbortSignal) {
@@ -940,7 +1009,7 @@ export class DbSession {
     this.assertQueryBudget();
     this.queryCount++;
     try {
-      const plan = await this.planDirect(sql, this.queryTimeoutMs(5000), false, signal);
+      const plan = await this.measure("preflight", () => this.planDirect(sql, this.queryTimeoutMs(5000), false, signal));
       const unknown = plan.estimatedScanRows == null && plan.estimatedCost == null;
       const blocked =
         (plan.estimatedScanRows ?? 0) > settings.maxEstimatedScanRows ||
@@ -966,7 +1035,8 @@ export class DbSession {
       };
     } catch (error) {
       if (error instanceof AppError && ["QUERY_CANCELLED", "QUERY_TIMEOUT"].includes(error.code)) throw error;
-      if (this.engine.unavailableReason) throw new AppError("SESSION_UNAVAILABLE", this.engine.unavailableReason);
+      const normalized = sourceError(error, this.unavailableReason);
+      if (normalized.code === "SESSION_UNAVAILABLE") throw normalized;
       return {
         supported: true,
         blocked: settings.preflight === "enforce",

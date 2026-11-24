@@ -158,6 +158,7 @@ export interface Engine {
   readOnlyStatus(): ReadOnlyStatus;
   /** Captured during connect, before any application timeout override. No source scan. */
   queryTimeoutStatus?(): ServerQueryTimeout;
+  businessPermissionKey?(): Promise<string>;
   connect(): Promise<void>;
   close(): Promise<void>;
   /** Runs one guarded statement inside the pinned read-only transaction. */

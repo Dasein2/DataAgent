@@ -22,8 +22,8 @@ export async function cleanup(app: AppConfig) {
   await rm(app.dataDir, { recursive: true, force: true });
 }
 
-export async function until(check: () => boolean) {
-  const deadline = Date.now() + 3_000;
+export async function until(check: () => boolean, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
   while (!check()) {
     if (Date.now() > deadline) throw new Error("Timed out waiting for task completion");
     await new Promise((resolve) => setTimeout(resolve, 1));

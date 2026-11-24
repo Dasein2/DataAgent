@@ -14,6 +14,8 @@ import { ModelPatch } from "../agent/model-settings.js";
 import { ChannelSelection } from "../agent/channels.js";
 import { toolCatalog } from "../agent/tools.js";
 import { z } from "zod";
+import { ResultOperation } from "../analysis/operations.js";
+import { MetricRequest } from "../business/types.js";
 import { BusinessContextDraft, BusinessContextIds } from "../business-context/types.js";
 import { DOCUMENT_TOKEN_LIMIT, SELECTION_TOKEN_LIMIT } from "../business-context/store.js";
 import { ProviderWrite, ProviderId } from "../agent/provider-store.js";
@@ -276,7 +278,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   // With no session, this is a discovery catalogue, not the model's effective toolset.
   app.get("/v1/tools", (req, res) => {
     const sessionId = z.string().regex(/^sess_[a-z0-9]+$/).optional().parse(req.query.session_id);
-    const selected = sessionId ? service.getSession(sessionId, ownerOf(req)).tools : tools;
+    const selected = sessionId ? service.getSession(sessionId, ownerOf(req)).effectiveTools : tools;
     res.json({ tools: selected });
   });
 
@@ -526,6 +528,14 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     const p = z.object({ sql: z.string().min(1).max(30_000), allow_partial: z.boolean().optional() }).parse(req.body);
     res.json({ result: await service.transformResult(req.params.id, ownerOf(req), p.sql, p.allow_partial) });
   });
+  app.post("/v1/results/:id/compute", async (req, res) => {
+    res.json({ result: await service.computeResult(req.params.id, ownerOf(req), ResultOperation.parse(req.body)) });
+  });
+  app.get("/v1/results/:id/business-report", async (req, res) => res.json(await service.businessReport(req.params.id, ownerOf(req))));
+  app.get("/v1/result-evidence", async (req, res) => {
+    const ref = z.string().max(100).parse(req.query.ref);
+    res.json(await service.resultEvidence(ref, ownerOf(req)));
+  });
   app.get("/v1/results/:id/summary", async (req, res) => res.json(await service.resultSummary(req.params.id, ownerOf(req))));
 
   app.get("/v1/results/:id", async (req, res) => {
@@ -629,6 +639,36 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.status(204).end();
   });
 
+  // Catalog publisher is an authenticated administrator (or the private bearer operator).
+  const pilot = (req: Request, id: string, mutate = false) => {
+    if (mutate && !(service.accounts ? auth.account(req)?.role === "admin" : Boolean(service.config.apiToken)))
+      throw new AppError("FORBIDDEN", "Business catalog changes require an authenticated administrator");
+    const session = service.getSession(id, ownerOf(req));
+    if (mutate && session.isBusy) throw new AppError("SESSION_BUSY", "Wait for the current task before changing business settings");
+    if (!session.business) throw new AppError("FEATURE_UNSUPPORTED", "The pilot needs a Doris connection with proven read-only privileges");
+    return session.business;
+  };
+  app.get("/v1/sessions/:id/business-catalog", async (req, res) => res.json(await pilot(req, req.params.id).list()));
+  app.get("/v1/sessions/:id/business-catalog/:version", async (req, res) => res.json(await pilot(req, req.params.id).get(req.params.version)));
+  app.post("/v1/sessions/:id/business-catalog", async (req, res) => res.status(201).json(await pilot(req, req.params.id, true).draft(req.body)));
+  app.post("/v1/sessions/:id/business-catalog/:version/publish", async (req, res) => {
+    const business = pilot(req, req.params.id, true);
+    const { reviewer } = z.strictObject({ reviewer: z.string().trim().min(1).max(100) }).parse(req.body);
+    res.status(201).json(await business.publish(req.params.version, reviewer));
+  });
+  app.put("/v1/sessions/:id/business-pilot", async (req, res) => {
+    const business = pilot(req, req.params.id, true);
+    const { enabled } = z.strictObject({ enabled: z.boolean() }).parse(req.body);
+    await business.enable(enabled);
+    res.json({ enabled });
+  });
+  app.post("/v1/sessions/:id/business-analysis", async (req, res) => {
+    const session = service.getSession(req.params.id, ownerOf(req));
+    if (session.isBusy) throw new AppError("SESSION_BUSY", "Wait for the current task before supplementing the analysis");
+    const { request, version } = z.strictObject({ request: MetricRequest, version: z.string().max(80) }).parse(req.body);
+    res.json(await pilot(req, req.params.id).analyze(request, { expectedVersion: version }));
+  });
+
   // Lightweight console (same API, no build step).
   const webRoot = new URL("../../web/", import.meta.url);
   app.get("/task-stream.js", (_req, res) => {
@@ -643,7 +683,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       () => res.status(404).end(),
     );
   });
-  for (const file of ["chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js"]) {
+  for (const file of ["chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js", "business-report.js", "business-catalog.js"]) {
     app.get("/" + file, (_req, res) => { void readFile(new URL(file, webRoot), "utf8").then(code => res.type(file.endsWith("css") ? "text/css" : "application/javascript").send(code), () => res.status(404).end()); });
   }
   // Vendored ECharts: served from this origin so the console needs no CDN and no build step.

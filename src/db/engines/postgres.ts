@@ -11,6 +11,9 @@ import type {
   ProfileResult,
 } from "../types.js";
 import { SshTunnel } from "../ssh-tunnel.js";
+import { classifySourceRequests, sourceRequest } from "../source-operations.js";
+import { sourceConnectionLost } from "../source-errors.js";
+import { AppError } from "../../errors.js";
 import {
   attachColumnMatches,
   CATALOG_TABLE_KINDS,
@@ -67,6 +70,7 @@ export class PostgresEngine implements Engine {
    */
   private inReadOnly = false;
   private closed = false;
+  unavailableReason?: string;
 
   constructor(
     private readonly config: ConnectionConfig,
@@ -124,6 +128,9 @@ export class PostgresEngine implements Engine {
   private async newClient(stream?: NodeJS.ReadWriteStream): Promise<pg.Client> {
     const client = new Client(this.connectionOptions(stream));
     await client.connect();
+    client.on("error", error => {
+      if (this.client === client && sourceConnectionLost(error)) this.unavailableReason ??= "PostgreSQL connection closed. Reconnect before querying again.";
+    });
     return client;
   }
 
@@ -146,7 +153,7 @@ export class PostgresEngine implements Engine {
     if (mismatch) this.notes.push(mismatch);
     try {
       const probe = { text: "SHOW statement_timeout", query_timeout: 5_000 };
-      const result = await this.client.query(probe);
+      const result = await sourceRequest("metadata", () => this.client!.query(probe));
       this.serverTimeout = parseServerQueryTimeout("postgres", result.rows[0]?.statement_timeout);
     } catch {
       // Missing permission/unsupported setting: policy falls back without leaking error details.
@@ -172,13 +179,13 @@ export class PostgresEngine implements Engine {
    */
   private async readOnlyTransaction<T>(fn: (client: pg.Client) => Promise<T>): Promise<T> {
     const client = this.assertOpen();
-    await client.query("BEGIN TRANSACTION READ ONLY");
+    await sourceRequest("control", () => client.query("BEGIN TRANSACTION READ ONLY"));
     try {
       const result = await fn(client);
-      await client.query("COMMIT");
+      await sourceRequest("control", () => client.query("COMMIT"));
       return result;
     } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
+      await sourceRequest("control", () => client.query("ROLLBACK")).catch(() => undefined);
       throw error;
     }
   }
@@ -198,16 +205,16 @@ export class PostgresEngine implements Engine {
   /** row-mode query returning arrays; typed through a narrow cast because pg's types omit rowMode. */
   private async rawQuery(sql: string): Promise<unknown[][]> {
     const client = this.assertOpen();
-    const result = (await (client.query as unknown as (config: unknown) => Promise<{ rows: unknown[][] }>)({
+    const result = await sourceRequest("metadata", () => (client.query as unknown as (config: unknown) => Promise<{ rows: unknown[][] }>)({
       text: sql,
       values: [],
       rowMode: "array",
-    })) as { rows: unknown[][] };
+    }));
     return result.rows;
   }
 
   private assertOpen(): pg.Client {
-    if (!this.client || this.closed) throw new Error("PostgreSQL connection is not open");
+    if (this.unavailableReason || !this.client || this.closed) throw new AppError("SESSION_UNAVAILABLE", this.unavailableReason ?? "PostgreSQL connection is not open");
     return this.client;
   }
 
@@ -217,8 +224,8 @@ export class PostgresEngine implements Engine {
 
   private async buffered(sql: string, timeoutMs: number): Promise<{ fields: ColumnMeta[]; rows: unknown[][] }> {
     const raw = await this.readOnlyTransaction(async (client) => {
-      await client.query(`SET LOCAL statement_timeout = ${this.statementTimeoutMs(timeoutMs)}`);
-      return (await client.query({ text: sql, values: [], rowMode: "array" })) as unknown as {
+      await sourceRequest("control", () => client.query(`SET LOCAL statement_timeout = ${this.statementTimeoutMs(timeoutMs)}`));
+      return (await sourceRequest("metadata", () => client.query({ text: sql, values: [], rowMode: "array" }))) as unknown as {
         fields?: FieldDescription[];
         rows: unknown[][];
       };
@@ -233,15 +240,16 @@ export class PostgresEngine implements Engine {
   async query(sql: string, limits: QueryLimits, sink: RowSink): Promise<QueryStats> {
     const client = this.assertOpen();
     if (!this.inReadOnly) await this.beginReadOnly();
-    await client.query("BEGIN TRANSACTION READ ONLY");
+    await sourceRequest("control", () => client.query("BEGIN TRANSACTION READ ONLY"));
     const started = Date.now();
     try {
-      await client.query(`SET LOCAL statement_timeout = ${this.statementTimeoutMs(limits.timeoutMs)}`);
-      return await this.streamRows(client, sql, limits, sink, started);
+      await sourceRequest("control", () => client.query(`SET LOCAL statement_timeout = ${this.statementTimeoutMs(limits.timeoutMs)}`));
+      if (limits.signal?.aborted) throw new AppError("QUERY_CANCELLED", "Query cancelled before dispatch");
+      return await sourceRequest("source_select", () => this.streamRows(client, sql, limits, sink, started));
     } finally {
       // A read-only transaction has nothing to persist, so ROLLBACK is equivalent to COMMIT — and it
       // is safe even when the cursor was destroyed mid-stream or the statement was cancelled.
-      await client.query("ROLLBACK").catch(() => undefined);
+      if (!this.unavailableReason) await sourceRequest("control", () => client.query("ROLLBACK")).catch(() => undefined);
     }
   }
 
@@ -533,7 +541,7 @@ export class PostgresEngine implements Engine {
 
   async profileObject(schema: string | null, name: string, sampleRows: number, timeoutMs: number, method: "head" | "random" = this.profile.sampling): Promise<ProfileResult> {
     const scope = schema ?? (await this.defaultScope());
-    const described = await this.describeObject(scope, name);
+    const described = await classifySourceRequests("metadata", () => this.describeObject(scope, name));
     const { fields, rows } = await this.buffered(sampleSql(this.profile, scope, name, sampleRows, method), timeoutMs);
 
     const columns: ProfileColumn[] = fields.map((field, index) => {

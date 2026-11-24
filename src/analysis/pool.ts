@@ -1,7 +1,8 @@
 import { AppError } from "../errors.js";
+import { sourceConnectionLost } from "../db/source-errors.js";
 
 /** A fixed number of serial lanes, each with its own independently proven connection. */
-export class MetadataPool<T extends { close(): Promise<void> }> {
+export class MetadataPool<T extends { close(): Promise<void>; unavailableReason?: string }> {
   private closed = false;
   private readonly slots: Array<{
     tail: Promise<unknown>;
@@ -17,7 +18,7 @@ export class MetadataPool<T extends { close(): Promise<void> }> {
       pending: 0,
     }));
   }
-  run<R>(operation: (worker: T) => Promise<R>): Promise<R> {
+  run<R>(operation: (worker: T) => Promise<R>, before = () => {}): Promise<R> {
     if (this.closed) return Promise.reject(new Error("Metadata pool is closed"));
     if (this.slots.reduce((n, s) => n + s.pending, 0) >= 64)
       return Promise.reject(new AppError("TASK_QUEUE_FULL", "Metadata queue is full; retry later"));
@@ -25,8 +26,24 @@ export class MetadataPool<T extends { close(): Promise<void> }> {
     slot.pending++;
     const next = slot.tail.then(async () => {
       if (this.closed) throw new Error("Metadata pool is closed");
-      slot.worker ??= await this.create();
-      return operation(slot.worker);
+      // Only read-only metadata operations use these lanes. Retry a disconnect once with
+      // a fresh worker (the factory re-verifies read-only access); never cycle source SQL.
+      for (let attempt = 0; ; attempt++) {
+        before();
+        const worker = slot.worker ??= await this.create();
+        before();
+        try {
+          if (worker.unavailableReason) throw new AppError("SESSION_UNAVAILABLE", worker.unavailableReason);
+          const value = await operation(worker);
+          if (worker.unavailableReason) throw new AppError("SESSION_UNAVAILABLE", worker.unavailableReason);
+          return value;
+        } catch (error) {
+          if (!worker.unavailableReason && !sourceConnectionLost(error)) throw error;
+          slot.worker = undefined;
+          await worker.close().catch(() => undefined);
+          if (attempt >= 1 || this.closed) throw new AppError("CONNECTION_FAILED", "Metadata connection unavailable after reconnect; catalog coverage is incomplete", { coverage: "incomplete" });
+        }
+      }
     });
     slot.tail = next
       .then(

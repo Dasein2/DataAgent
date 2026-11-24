@@ -10,12 +10,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AppConfig, ThinkingLevel } from "../config.js";
 import type { ConnectionConfig } from "../db/types.js";
-import { DbSession } from "../db/session.js";
+import { DbSession, type DbOperation } from "../db/session.js";
+import type { SourceRequest } from "../db/source-operations.js";
+import { BusinessAnalysis, type BusinessCatalogStore } from "../business/service.js";
 import { AppError, isAppError } from "../errors.js";
 import type { ResultStore } from "../results/store.js";
 import type { ArtifactService } from "../artifacts/service.js";
 import { buildSystemPrompt } from "./prompts.js";
-import { createDatabaseTools, selectTools, toolCatalog, type ToolInfo, type ToolRuntime } from "./tools.js";
+import { createDatabaseTools, selectTools, toolCatalog, SOURCE_TOOLS, type ToolInfo, type ToolRuntime } from "./tools.js";
 import { EventBroker, type TaskEvent } from "./events.js";
 import type { ModelHandle } from "./model.js";
 import type { HistoryStore } from "./history.js";
@@ -48,12 +50,16 @@ export interface TaskRecord {
   max_turns?: number;
   queries_used: number;
   results: string[];
+  business_results?: string[];
   /** Chart artifacts produced by this task, in creation order. */
   artifacts?: string[];
   /** Last non-empty assistant message; the report a polling client can read without SSE. */
   answer?: string;
   /** UI execution-process summary; optional for older saved tasks. */
   activity?: ActivitySummary;
+  operations?: Partial<Record<DbOperation["kind"], { count: number; duration_ms: number }>>;
+  source_requests?: Partial<Record<SourceRequest["kind"], { count: number; duration_ms: number }>>;
+  source_recovery?: { code: "SESSION_UNAVAILABLE"; in_flight: string[]; in_flight_requests?: number[] };
 }
 
 interface QueueItem {
@@ -88,6 +94,7 @@ export class AnalysisSession {
     readonly businessContextScope: string,
     private readonly contextRef: { files: BusinessContextFile[]; prompt: string },
     private readonly history?: HistoryStore,
+    readonly business?: BusinessAnalysis,
   ) {}
 
   readonly createdAt = new Date();
@@ -107,6 +114,8 @@ export class AnalysisSession {
   private turnBudgetExceeded = false;
   private settledAborted = false;
   private finalMessage?: FinalAssistantMessage;
+  private readonly sourceInFlight = new Set<string>();
+  private readonly sourceRequestsInFlight = new Set<number>();
   /** Display name of the session, persisted with the snapshot; null until generated or renamed. */
   private title?: string;
 
@@ -123,6 +132,7 @@ export class AnalysisSession {
     title?: string;
     modelSelection?: { provider: string; modelId: string; thinkingLevel?: ThinkingLevel };
     businessContext: { scope: string; files: BusinessContextFile[] };
+    businessCatalog?: BusinessCatalogStore;
   }): Promise<AnalysisSession> {
     const { app, config, broker } = options;
     const db = await DbSession.open({ config, app, results: options.results, sessionId: options.sessionId });
@@ -130,6 +140,8 @@ export class AnalysisSession {
     const files = options.businessContext.files;
     const contextRef = { files, prompt: businessContextPrompt(files) };
     const sessionRef: { current?: TaskRecord } = {};
+    const business = options.businessCatalog && config.engine === "doris" && db.capabilitiesView.readOnlyProof === "grants"
+      ? new BusinessAnalysis(options.businessCatalog, options.businessContext.scope, db, options.results) : undefined;
     let session: AgentSession;
     let tools: ToolInfo[];
     try {
@@ -141,9 +153,11 @@ export class AnalysisSession {
         currentTaskId: () => sessionRef.current?.id,
         taskStatus: () => (sessionRef.current ? { ...sessionRef.current, max_turns: sessionRef.current.max_turns ?? app.budgets.maxTurns } : { status: "idle" }),
         cancelActive: () => db.cancel(),
+        sourceBlocked: () => Boolean(sessionRef.current?.source_recovery) || db.snapshot().status === "unavailable",
+        business,
       };
       const caps = db.capabilitiesView;
-      const customTools = selectTools(createDatabaseTools(toolRuntime), caps);
+      const customTools = selectTools(createDatabaseTools(toolRuntime), caps, Boolean(business));
       tools = toolCatalog(customTools);
       const settingsManager = SettingsManager.inMemory();
       const resourceLoader = new DefaultResourceLoader({
@@ -157,6 +171,13 @@ export class AnalysisSession {
         noContextFiles: true,
         systemPrompt: buildSystemPrompt(caps, app.budgets, new Set(customTools.map((tool) => tool.name))),
         extensionFactories: [(pi) => {
+          // Pi snapshots executable tools for a prompt. Also filter the provider's
+          // declarations on every turn; the tool wrapper blocks stale/in-flight calls.
+          pi.on("context_with_system", ({ messages }) => {
+            if (!sessionRef.current?.source_recovery && db.snapshot().status !== "unavailable") return;
+            return { messages: messages.map(message => message.role === "system" && message.toolsAdded
+              ? { ...message, toolsAdded: message.toolsAdded.filter(tool => !SOURCE_TOOLS.has(tool.name)) } : message) };
+          });
           pi.on("before_agent_start", (event) => {
             if (contextRef.files.length) {
               // Provider-only projection. Don't keep obsolete reference bodies in Pi's transcript.
@@ -197,6 +218,7 @@ export class AnalysisSession {
       options.businessContext.scope,
       contextRef,
       options.history,
+      business,
     );
     if (options.sessionId) {
       for (const task of options.history?.listTasks(db.id, options.ownerKey) ?? []) analysis.tasks.set(task.id, task);
@@ -210,6 +232,11 @@ export class AnalysisSession {
   }
 
   // ---------------------------------------------------------------- lifecycle
+
+  get effectiveTools() {
+    const blocked = this.db.snapshot().status === "unavailable" || Boolean(this.current?.source_recovery);
+    return this.tools.filter(t => !(blocked && SOURCE_TOOLS.has(t.name)) && (!t.name.startsWith("business_") || this.business?.enabled));
+  }
 
   get isClosed(): boolean {
     return this.closed;
@@ -300,6 +327,7 @@ export class AnalysisSession {
       current_task_id: this.current && ["queued", "running"].includes(this.current.status) ? this.current.id : null,
       queued_tasks: this.queue.length,
       business_context: this.businessContextSelection(),
+      business_pilot: this.business ? { enabled: this.business.enabled } : undefined,
       agent: {
         model: String((this.agent.model as { id?: string } | undefined)?.id ?? "unknown"),
         provider: this.agent.model?.provider ?? null,
@@ -406,6 +434,9 @@ export class AnalysisSession {
     this.turnBudgetExceeded = false;
     this.settledAborted = false;
     this.finalMessage = undefined;
+    this.sourceInFlight.clear();
+    this.sourceRequestsInFlight.clear();
+    this.agent.setActiveToolsByName(this.effectiveTools.map(t => t.name));
     task.status = "running";
     task.started_at = new Date().toISOString();
     const queriesBefore = this.db.snapshot().queries.used;
@@ -428,7 +459,25 @@ export class AnalysisSession {
 
     let failure: unknown;
     try {
-      await this.agent.prompt(task.goal);
+      await this.db.observeOperations((op) => {
+        const operations = task.operations ??= {};
+        const totals = operations[op.kind] ??= { count: 0, duration_ms: 0 };
+        totals.count++;
+        totals.duration_ms += op.duration_ms;
+        this.broker.publish(task.id, "db_operation", op);
+      }, () => this.agent.prompt(task.goal), (request) => {
+        if (this.current?.id !== task.id || task.finished_at) return;
+        const requests = task.source_requests ??= {};
+        const totals = requests[request.kind] ??= { count: 0, duration_ms: 0 };
+        if (request.phase === "started") {
+          if (request.kind !== "control") this.sourceRequestsInFlight.add(request.id);
+          totals.count++;
+        } else {
+          this.sourceRequestsInFlight.delete(request.id);
+          totals.duration_ms += request.duration_ms;
+        }
+        this.broker.publish(task.id, "source_request", request);
+      });
       // prompt() resolves when the run finishes; agent_settled covers queued continuations.
       await Promise.race([settled, delay(30_000)]);
     } catch (error) {
@@ -445,6 +494,7 @@ export class AnalysisSession {
     try {
       const results = await this.db.listResults();
       task.results = results.filter((result) => result.taskId === task.id).map((result) => result.id);
+      task.business_results = results.filter(result => result.taskId === task.id && result.business && !result.error).map(result => result.id);
       const entries = await this.artifacts.listBySession(this.id);
       task.artifacts = [...new Set([
         ...(task.artifacts ?? []),
@@ -515,6 +565,10 @@ export class AnalysisSession {
       turns: task.turns,
       usage: task.usage,
       results: task.results,
+      business_results: task.business_results,
+      operations: task.operations,
+      source_requests: task.source_requests,
+      source_recovery: task.source_recovery,
       artifacts: task.artifacts ?? [],
     });
   }
@@ -612,6 +666,7 @@ export class AnalysisSession {
         break;
       }
       case "tool_execution_start": {
+        if (SOURCE_TOOLS.has(event.toolName)) this.sourceInFlight.add(event.toolCallId);
         this.broker.publish(task.id, "tool_started", {
           call_id: event.toolCallId,
           tool: event.toolName,
@@ -622,7 +677,15 @@ export class AnalysisSession {
       case "tool_execution_end": {
         const result = event.result as { content?: Array<{ type?: string; text?: string }>; details?: unknown } | undefined;
         const output = result?.content?.find((part) => part.type === "text")?.text;
-        const chartId = (result?.details as { chart_id?: unknown } | undefined)?.chart_id;
+        const details = result?.details as { code?: string; chart_id?: unknown; source_blocked?: boolean } | undefined;
+        const chartId = details?.chart_id;
+        this.sourceInFlight.delete(event.toolCallId);
+        if (!task.source_recovery && SOURCE_TOOLS.has(event.toolName) &&
+            (details?.code === "SESSION_UNAVAILABLE" || this.db.snapshot().status === "unavailable")) {
+          task.source_recovery = { code: "SESSION_UNAVAILABLE", in_flight: [...this.sourceInFlight], in_flight_requests: [...this.sourceRequestsInFlight] };
+          this.agent.setActiveToolsByName(this.agent.getActiveToolNames().filter(name => !SOURCE_TOOLS.has(name)));
+          this.broker.publish(task.id, "notice", { ...task.source_recovery, text: "源连接已失效，已停止本任务的源工具。可继续查看已保存证据；如需查询，请重连。" });
+        }
         if (["chart_create", "chart_revise"].includes(event.toolName) && !event.isError && typeof chartId === "string") {
           task.artifacts = [...new Set([...(task.artifacts ?? []), chartId])];
           this.saveTask(task);
@@ -630,7 +693,9 @@ export class AnalysisSession {
         this.broker.publish(task.id, "tool_finished", {
           call_id: event.toolCallId,
           tool: event.toolName,
-          is_error: Boolean(event.isError),
+          is_error: Boolean(event.isError || details?.code),
+          error_code: details?.code,
+          source_blocked: details?.source_blocked,
           duration_ms: event.durationMs ?? null,
           summary: output ? output.slice(0, 400) : undefined,
           details: result?.details,

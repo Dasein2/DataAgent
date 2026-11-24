@@ -12,6 +12,8 @@ import { analysisTools, recoveryHint } from "./analysis-tools.js";
 
 const TOOL_TEXT_BUDGET = 12_000;
 
+export const SOURCE_TOOLS = new Set(["query_execute", "query_explain", "catalog_overview", "catalog_search", "object_describe", "data_profile", "business_lookup", "dataset_create", "dataset_list", "dataset_drop", "business_analyze"]);
+
 export interface ToolRuntime {
   db: DbSession;
   budgets: BudgetConfig;
@@ -20,6 +22,8 @@ export interface ToolRuntime {
   currentTaskId(): string | undefined;
   taskStatus(): Record<string, unknown>;
   cancelActive(): Promise<boolean>;
+  sourceBlocked?(): boolean;
+  business?: import("../business/service.js").BusinessAnalysis;
 }
 
 function textOutput(text: string, structured?: Record<string, unknown>) {
@@ -681,12 +685,29 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     datasetDrop,
   ];
   const parallel = new Set(["session_info", "catalog_search", "result_read", "job_get", "job_cancel"]);
+  let retryTask: string | undefined, sqlErrors = 0;
+  const failedPlans = new Set<string>();
   return tools.map(tool => {
     const execute = tool.execute;
     return { ...tool, executionMode: parallel.has(tool.name) ? "parallel" : tool.executionMode,
       execute: async (...args: Parameters<typeof execute>) => {
         let result;
-        try { result = await execute(...args); } catch (error) { result = errorOutput(error); }
+        const taskId = runtime.currentTaskId();
+        if (retryTask !== taskId) { retryTask = taskId; sqlErrors = 0; failedPlans.clear(); }
+        const input = args[1] as { sql?: string } | undefined;
+        const key = tool.name === "query_execute" && typeof input?.sql === "string" && taskId ? input.sql.trim().replace(/;$/, "").trimEnd() : undefined;
+        try {
+          if (SOURCE_TOOLS.has(tool.name) && runtime.sourceBlocked?.())
+            throw new AppError("SESSION_UNAVAILABLE", "Source tools are paused. Use saved evidence or reconnect.", { source_blocked: true });
+          if (key && (failedPlans.has(key) || sqlErrors >= 2))
+            throw new AppError("INVALID_INPUT", "Failed exploration cannot be repeated; stop or request clarification", { source_blocked: true });
+          result = await execute(...args);
+        } catch (error) { result = errorOutput(error); }
+        const code = (result.details as { code?: string })?.code;
+        if (key && code) {
+          failedPlans.add(key);
+          if (code === "SQL_DIALECT_ERROR" || code === "SQL_FIELD_ERROR") sqlErrors++;
+        }
         let budget: Record<string, unknown> = {};
         try { const snap = db.snapshot(); const task = runtime.taskStatus(); budget = { queries_remaining: Math.max(0, snap.queries.limit - snap.queries.used), turns_remaining: Math.max(0, Number(task.max_turns ?? budgets.maxTurns) - Number(task.turns ?? 0)) }; } catch { /* metadata-only catalog */ }
         const warning = typeof budget.queries_remaining === "number" && budget.queries_remaining <= Math.ceil(budgets.maxQueries * .2) ? "Budget low: converge on findings using stored evidence." : "";
@@ -701,8 +722,10 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
 export function selectTools<T extends { name: string }>(
   tools: readonly T[],
   caps: Pick<SessionCapabilities, "features" | "workspaceName" | "workspaceAccess">,
+  businessEnabled = false,
 ): T[] {
   return tools.filter(({ name }) => {
+    if (name.startsWith("business_")) return businessEnabled;
     if (name === "query_explain") return caps.features.explain;
     if (name.startsWith("dataset_")) return Boolean(caps.workspaceName) && caps.workspaceAccess !== "none";
     return true;

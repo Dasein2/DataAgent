@@ -819,6 +819,7 @@ import { createProcessRenderer } from "/task-tools.js";
 import { createExplorer } from "/explore.js";
 import { initWorkbench } from "/workbench.js";
 import { createCharts } from "/charts.js";
+import { createBusinessReports } from "/business-report.js";
 import { initAssets, sessionTitle } from "/assets.js";
 import { initChatComposer } from "/chat-composer.js";
 const $ = (id) => document.getElementById(id);
@@ -851,9 +852,14 @@ const state = {
   lastTextNode: null,
   trailingText: false,
 };
-const { downloadFile, artifactTable, buildChartCard, renderArtifactInto } = createCharts({ api, state, authHeaders, escapeHtml, cellToString, openRef, refreshContext: () => workbench.refreshContext() });
+const { downloadFile, artifactTable, buildChartCard, renderArtifactInto, ensureEcharts } = createCharts({ api, state, authHeaders, escapeHtml, cellToString, openRef, refreshContext: () => workbench.refreshContext() });
 const exploreResult = createExplorer({ api, downloadFile, refreshContext: () => workbench.refreshContext() });
-const workbench = initWorkbench({ api, state, openResult, buildChartCard, openSession });
+const renderBusinessReport = createBusinessReports({ api, state, openRef, ensureEcharts, refreshContext: () => workbench.refreshContext() });
+const workbench = initWorkbench({ api, state, openResult, buildChartCard, openSession, renderBusinessReport, refreshSession: async () => {
+  const id = state.sessionId;
+  const next = await api("/v1/sessions/" + encodeURIComponent(id));
+  if (state.sessionId === id) applySession(next.session);
+} });
 const renderProcessEvent = createProcessRenderer({ escapeHtml, renderMarkdown, openResult, statusNote });
 const assets = initAssets({
   list: $("assetList"),
@@ -1820,7 +1826,7 @@ function addMessage(who, options = {}) {
 
 function renderInline(text) {
   const refs = [];
-  const replaced = text.replace(/art_[a-z0-9]{8,32}#(?:cell\[[^\]\s]*\]|row=\d+)/g, (ref) => {
+  const replaced = text.replace(/art_[a-z0-9]{8,32}#(?:cell\[[^\]\s]*\]|row=\d+)|res_[a-z0-9]{8,32}#row=\d+&col=\d+/g, (ref) => {
     refs.push(ref);
     return "\u0000" + (refs.length - 1) + "\u0000";
   });
@@ -1857,7 +1863,15 @@ async function openRef(ref) {
   const dialog = document.createElement("dialog"); dialog.className = "object-dialog"; dialog.setAttribute("aria-label", "数值来源");
   const head = document.createElement("header"); const title = document.createElement("h2"); title.textContent = "数值来源"; const close = document.createElement("button"); close.textContent = "关闭"; close.onclick = () => dialog.close(); head.append(title, close);
   const content = document.createElement("div"); content.textContent = "加载…"; dialog.append(head, content); document.body.append(dialog); dialog.addEventListener("close", () => dialog.remove(), { once: true }); dialog.showModal();
-  try { const resolved = await api("/v1/artifacts/" + ref.split("#")[0] + "/ref?ref=" + encodeURIComponent(ref)); const pre = document.createElement("pre"); pre.className = "sql-code"; pre.textContent = ref + "\n\n精确值: " + cellToString(resolved.value) + "\n执行于: " + resolved.source.executed_at + "\n查询时间不等于数据更新时间\n\n" + resolved.source.sql; content.replaceChildren(pre); if(resolved.row)content.appendChild(artifactTable({data:{columns:resolved.columns,rows:[resolved.row]}})); } catch(error) {content.textContent = error.message;}
+  try {
+    const param = encodeURIComponent(ref);
+    const resolved = await api(ref.startsWith("res_") ? "/v1/result-evidence?ref=" + param : "/v1/artifacts/" + ref.split("#")[0] + "/ref?ref=" + param);
+    const source = resolved.source ?? resolved;
+    const pre = document.createElement("pre"); pre.className = "sql-code";
+    pre.textContent = ref + "\n\n精确值: " + cellToString(resolved.value) + "\n执行于: " + source.executed_at + "\n查询时间不等于数据更新时间\n\n" + source.sql;
+    content.replaceChildren(pre);
+    if (resolved.row) content.appendChild(artifactTable({ data: { columns: resolved.columns, rows: [resolved.row] } }));
+  } catch (error) { content.textContent = error.message; }
 }
 
 /** Minimal but practical markdown: fences, headings, tables, lists, bold/inline code, rules. */
@@ -2105,6 +2119,7 @@ function handleEvent(event) {
       if (Array.isArray(data.artifacts)) {
         for (const artifactId of data.artifacts) void renderArtifactInto(state.assistantEl, artifactId);
       }
+      for (const resultId of data.business_results ?? []) void renderBusinessReport(state.assistantEl, resultId);
       if (data.error) state.assistantEl.appendChild(statusNote(data.error.code + ": " + data.error.message, "error"));
       state.activity.finish(data, { answerOutside: Boolean(trailingAnswer) });
       state.taskId = null;
@@ -2120,9 +2135,14 @@ function handleEvent(event) {
     }
     case "retry":
     case "notice":
+      if (data.code === "SESSION_UNAVAILABLE" && state.session) applySession({ ...state.session, status: "unavailable" });
       ensureAssistant();
       closeSegment();
       renderProcessEvent(event, state.activity.body);
+      if (data.code === "SESSION_UNAVAILABLE") {
+        const reconnect = document.createElement("button"); reconnect.type = "button"; reconnect.className = "ghost"; reconnect.textContent = "重连数据库";
+        reconnect.onclick = () => $("btnReconnect").click(); state.assistantEl.append(reconnect);
+      }
       break;
     default:
       break;
@@ -2737,6 +2757,7 @@ function showSession(session, tasks) {
     }
     if (task.error) body.append(statusNote(task.error.code + ": " + task.error.message, "error"));
     for (const artifactId of task.artifacts || []) void renderArtifactInto(body, artifactId);
+    for (const resultId of task.business_results ?? []) void renderBusinessReport(body, resultId);
   }
   state.taskId = session.current_task_id || null;
   applySession(session);

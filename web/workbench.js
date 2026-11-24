@@ -1,5 +1,6 @@
 import { initBusinessContext } from "/business-context.js";
 import { initCatalog } from "/catalog.js";
+import { initBusinessCatalog } from "/business-catalog.js";
 
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -8,7 +9,7 @@ const el = (tag, cls, text) => {
   return n;
 };
 
-export function initWorkbench({ api, state, openResult, buildChartCard, openSession }) {
+export function initWorkbench({ api, state, openResult, buildChartCard, openSession, renderBusinessReport, refreshSession }) {
   let results = [],
     artifacts = [];
   const context = el("aside", "context-panel");
@@ -43,6 +44,7 @@ export function initWorkbench({ api, state, openResult, buildChartCard, openSess
   context.append(tabs, ...Object.values(sections));
   document.querySelector("main").append(context);
   const businessContext = initBusinessContext({ api, state, panel: sections.business, trigger: document.querySelector("#btnBusinessContext") });
+  const pilot = initBusinessCatalog({ api, state, panel: sections.business, changed: async () => { await refreshSession(); pilot.sessionChanged(true); } });
   const budget = el("div", "budget-strip");
   budget.setAttribute("role", "status");
   document.querySelector("#taskbar").after(budget);
@@ -94,7 +96,7 @@ export function initWorkbench({ api, state, openResult, buildChartCard, openSess
             `${m.rowCount.toLocaleString()} 行 · ${m.durationMs} ms${m.truncated !== "none" ? " · 不完整" : ""}${m.lineage ? " · 本地派生" : ""}`,
           ),
         );
-        b.onclick = () => openResult(m.id);
+        b.onclick = () => m.business && renderBusinessReport ? showReport(m.id) : openResult(m.id);
         resultList.append(b);
       }
       for (const a of artifacts) {
@@ -143,6 +145,14 @@ export function initWorkbench({ api, state, openResult, buildChartCard, openSess
     } catch (e) {
       resultList.textContent = e.message;
     }
+  }
+  function showReport(id) {
+    const dialog = el("dialog", "dashboard-dialog");
+    const head = el("header"); const close = el("button", "ghost", "关闭 Esc"); close.onclick = () => dialog.close();
+    head.append(el("h2", "", "分析结果"), close);
+    const body = el("div", "business-report-body"); dialog.append(head, body); document.body.append(dialog);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true }); dialog.showModal();
+    void renderBusinessReport(body, id);
   }
   async function showDashboard(highlight) {
     const dialog = el("dialog", "dashboard-dialog");
@@ -194,6 +204,7 @@ export function initWorkbench({ api, state, openResult, buildChartCard, openSess
   let displayedSession = null;
   function sessionChanged() {
     businessContext.sessionChanged();
+    pilot.sessionChanged();
     catalog.sessionChanged();
     if (displayedSession !== state.sessionId) {
       timeline.replaceChildren();

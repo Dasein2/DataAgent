@@ -1,0 +1,30 @@
+{
+  "database": "sales",
+  "snapshot_ref": "synthetic-frozen-business-v1",
+  "reference_ref": "手算：测试订单 100 − 10 − 20；支付渠道 220/165/65 与 210/90/60；上海零点边界构造行",
+  "catalog": {
+    "domain": "支付兼容性样例（非正式口径）",
+    "timezone": "Asia/Shanghai",
+    "tables": [
+      { "id": "orders", "schema": "sales", "name": "orders", "label": "订单", "grain": "一行一笔订单", "level": "detail", "keys": ["tenant", "oid"], "time": { "field": "paid_on", "storage": "business_date" }, "completeFrom": "2026-11-01", "completeThrough": "2026-11-30" },
+      { "id": "refunds", "schema": "sales", "name": "refunds", "label": "退款", "grain": "一行一次退款", "level": "detail", "keys": ["tenant", "oid", "rid"], "time": { "field": "posted_on", "storage": "business_date" }, "completeFrom": "2026-11-01", "completeThrough": "2026-11-30" },
+      { "id": "channels", "schema": "sales", "name": "channels", "label": "渠道", "grain": "一行一个租户渠道", "level": "dimension", "keys": ["tenant", "cid"] },
+      { "id": "utc_events", "schema": "sales", "name": "utc_events", "label": "边界事件", "grain": "一行一个事件", "level": "detail", "keys": ["id"], "time": { "field": "occurred_at", "storage": "utc_datetime" }, "completeFrom": "2026-11-18", "completeThrough": "2026-11-22" }
+    ],
+    "relations": [
+      { "id": "orders_refunds", "from": "orders", "to": "refunds", "fromFields": ["tenant", "oid"], "toFields": ["tenant", "oid"], "cardinality": "one_to_many", "use": "preaggregate_fact", "purpose": "当期订单减当期入账退款", "source": "冻结样例", "metrics": ["net"], "check": { "window": { "start": "2026-11-01", "end": "2026-11-08" }, "source": "租户 1、订单 1；退款按订单预聚合", "checkedAt": "2026-12-01T00:00:00Z", "inputRows": 1, "outputRows": 1, "factKeysBefore": 1, "factKeysAfter": 1, "duplicateKeys": 0, "unmatchedRows": 0, "measureReconciled": true } },
+      { "id": "orders_channels", "from": "orders", "to": "channels", "fromFields": ["tenant", "cid"], "toFields": ["tenant", "cid"], "cardinality": "many_to_one", "use": "current_dimension", "purpose": "订单渠道", "source": "冻结样例", "metrics": ["payments"], "check": { "window": { "start": "2026-11-19", "end": "2026-11-21" }, "source": "两日订单 810 行；渠道键逐笔匹配", "checkedAt": "2026-12-01T00:00:00Z", "inputRows": 810, "outputRows": 810, "factKeysBefore": 810, "factKeysAfter": 810, "duplicateKeys": 0, "unmatchedRows": 0, "measureReconciled": true } }
+    ],
+    "metrics": [
+      { "id": "net", "table": "orders", "label": "净收款", "owner": "测试样例", "definition": "本期已支付订单扣除同一订单的本期已入账退款", "unit": "元", "filters": [{ "field": "state", "value": "paid" }], "allowedFilters": [{ "id": "tenant", "field": "tenant", "label": "租户" }, { "id": "order", "field": "oid", "label": "订单" }], "measure": { "kind": "net", "field": "amount", "deduction": "amount", "relation": "orders_refunds", "filters": [{ "field": "state", "value": "posted" }] } },
+      { "id": "payments", "table": "orders", "label": "支付单量", "owner": "测试样例", "definition": "按支付日统计已支付订单", "unit": "单", "filters": [{ "field": "state", "value": "paid" }], "measure": { "kind": "count" }, "dimensions": [{ "id": "channel", "field": "label", "label": "渠道", "relation": "orders_channels", "additive": true }] },
+      { "id": "events", "table": "utc_events", "label": "边界事件量", "owner": "测试样例", "definition": "将 UTC 时间归入上海业务日后计数", "unit": "次", "measure": { "kind": "count" } }
+    ]
+  },
+  "cases": [
+    { "id": "net_refunds", "request": { "metric_id": "net", "window": { "start": "2026-11-01", "end": "2026-11-08" }, "filters": [{ "id": "tenant", "value": 1 }, { "id": "order", "value": 1 }] }, "status": "verified", "days": [{ "day": "2026-11-01", "total": "70", "baseline": null, "change": null, "numerator": "100", "denominator": "30", "deductions": ["10", "20"] }] },
+    { "id": "payments_day", "request": { "metric_id": "payments", "grain": "day", "dimension": "channel", "window": { "start": "2026-11-20", "end": "2026-11-21" }, "comparison": { "start": "2026-11-19", "end": "2026-11-20" } }, "status": "verified", "days": [{ "day": "2026-11-20", "total": "360", "baseline": "450", "change": "-90", "groups": [{ "label": "自然搜索", "total": "210", "baseline": "220", "change": "-10" }, { "label": "广告投放", "total": "90", "baseline": "165", "change": "-75" }, { "label": "直接访问", "total": "60", "baseline": "65", "change": "-5" }] }] },
+    { "id": "utc_half_open", "request": { "metric_id": "events", "grain": "day", "window": { "start": "2026-11-19", "end": "2026-11-21" } }, "status": "verified", "days": [{ "day": "2026-11-19", "total": "2", "baseline": null, "change": null }, { "day": "2026-11-20", "total": "1", "baseline": "2", "change": "-1" }] },
+    { "id": "empty_day", "request": { "metric_id": "payments", "grain": "day", "window": { "start": "2026-11-21", "end": "2026-11-22" } }, "status": "unconfirmed", "empty": true, "days": [{ "day": "2026-11-21", "total": null, "baseline": null, "change": null, "groups": [] }] }
+  ]
+}

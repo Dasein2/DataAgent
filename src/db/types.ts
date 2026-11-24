@@ -134,6 +134,7 @@ export interface ObjectDescription {
   foreignKeys: Array<{ name: string; columns: string[]; references: string; referencedColumns?: string[] }>;
   views?: string[];
   partitionKey?: string | null;
+  keyModel?: { kind: "duplicate" | "unique" | "aggregate"; columns: string[] };
 }
 
 export interface ExplainResult {

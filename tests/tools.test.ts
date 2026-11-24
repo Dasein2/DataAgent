@@ -3,6 +3,7 @@ import { it } from "node:test";
 import { Check } from "typebox/value";
 import { createDatabaseTools, selectTools, toolCatalog, type ToolRuntime } from "../src/agent/tools.js";
 import type { SessionCapabilities } from "../src/db/types.js";
+import { AppError } from "../src/errors.js";
 
 const caps = {
   features: { cancel: true, explain: true, explainAnalyze: true, streaming: true },
@@ -17,10 +18,10 @@ it("always exposes analysis and management tools and gates workspace tools and E
   assert.deepEqual(base, [
     "catalog_overview", "catalog_search", "chart_archive", "chart_create", "chart_list", "chart_revise",
     "data_profile", "job_cancel", "job_get", "object_describe", "query_execute", "query_explain",
-    "result_read", "result_transform", "session_info", "snapshot_create", "snapshot_drop", "snapshot_list",
+    "result_compute", "result_read", "result_transform", "session_info", "snapshot_create", "snapshot_drop", "snapshot_list",
   ]);
   const writable = { ...caps, workspaceName: "analysis_ws", workspaceAccess: "views_only" as const };
-  assert.deepEqual(selectTools(catalog, writable), catalog);
+  assert.deepEqual(selectTools(catalog, writable, true), catalog);
   assert.deepEqual(names({ ...writable, workspaceAccess: "none" }), base);
   assert.deepEqual(names({ ...caps, workspaceAccess: "views_only" }), base);
   const noPlan = { ...caps, features: { ...caps.features, explain: false } };
@@ -62,6 +63,28 @@ it("describes one or more objects through the same entry point and retains per-i
   assert.ok(!Check(describe.parameters, orders));
   assert.ok(!Check(describe.parameters, { objects: [] }));
   assert.ok(!Check(describe.parameters, { objects: Array(21).fill(orders) }));
+});
+
+it("blocks identical failed exploration and allows only one field/dialect correction per task", async () => {
+  let task = "task_first";
+  const dispatched: string[] = [];
+  const db = {
+    query: async (sql: string) => {
+      dispatched.push(sql);
+      throw new AppError(sql.includes("denied") ? "SQL_SCOPE_VIOLATION" : sql.includes("field") ? "SQL_FIELD_ERROR" : "SQL_DIALECT_ERROR", "fixture rejection");
+    },
+  };
+  const execute = createDatabaseTools({ db, budgets: { maxTurns: 10, maxQueries: 20, cellChars: 200 }, currentTaskId: () => task, taskStatus: () => ({}) } as unknown as ToolRuntime).find(t => t.name === "query_execute")!.execute;
+  const run = async (sql: string) => (await execute("call", { sql }, undefined, undefined, {} as never)).details as { code: string; source_blocked?: boolean };
+  assert.equal((await run("SELECT denied")).code, "SQL_SCOPE_VIOLATION");
+  assert.equal((await run("  SELECT denied ; ")).source_blocked, true);
+  assert.equal((await run("SELECT field")).code, "SQL_FIELD_ERROR");
+  assert.equal((await run("SELECT field;")).source_blocked, true);
+  assert.equal((await run("SELECT bad_syntax")).code, "SQL_DIALECT_ERROR");
+  assert.equal((await run("SELECT 1")).source_blocked, true);
+  task = "task_second";
+  assert.equal((await run("SELECT field")).code, "SQL_FIELD_ERROR");
+  assert.deepEqual(dispatched, ["SELECT denied", "SELECT field", "SELECT bad_syntax", "SELECT field"]);
 });
 
 it("reads stored rows and summaries via explicit result_read modes", async () => {

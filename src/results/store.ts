@@ -25,6 +25,7 @@ export interface ResultMeta {
   cached?: boolean;
   cacheAgeMs?: number;
   timezone?: string;
+  business?: import("../business/types.js").BusinessEvidence;
   lineage?: { parent_result_id: string; operation: string; parameters?: unknown };
   privacy?: { masked_columns: string[]; boundary: "output-name-defense-in-depth" };
 }

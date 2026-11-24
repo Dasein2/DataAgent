@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import mysql, { type Connection, type FieldPacket } from "mysql2";
 import { AppError } from "../../errors.js";
+import { sourceConnectionLost, sourceError } from "../source-errors.js";
 import type {
   ColumnInfo,
   ConnectionConfig,
@@ -38,6 +40,8 @@ import { parseServerQueryTimeout, timeoutVariable, type ServerQueryTimeout } fro
 const TYPE_NAMES = new Map<number, string>(
   Object.entries(mysql.Types as unknown as Record<string, number>).map(([name, id]) => [id, name]),
 );
+
+import { classifySourceRequests, sourceRequest } from "../source-operations.js";
 
 const DATASET_MARKER = "dwa:dataset";
 
@@ -115,8 +119,8 @@ export class MysqlEngine implements Engine {
       connection.once("error", reject);
       connection.once("connect", () => {
         connection.removeListener("error", reject);
-        connection.on("error", () => {
-          /* surfaced by individual statements; the session queue re-checks health */
+        connection.on("error", (error) => {
+          if (this.connection === connection) this.markLost(error);
         });
         resolve(connection);
       });
@@ -226,6 +230,18 @@ export class MysqlEngine implements Engine {
     );
   }
 
+  async businessPermissionKey(): Promise<string> {
+    if (this.kind !== "doris" || this.proof !== "grants") throw new AppError("READONLY_UNVERIFIED", "Business analysis requires proven Doris SELECT-only grants");
+    const { fields, rows } = await this.buffered("SHOW GRANTS", 15_000);
+    const active = analyzeGrantRows(fields, rows);
+    const role = fields.findIndex(f => f.name.toLowerCase() === "roles");
+    if (!active.parsed || !active.reads.some(p => p === "SELECT" || p === "SELECT_PRIV") || active.writes.length ||
+        (role !== -1 && rows.some(row => !/^(?:null|none|\[\]|\\N)?$/i.test(String(row[role] ?? "").trim()))))
+      throw new AppError("READONLY_UNVERIFIED", "The business pilot requires direct SELECT-only grants; role-derived permissions are not supported yet");
+    const slots = fields.map((f,i) => ({ name: f.name.toLowerCase(), i })).filter(f => /privs$|^useridentity$|^roles$|^grants/.test(f.name));
+    return createHash("sha256").update(JSON.stringify([this.serverVersion, slots.map(f => f.name), rows.map(row => JSON.stringify(slots.map(f => row[f.i]))).sort()])).digest("hex");
+  }
+
   async endReadOnly(): Promise<void> {
     if (this.profile.readOnlyProof !== "transaction") return;
     if (!this.connection || !this.inReadOnly) return;
@@ -237,7 +253,8 @@ export class MysqlEngine implements Engine {
     if (this.closed) return;
     this.closed = true;
     try {
-      if (this.connection) {
+      if (this.connection && this.unavailableReason) this.connection.destroy();
+      else if (this.connection) {
         if (this.inReadOnly) await this.buffered("ROLLBACK", 10_000).catch(() => undefined);
         await new Promise<void>((resolve) => this.connection!.end(() => resolve()));
       }
@@ -247,18 +264,26 @@ export class MysqlEngine implements Engine {
     await this.tunnel?.close();
   }
 
+  private markLost(error: unknown): void {
+    if (sourceConnectionLost(error)) this.unavailableReason ??= `${this.profile.label} connection closed. Reconnect before querying again.`;
+  }
+
   private assertOpen(): Connection {
     if (this.unavailableReason) throw new AppError("SESSION_UNAVAILABLE", this.unavailableReason);
-    if (!this.connection || this.closed) throw new Error("MySQL connection is not open");
+    if (!this.connection || this.closed) throw new AppError("SESSION_UNAVAILABLE", "MySQL protocol connection is not open");
     return this.connection;
   }
 
   protected async buffered(sql: string, timeoutMs: number): Promise<{ fields: ColumnMeta[]; rows: unknown[][] }> {
     const connection = this.assertOpen();
-    const [rows, fields] = (await connection.promise().query({
+    const [rows, fields] = (await sourceRequest(/^(?:SET|START|ROLLBACK|COMMIT|CREATE|DROP|ALTER)\b/i.test(sql) ? "control" : "metadata", () => connection.promise().query({
       sql,
       timeout: Math.max(1, Math.floor(timeoutMs)),
       rowsAsArray: true,
+    })).catch((error: unknown) => {
+      this.markLost(error);
+      if (this.unavailableReason) throw sourceError(error, this.unavailableReason);
+      throw error;
     })) as unknown as [unknown[][] | unknown, FieldPacket[] | undefined];
     const fieldPackets = (fields ?? []) as FieldPacket[];
     return {
@@ -273,9 +298,21 @@ export class MysqlEngine implements Engine {
   async query(sql: string, limits: QueryLimits, sink: RowSink): Promise<QueryStats> {
     const connection = this.assertOpen();
     if (!this.inReadOnly) await this.beginReadOnly();
+    this.assertOpen();
+    if (limits.signal?.aborted) throw new AppError("QUERY_CANCELLED", "Query cancelled before dispatch");
+    return sourceRequest("source_select", () => this.streamQuery(connection, sql, limits, sink));
+  }
 
+  private async streamQuery(connection: Connection, sql: string, limits: QueryLimits, sink: RowSink): Promise<QueryStats> {
     const started = Date.now();
     const query = connection.query({ sql, timeout: Math.max(1, Math.floor(limits.timeoutMs)), rowsAsArray: true });
+    // A command submitted to a closed mysql2 connection can emit a synchronous fatal error
+    // without yielding a stream. Never attempt to reuse that socket.
+    if (this.unavailableReason || typeof query?.stream !== "function") {
+      this.unavailableReason ??= `${this.profile.label} did not return a query stream. Reconnect before querying again.`;
+      connection.destroy();
+      throw new AppError("SESSION_UNAVAILABLE", this.unavailableReason);
+    }
     const stream = query.stream({ highWaterMark: 50 }) as NodeJS.ReadableStream & {
       pause(): void;
       resume(): void;
@@ -331,7 +368,8 @@ export class MysqlEngine implements Engine {
       }
     } catch (error) {
       // An interruption we requested is reported to the caller through the session's cancel state.
-      if (truncated === "none" && !aborted) throw error;
+      this.markLost(error);
+      if (truncated === "none" && !aborted) throw this.unavailableReason ? sourceError(error, this.unavailableReason) : error;
     } finally {
       if (abortTimer) clearTimeout(abortTimer);
       limits.signal?.removeEventListener("abort", onAbort);
@@ -585,6 +623,21 @@ export class MysqlEngine implements Engine {
       fkMap.set(fkName, entry);
     }
 
+    let keyModel: ObjectDescription["keyModel"], partitionKey: string | null = null;
+    if (this.kind === "doris" && tableType === "table") {
+      try {
+        const ddl = String((await this.buffered(`SHOW CREATE TABLE ${this.quoteIdent(scope)}.${this.quoteIdent(name)}`, 15_000)).rows[0]?.[1] ?? "");
+        const model = /^\s*(DUPLICATE|UNIQUE|AGGREGATE) KEY\s*\(([^)]+)\)/im.exec(ddl);
+        if (model) {
+          const keys = model[2]!.split(",").map(s => s.trim().replace(/^`|`$/g, ""));
+          if (keys.every(k => columns.some(c => c.name === k))) keyModel = { kind: model[1]!.toLowerCase() as NonNullable<typeof keyModel>["kind"], columns: keys };
+        }
+        partitionKey = /^\s*PARTITION BY (?:RANGE|LIST)\s*\(([^)]+)\)/im.exec(ddl)?.[1]?.slice(0, 200) ?? null;
+      } catch (error) {
+        if (this.unavailableReason) throw error;
+        // Some SELECT-only accounts cannot see SHOW CREATE. Unknown stays unknown.
+      }
+    }
     return {
       object: {
         schema: scope,
@@ -594,9 +647,11 @@ export class MysqlEngine implements Engine {
         comment: comment ? String(comment) : null,
       },
       columns,
-      primaryKey: indexMap.get("PRIMARY")?.columns ?? [],
+      primaryKey: indexMap.get("PRIMARY")?.columns ?? (keyModel?.kind === "unique" ? keyModel.columns : []),
       indexes: [...indexMap.values()],
       foreignKeys: [...fkMap.values()],
+      keyModel,
+      partitionKey,
     };
   }
 
@@ -608,7 +663,7 @@ export class MysqlEngine implements Engine {
     method: "head" | "random" = this.profile.sampling,
   ): Promise<ProfileResult> {
     const scope = schema ?? (await this.defaultScope());
-    const described = await this.describeObject(scope, name);
+    const described = await classifySourceRequests("metadata", () => this.describeObject(scope, name));
     const { fields, rows } = await this.buffered(sampleSql(this.profile, scope, name, sampleRows, method), timeoutMs);
 
     const columns: ProfileColumn[] = fields.map((field, index) => {
@@ -723,7 +778,7 @@ export class MysqlEngine implements Engine {
 
   private async cancelConnection(): Promise<boolean> {
     const connection = this.connection;
-    if (!connection || this.profile.cancel === "none") return false;
+    if (!connection || this.unavailableReason || this.profile.cancel === "none") return false;
     const threadId = connection.threadId;
     if (!threadId) return false;
     // MySQL uses KILL QUERY (statement only); Doris/StarRocks use KILL <connection id>, which tears
@@ -736,9 +791,9 @@ export class MysqlEngine implements Engine {
         ? await this.tunnel.dial({ host: this.config.host, port: this.config.port })
         : undefined;
       control = await this.newConnection(stream);
-      await new Promise<void>((resolve, reject) => {
+      await sourceRequest("control", () => new Promise<void>((resolve, reject) => {
         control!.query(statement, (error) => (error ? reject(error) : resolve()));
-      });
+      }));
       if (this.profile.cancel === "connection-id") {
         this.unavailableReason = `${this.profile.label} cancellation closed the database connection. Open a new analysis session to continue.`;
         this.connection = undefined;

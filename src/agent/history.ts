@@ -62,7 +62,7 @@ export class HistoryStore {
       if (!events.some((event) => event.type === "task_finished")) {
         const seq = (events.at(-1)?.seq ?? 0) + 1;
         this.appendEvent({ seq, id: `${task.id}:${seq}`, task_id: task.id, type: "task_finished", at: task.finished_at ?? new Date().toISOString(),
-          data: { status: task.status, answer: task.answer ?? "", error: task.error ?? null, results: task.results } });
+          data: { status: task.status, answer: task.answer ?? "", error: task.error ?? null, results: task.results, business_results: task.business_results, operations: task.operations, source_requests: task.source_requests, source_recovery: task.source_recovery } });
       }
     });
     for (const [id, record] of this.sessions) {

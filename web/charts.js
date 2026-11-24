@@ -458,5 +458,5 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
     }
   }
 
-  return { downloadFile, artifactTable, buildChartCard, renderArtifactInto };
+  return { downloadFile, artifactTable, buildChartCard, renderArtifactInto, ensureEcharts };
 }

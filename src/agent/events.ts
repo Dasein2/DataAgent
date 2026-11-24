@@ -6,6 +6,8 @@ export type TaskEventType =
   | "reasoning_delta"
   | "tool_started"
   | "tool_finished"
+  | "db_operation"
+  | "source_request"
   | "turn_started"
   | "usage"
   | "retry"

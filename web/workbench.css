@@ -877,6 +877,32 @@ dialog header button:last-child {
   #modelChipName { max-width: 180px; }
   #composer .composer-actions { gap: 5px; }
 }
+.business-report { min-width: 0; padding: 14px; margin-block: 8px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); overflow-wrap: anywhere; }
+.business-report h2, .business-report h3 { margin: 0 0 6px; }
+.business-headline, .business-channel strong, .business-operands { font-variant-numeric: tabular-nums; }
+.business-total { text-align: start; font-size: 1.1rem; font-weight: 650; }
+.business-figures { display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 5fr); gap: 14px; align-items: start; }
+.business-figures > :only-child { grid-column: 1 / -1; }
+.business-trend { height: 275px; min-width: 0; }
+.business-actions, .business-supplement form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-block: 8px; }
+.business-channel { width: 100%; display: grid; grid-template-columns: minmax(65px, 1fr) minmax(0, 1.25fr) auto; gap: 5px; align-items: center; text-align: start; margin-block: 3px; }
+.business-channel[aria-pressed="true"] { outline: 2px solid var(--accent); }
+.business-channel > strong:last-child { grid-column: -2; }
+.business-axis { position: relative; display: block; height: 13px; background: linear-gradient(90deg, transparent 49.5%, currentColor 49.5% 50.5%, transparent 50.5%); }
+.business-bar { position: absolute; display: block; left: 50%; top: 2px; height: 9px; border-radius: 3px; background: #347e69; transition: width 240ms; }
+.business-bar.negative { left: auto; right: 50%; background: #b75a47; }
+.business-operands { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.business-operands section { display: grid; justify-items: start; gap: 5px; padding: 10px; }
+.business-report-body { padding: 12px; overflow: auto; }
+.business-evidence[open] { inset: 0 0 0 auto; margin: 0; width: min(470px, 100%); height: 100%; max-height: 100%; overflow: auto; }
+.business-catalog textarea { width: 100%; }
+.business-catalog select, .business-catalog pre { max-width: 100%; }
+@media (max-width: 760px) {
+  .business-figures { grid-template-columns: minmax(0, 1fr); }
+  .business-trend { height: 220px; }
+  .business-evidence[open] { position: fixed; inset: auto 0 0; margin: 0; width: 100%; height: auto; max-width: 100%; max-height: 82dvh; border-radius: 14px 14px 0 0; overflow: auto; }
+  .business-channel { min-height: 42px; }
+}
 @media (prefers-reduced-motion: reduce) {
   * {
     scroll-behavior: auto !important;

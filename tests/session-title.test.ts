@@ -41,6 +41,7 @@ function stubDatabase() {
       expiresAt: new Date(Date.now() + 60_000), touch() {},
       snapshot: () => ({ session_id: id, database: "fixture", status: closed ? "closed" : "ready", capabilities, queries: { used: 0, limit: 60 } }),
       close: async () => { closed = true; }, cancel: async () => true, listResults: async () => [],
+      observeOperations: (_: unknown, run: () => Promise<void>) => run(),
     } as any;
   };
   return () => { DbSession.open = original; };

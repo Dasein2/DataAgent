@@ -12,8 +12,9 @@ async function fixture(run: (emit: (event: any) => void, goal: string, agent: an
   const agent = {
     prompt: async (goal: string) => run((event) => (session as any).mapEvent(event), goal, agent),
     abort: async () => {}, dispose: () => {}, getSessionStats: () => stats,
+    getActiveToolNames: () => [], setActiveToolsByName: () => {},
   };
-  const db = { snapshot: () => ({ queries: { used: 0 }, status: "ready" }), listResults: async () => [],
+  const db = { observeOperations: (_: unknown, run: () => Promise<void>) => run(), snapshot: () => ({ queries: { used: 0 }, status: "ready" }), listResults: async () => [],
     touch: () => {}, close: async () => {}, cancel: async () => true };
   session = new (AnalysisSession as any)("sess_test", "owner", db, agent, [], broker, app, {}, {}, "fixture", { files: [], prompt: "" });
   return { session, broker, agent, app, close: async () => { await session.close(); await cleanup(app); } };

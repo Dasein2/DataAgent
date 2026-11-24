@@ -35,6 +35,7 @@ it("switches only the owned idle session, isolates credentials, hot-adds channel
       expiresAt: new Date(Date.now() + 60000), touch() {},
       snapshot: () => ({ session_id: id, database: "fixture", status: closed ? "closed" : "ready", capabilities, queries: { used: 0, limit: 60 } }),
       close: async () => { closed = true; }, cancel: async () => true, listResults: async () => [],
+      observeOperations: (_: unknown, run: () => Promise<void>) => run(),
     } as any;
   };
   let service: AnalysisService | undefined, http: ReturnType<typeof createServer> | undefined;
