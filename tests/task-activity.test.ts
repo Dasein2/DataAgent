@@ -129,10 +129,10 @@ for (const status of ["succeeded", "failed", "cancelled", "incomplete"]) {
   });
 }
 
-test("clarification card submits only the selected answer and becomes read-only", async () => {
+for (const freeText of [false, true]) test(`intent card submits ${freeText ? "Other corrections" : "the selected answer"} once and becomes read-only`, async () => {
   const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
   const host = new Element("div");
-  const question = { id: "question-fixture", question: "<strong>按哪一天统计？</strong>", impact: "影响统计范围。", options: [
+  const question = { id: "question-fixture", kind: "intent_confirmation", question: "<strong>按哪一天统计？</strong>", impact: "影响统计范围。", options: [
     { id: "paid", label: "按支付时间" }, { id: "created", label: "按下单时间" },
   ] };
   const requests: unknown[] = [];
@@ -151,11 +151,22 @@ test("clarification card submits only the selected answer and becomes read-only"
   assert.equal(host.children.length, 1, "SSE replay cannot duplicate a restored card");
   assert.match(host.textContent, /<strong>/, "a model-authored question is rendered as text");
   assert.equal(elements.taskPill.textContent, "等待回答");
-  const choice = host.querySelectorAll("button")[0]!;
-  choice.onclick!(); choice.onclick!();
+  assert.match(host.textContent, /需求确认/);
+  const details = host.querySelectorAll("details")[0]!;
+  assert.equal(details.open, false);
+  assert.match(details.textContent, /其他／补充/);
+  if (freeText) {
+    details.open = true;
+    (host.querySelectorAll("textarea")[0] as any).value = "  请按支付时间  ";
+    const form = host.querySelectorAll("form")[0] as any;
+    form.onsubmit({ preventDefault() {} }); form.onsubmit({ preventDefault() {} });
+  } else {
+    const choice = host.querySelectorAll("button")[0]!;
+    choice.onclick!(); choice.onclick!();
+  }
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(JSON.stringify(requests), JSON.stringify([{ path: "/v1/tasks/task_live/answer", options: {
-    method: "POST", body: { question_id: question.id, option_id: "paid" },
+    method: "POST", body: { question_id: question.id, ...(freeText ? { text: "请按支付时间" } : { option_id: "paid" }) },
   } }]));
   assert.match(host.textContent, /已确认：按支付时间/);
   assert.equal(host.querySelectorAll("button").length, 0);

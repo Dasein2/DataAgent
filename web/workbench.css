@@ -882,7 +882,9 @@ dialog header button:last-child {
 .clarification-card p { margin: 6px 0; color: var(--muted); }
 .clarification-controls { display: flex; flex-wrap: wrap; gap: 6px; }
 .clarification-controls[hidden] { display: none; }
-.clarification-controls form { flex: 1 0 100%; display: grid; gap: 6px; justify-items: start; min-width: 0; }
+.clarification-controls details { flex: 1 0 100%; min-width: 0; }
+.clarification-controls summary { cursor: pointer; padding-block: 5px; }
+.clarification-controls form { display: grid; gap: 6px; justify-items: start; min-width: 0; }
 .clarification-controls textarea { width: 100%; min-width: 0; box-sizing: border-box; }
 .clarification-controls button { white-space: normal; text-align: start; max-width: 100%; }
 

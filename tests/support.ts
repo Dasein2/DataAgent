@@ -8,7 +8,8 @@ export async function testConfig(): Promise<AppConfig> {
   await mkdir(join(dataDir, "sessions"));
   await mkdir(join(dataDir, "audit"));
   return {
-    host: "127.0.0.1", port: 0, apiToken: "test-token", dataDir, sessionTtlMs: 60_000,
+    // Most legacy tests exercise the execution phase; confirmation is covered explicitly.
+    host: "127.0.0.1", port: 0, apiToken: "test-token", dataDir, intentConfirmation: false, sessionTtlMs: 60_000,
     maxSessions: 5, allowPrivateNetwork: true, env: "development",
     model: { provider: "openai", modelId: "gpt-5.2", thinkingLevel: "off" },
     budgets: { maxTurns: 40, maxQueries: 60, taskTimeoutMs: 500, queryTimeoutMs: 100,

@@ -259,15 +259,23 @@ The console reconnects interrupted streams with `Last-Event-ID`, suppresses dupl
 task state between retries so a missed terminal event does not leave the controls stuck. Loading a
 historical session also resumes an active task's progress.
 
-When the agent cannot resolve a material business choice from available evidence, `ask_user` settles
-its current Pi run and the task enters `waiting_for_user`. No other tool in that turn executes.
-The console displays a clarification card and allows one choice or a free-text answer. API clients
+Every new analysis task starts with an intent confirmation, including follow-up tasks in an existing
+session. The model first summarizes its understanding through `ask_user`; before the user replies,
+only that tool is available and other model-issued tools cannot execute. The console displays the
+proposed scope with meaningful choices, or a “confirm and start” button if no choice is necessary.
+“Other / add details” accepts free-text corrections. This confirmation is task-local, not a business
+catalog definition. If the model fails to produce a structured question, a clearly labelled fallback
+asks the user to confirm or correct their original request; unconfirmed model output is not a report.
+
+After confirmation, the full capability-gated toolset is restored. If exploration reveals a material
+business choice that the evidence cannot settle, the model can call `ask_user` again. Each question
+settles the current Pi run and enters `waiting_for_user`; no other tool in that turn executes. API clients
 read the pending question from `question_asked` or the last entry in `task.clarifications`. A reply
 requires the current question ID; duplicate or stale replies cannot resume the task again. The task
 continues in the same session under its original ID and cumulative budgets. `execution_ms` excludes
 user wait time, which is tracked separately in `waiting_ms`. A task can ask up to eight questions,
-one at a time, including when a new ambiguity surfaces during exploration. Each question requires
-at least two model turns left in the task budget. Each wait expires after 15 minutes or the
+one at a time, including the initial confirmation. New tasks require `max_turns >= 3`. Additional
+questions require at least two model turns left in the task budget. Each wait expires after 15 minutes or the
 configured session TTL, whichever is shorter.
 Waiting reserves the conversation, so queued work runs after the waiting task. Closing the session
 cancels a pending task. On restart, any remaining pending tasks become `incomplete` and retain

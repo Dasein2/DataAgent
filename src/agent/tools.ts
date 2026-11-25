@@ -675,7 +675,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     defineTool({
       name: ASK_USER,
       label: "Clarify the analysis with the user",
-      description: "Pause for one material business decision that cannot be resolved from the conversation, reference material or database. Send this tool by itself. Give supported options only, or leave them out; the user can always answer in their own words.",
+      description: "Confirm the proposed scope at the start of a task, or pause for one unresolved business decision during analysis. Call this tool alone. Restate the scope for an initial confirmation. Give concrete choices when useful, or omit them to accept confirmation or a free-text answer.",
       parameters: Type.Unsafe<z.infer<typeof ClarificationQuestion>>(z.toJSONSchema(ClarificationQuestion, { io: "input" })),
       executionMode: "sequential",
       execute: async (_id, params) => {

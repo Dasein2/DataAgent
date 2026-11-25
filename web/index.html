@@ -2058,6 +2058,8 @@ function streamTask(taskId) {
 function clarificationCard(host, question, taskId) {
   const card = document.createElement("section");
   card.className = "clarification-card";
+  const stage = document.createElement("p");
+  stage.textContent = question.kind === "intent_confirmation" ? "需求确认" : "分析中需确认";
   const title = document.createElement("h3");
   title.id = "clarification-" + question.id;
   title.textContent = question.question;
@@ -2069,7 +2071,7 @@ function clarificationCard(host, question, taskId) {
   const status = document.createElement("p");
   status.setAttribute("role", "status");
   status.hidden = true;
-  card.append(title, impact, controls, status);
+  card.append(stage, title, impact, controls, status);
   host.append(card);
   const finish = (answer, message = "未回答") => {
     controls.replaceChildren();
@@ -2111,17 +2113,21 @@ function clarificationCard(host, question, taskId) {
     button.onclick = () => void send({ option_id: option.id });
     controls.append(button);
   }
+  const other = document.createElement("details");
+  other.open = !(question.options?.length);
+  const summary = document.createElement("summary");
+  summary.textContent = "其他／补充";
   const form = document.createElement("form");
   const input = document.createElement("textarea");
   input.rows = 2;
   input.required = true;
   input.maxLength = 2000;
-  input.placeholder = "用自己的话补充口径…";
+  input.placeholder = "其他：输入你的补充或纠正…";
   input.setAttribute("aria-label", "你的回答");
   const submit = document.createElement("button");
   submit.type = "submit";
   submit.className = "primary";
-  submit.textContent = "回答并继续";
+  submit.textContent = "提交补充并继续";
   form.onsubmit = event => {
     event.preventDefault();
     const text = input.value.trim();
@@ -2129,7 +2135,8 @@ function clarificationCard(host, question, taskId) {
     else input.focus();
   };
   form.append(input, submit);
-  controls.append(form);
+  other.append(summary, form);
+  controls.append(other);
   return { finish };
 }
 
@@ -2167,7 +2174,7 @@ function handleEvent(event) {
   switch (event.type) {
     case "task_started":
       $("taskPill").className = "pill running";
-      $("taskPill").textContent = "running";
+      $("taskPill").textContent = data.phase === "intent_confirmation" ? "理解需求…" : "running";
       break;
     case "question_asked":
       showClarification(data, event.task_id);
