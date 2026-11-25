@@ -16,7 +16,7 @@ it("always exposes analysis and management tools and gates workspace tools and E
     selectTools(catalog, capabilities).map((t) => t.name).sort();
   const base = names(caps);
   assert.deepEqual(base, [
-    "catalog_overview", "catalog_search", "chart_archive", "chart_create", "chart_list", "chart_revise",
+    "ask_user", "catalog_overview", "catalog_search", "chart_archive", "chart_create", "chart_list", "chart_revise",
     "data_profile", "job_cancel", "job_get", "object_describe", "query_execute", "query_explain",
     "result_compute", "result_read", "result_transform", "session_info", "snapshot_create", "snapshot_drop", "snapshot_list",
   ]);

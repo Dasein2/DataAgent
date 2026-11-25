@@ -1,6 +1,8 @@
 export type TaskEventType =
   | "task_queued"
   | "task_started"
+  | "question_asked"
+  | "question_answered"
   | "task_finished"
   | "message_delta"
   | "reasoning_delta"

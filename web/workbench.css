@@ -877,6 +877,15 @@ dialog header button:last-child {
   #modelChipName { max-width: 180px; }
   #composer .composer-actions { gap: 5px; }
 }
+.clarification-card { min-width: 0; margin-block: 10px; padding: 12px 14px; border: 1px solid var(--border); border-inline-start: 3px solid var(--accent); border-radius: 8px; background: var(--panel); overflow-wrap: anywhere; }
+.clarification-card h3 { margin: 0; font-size: 14px; }
+.clarification-card p { margin: 6px 0; color: var(--muted); }
+.clarification-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.clarification-controls[hidden] { display: none; }
+.clarification-controls form { flex: 1 0 100%; display: grid; gap: 6px; justify-items: start; min-width: 0; }
+.clarification-controls textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+.clarification-controls button { white-space: normal; text-align: start; max-width: 100%; }
+
 .business-report { min-width: 0; padding: 14px; margin-block: 8px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); overflow-wrap: anywhere; }
 .business-report h2, .business-report h3 { margin: 0 0 6px; }
 .business-headline, .business-channel strong, .business-operands { font-variant-numeric: tabular-nums; }

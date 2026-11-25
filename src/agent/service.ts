@@ -1084,7 +1084,7 @@ export class AnalysisService {
 
   listTasksWithActivity(sessionId: string, ownerKey: string): TaskRecord[] {
     return this.history.listTasks(sessionId, ownerKey).map((task) => {
-      if (task.activity || ["queued", "running"].includes(task.status)) return task;
+      if (task.activity || ["queued", "running", "waiting_for_user"].includes(task.status)) return task;
       // Backfill a small optional summary once; keep large details on demand.
       task.activity = taskActivity(task, this.history.listEvents(task.id)).summary;
       this.history.saveTask(ownerKey, task);

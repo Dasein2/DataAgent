@@ -46,7 +46,17 @@ export class HistoryStore {
       const task = record.task as TaskRecord;
       this.tasks.set(task.id, record);
       const events = this.listEvents(task.id);
-      if (task.status === "queued" || task.status === "running") {
+      if (task.status === "waiting_for_user") {
+        const question = task.clarifications?.at(-1);
+        if (question && !question.answer) {
+          const end = Math.min(Date.now(), Date.parse(question.expires_at));
+          task.waiting_ms = (task.waiting_ms ?? 0) + Math.max(0, end - Date.parse(question.asked_at));
+        }
+        task.status = "incomplete";
+        task.finished_at = new Date().toISOString();
+        task.error = { code: "SERVICE_RESTARTED", message: "服务重启，待答分析已结束。可以在历史中查看追问并重新发起分析。" };
+        this.saveTask(record.owner, task);
+      } else if (task.status === "queued" || task.status === "running") {
         let partial = "";
         for (const event of events) {
           if (event.type === "turn_started" || event.type === "tool_started") partial = "";
@@ -62,7 +72,8 @@ export class HistoryStore {
       if (!events.some((event) => event.type === "task_finished")) {
         const seq = (events.at(-1)?.seq ?? 0) + 1;
         this.appendEvent({ seq, id: `${task.id}:${seq}`, task_id: task.id, type: "task_finished", at: task.finished_at ?? new Date().toISOString(),
-          data: { status: task.status, answer: task.answer ?? "", error: task.error ?? null, results: task.results, business_results: task.business_results, operations: task.operations, source_requests: task.source_requests, source_recovery: task.source_recovery } });
+          data: { status: task.status, answer: task.answer ?? "", error: task.error ?? null, duration_ms: task.execution_ms,
+            waiting_ms: task.waiting_ms, clarifications: task.clarifications, results: task.results, business_results: task.business_results, operations: task.operations, source_requests: task.source_requests, source_recovery: task.source_recovery } });
       }
     });
     for (const [id, record] of this.sessions) {

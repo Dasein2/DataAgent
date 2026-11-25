@@ -49,6 +49,11 @@ class Element {
   set textContent(text: string) { this.text = text; this.children = []; }
   replaceChildren(...nodes: Element[]) { this.text = ""; this.children = []; this.append(...nodes); }
   addEventListener(name: string, callback: Function) { this.listeners[name] = callback; }
+  setAttribute() {}
+  querySelectorAll(selectors: string): Element[] {
+    const tags = selectors.split(",").map(tag => tag.trim());
+    return this.children.flatMap(child => [...(tags.includes(child.tag) ? [child] : []), ...child.querySelectorAll(selectors)]);
+  }
 }
 async function harness() {
   const source = await readFile(new URL("../web/task-activity.js", import.meta.url), "utf8");
@@ -104,7 +109,7 @@ for (const status of ["succeeded", "failed", "cancelled", "incomplete"]) {
     let closed = false, copied = "";
     const elements: Record<string, any> = {};
     const state = { assistantEl: host, activity: { observe() {}, finish() { closed = true; } }, taskId: "task_live",
-      trailingText: true, lastSegmentText: answer, lastTextNode: text, sessionReady: true };
+      trailingText: true, lastSegmentText: answer, lastTextNode: text, sessionReady: true, clarificationCards: new Map() };
     const context = createContext({ state, document: { createElement: (tag: string) => new Element(tag) },
       $: (id: string) => elements[id] ??= { textContent: "", dataset: {}, click() {} },
       workbench: { refreshContext: async () => {}, updateUsage() {} },
@@ -123,6 +128,39 @@ for (const status of ["succeeded", "failed", "cancelled", "incomplete"]) {
     if (status !== "succeeded") assert.match(host.textContent, /TASK_/);
   });
 }
+
+test("clarification card submits only the selected answer and becomes read-only", async () => {
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const host = new Element("div");
+  const question = { id: "question-fixture", question: "<strong>按哪一天统计？</strong>", impact: "影响统计范围。", options: [
+    { id: "paid", label: "按支付时间" }, { id: "created", label: "按下单时间" },
+  ] };
+  const requests: unknown[] = [];
+  const state = { taskId: "task_live", pendingQuestion: null, clarificationCards: new Map(), assistantEl: host };
+  const elements: Record<string, any> = {};
+  const context = createContext({ state, question, document: { createElement: (tag: string) => new Element(tag) },
+    $: (id: string) => elements[id] ??= { dataset: {} }, composer: { update() {} },
+    isNearBottom: () => false, ensureAssistant() {}, closeSegment() {},
+    api: async (path: string, options: unknown) => {
+      requests.push({ path, options });
+      return { task: { clarifications: [{ ...question, answer: { text: "按支付时间" } }] } };
+    },
+  });
+  runInContext(html.slice(html.indexOf("function clarificationCard("), html.indexOf("function handleEvent(")), context);
+  runInContext('showClarification(question, "task_live"); showClarification(question, "task_live")', context);
+  assert.equal(host.children.length, 1, "SSE replay cannot duplicate a restored card");
+  assert.match(host.textContent, /<strong>/, "a model-authored question is rendered as text");
+  assert.equal(elements.taskPill.textContent, "等待回答");
+  const choice = host.querySelectorAll("button")[0]!;
+  choice.onclick!(); choice.onclick!();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(JSON.stringify(requests), JSON.stringify([{ path: "/v1/tasks/task_live/answer", options: {
+    method: "POST", body: { question_id: question.id, option_id: "paid" },
+  } }]));
+  assert.match(host.textContent, /已确认：按支付时间/);
+  assert.equal(host.querySelectorAll("button").length, 0);
+  assert.equal(state.pendingQuestion, null);
+});
 
 test("duration formatting does not invent elapsed time; plain answers hide an empty process", async () => {
   const { context, create } = await harness();

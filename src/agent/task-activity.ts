@@ -52,7 +52,7 @@ export function taskActivity(task: TaskRecord, events: TaskEvent[]): { summary: 
       tool_calls: seenCalls.size,
       errors: output.filter((event) => event.type === "tool_finished" && event.data.is_error).length,
       retries: output.filter((event) => event.type === "retry").length,
-      duration_ms: Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : undefined,
+      duration_ms: task.execution_ms ?? (Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : undefined),
       available: events.length > 0,
     },
     events: output,

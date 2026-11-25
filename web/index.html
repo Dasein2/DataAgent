@@ -828,6 +828,8 @@ const state = {
   account: null,
   sessionId: null,
   taskId: null,
+  pendingQuestion: null,
+  clarificationCards: new Map(),
   streamAbort: null,
   profiles: [],
   sessions: [],
@@ -2002,6 +2004,7 @@ $("btnSend").onclick = async () => {
     const data = await api("/v1/sessions/" + id + "/tasks", { method: "POST", body: { goal } });
     void loadHistory();
     if (state.sessionId !== id) return;
+    state.clarificationCards.clear();
     state.hasConversation = true;
     setTitleButtonSource(titleNamingSessionId === state.sessionId ? "naming" : "idle");
     state.taskId = data.task.id;
@@ -2037,12 +2040,14 @@ function streamTask(taskId) {
     onCursor: (cursor) => sessionStorage.setItem("data-agent-task-cursor:" + taskId, String(cursor)),
     onConnection: (status) => {
       if (state.streamAbort !== controller) return;
-      $("taskPill").textContent = status === "reconnecting" ? "连接中断，正在恢复…" : "running";
+      $("taskPill").textContent = status === "reconnecting" ? "连接中断，正在恢复…" : state.pendingQuestion ? "等待回答" : "running";
     },
   }).catch((error) => {
     if (controller.signal.aborted || state.streamAbort !== controller) return;
     $("taskPill").className = "pill failed";
     $("taskPill").textContent = "进度连接失败，请刷新会话";
+    state.clarificationCards.get(state.pendingQuestion)?.finish(undefined, "进度连接失败，请刷新会话。");
+    state.pendingQuestion = null;
     state.taskId = null;
     $("btnSend").disabled = !state.sessionReady;
     $("btnCancel").disabled = true;
@@ -2050,14 +2055,125 @@ function streamTask(taskId) {
     setStatus("connStatus", error.message, "err");
   });
 }
+function clarificationCard(host, question, taskId) {
+  const card = document.createElement("section");
+  card.className = "clarification-card";
+  const title = document.createElement("h3");
+  title.id = "clarification-" + question.id;
+  title.textContent = question.question;
+  card.setAttribute("aria-labelledby", title.id);
+  const impact = document.createElement("p");
+  impact.textContent = question.impact;
+  const controls = document.createElement("div");
+  controls.className = "clarification-controls";
+  const status = document.createElement("p");
+  status.setAttribute("role", "status");
+  status.hidden = true;
+  card.append(title, impact, controls, status);
+  host.append(card);
+  const finish = (answer, message = "未回答") => {
+    controls.replaceChildren();
+    controls.hidden = true;
+    status.hidden = false;
+    status.textContent = answer ? `已确认：${answer.text}` : message;
+  };
+  if (!taskId || question.answer) {
+    finish(question.answer);
+    return { finish };
+  }
+  let sending = false;
+  async function send(input) {
+    if (sending || state.taskId !== taskId || state.pendingQuestion !== question.id) return;
+    sending = true;
+    const inputs = controls.querySelectorAll("button, textarea");
+    inputs.forEach(node => { node.disabled = true; });
+    status.hidden = false;
+    status.textContent = "正在提交…";
+    try {
+      const { task } = await api(`/v1/tasks/${encodeURIComponent(taskId)}/answer`, {
+        method: "POST", body: { question_id: question.id, ...input },
+      });
+      const answered = task.clarifications?.find(entry => entry.id === question.id)?.answer;
+      if (answered) handleClarificationAnswer({ question_id: question.id, ...answered }, taskId);
+    } catch (error) {
+      if (state.taskId !== taskId || state.pendingQuestion !== question.id) return;
+      status.textContent = error.message;
+      inputs.forEach(node => { node.disabled = false; });
+    } finally {
+      sending = false;
+    }
+  }
+  for (const option of question.options ?? []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost";
+    button.textContent = option.label;
+    button.onclick = () => void send({ option_id: option.id });
+    controls.append(button);
+  }
+  const form = document.createElement("form");
+  const input = document.createElement("textarea");
+  input.rows = 2;
+  input.required = true;
+  input.maxLength = 2000;
+  input.placeholder = "用自己的话补充口径…";
+  input.setAttribute("aria-label", "你的回答");
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "primary";
+  submit.textContent = "回答并继续";
+  form.onsubmit = event => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (text) void send({ text });
+    else input.focus();
+  };
+  form.append(input, submit);
+  controls.append(form);
+  return { finish };
+}
+
+function showClarification(question, taskId) {
+  if (taskId !== state.taskId || !question.id) return;
+  const previous = state.clarificationCards.get(question.id);
+  if (previous) return;
+  const follow = isNearBottom();
+  ensureAssistant();
+  closeSegment();
+  state.trailingText = false;
+  state.pendingQuestion = question.id;
+  state.clarificationCards.set(question.id, clarificationCard(state.assistantEl, question, taskId));
+  $("taskPill").textContent = "等待回答";
+  $("taskActivity").textContent = "请回答下方问题以继续分析";
+  delete $("taskActivity").dataset.since;
+  composer.update();
+  if (follow) $("messages").scrollTop = $("messages").scrollHeight;
+}
+
+function handleClarificationAnswer(data, taskId) {
+  if (taskId !== state.taskId) return;
+  state.clarificationCards.get(data.question_id)?.finish(data);
+  if (state.pendingQuestion !== data.question_id) return;
+  state.pendingQuestion = null;
+  $("taskPill").textContent = "running";
+  $("taskActivity").textContent = "继续分析…";
+  composer.update();
+}
+
 function handleEvent(event) {
   const data = event.data || {};
-  if (["task_started", "message_delta", "tool_started", "tool_finished", "retry", "notice"].includes(event.type)) ensureAssistant();
+  if (["task_started", "message_delta", "tool_started", "tool_finished", "question_asked", "retry", "notice"].includes(event.type)) ensureAssistant();
   state.activity?.observe(event);
   switch (event.type) {
     case "task_started":
       $("taskPill").className = "pill running";
       $("taskPill").textContent = "running";
+      break;
+    case "question_asked":
+      showClarification(data, event.task_id);
+      break;
+    case "question_answered":
+      handleClarificationAnswer(data, event.task_id);
       break;
     case "turn_started":
       closeSegment();
@@ -2107,6 +2223,15 @@ function handleEvent(event) {
       void workbench.refreshContext();
       ensureAssistant();
       closeSegment();
+      for (const question of data.clarifications ?? []) {
+        const card = state.clarificationCards.get(question.id);
+        if (card) card.finish(question.answer);
+        else clarificationCard(state.assistantEl, question);
+      }
+      if (!(data.clarifications ?? []).some(question => question.id === state.pendingQuestion)) {
+        state.clarificationCards.get(state.pendingQuestion)?.finish();
+      }
+      state.pendingQuestion = null;
       const finalAnswer = typeof data.answer === "string" ? data.answer.trim() : "";
       const trailingAnswer = finalAnswer && state.trailingText && state.lastSegmentText.trim() === finalAnswer;
       if (finalAnswer) {
@@ -2678,6 +2803,8 @@ function clearTranscript() {
   state.streamAbort?.abort();
   state.streamAbort = null;
   state.taskId = null;
+  state.pendingQuestion = null;
+  state.clarificationCards.clear();
   state.assistantEl = null;
   state.textNode = null;
   state.segmentText = "";
@@ -2751,6 +2878,7 @@ function showSession(session, tasks) {
         onEvents: (events, host) => { for (const event of events) renderProcessEvent(event, host); },
       });
     }
+    for (const question of task.clarifications ?? []) clarificationCard(body, question);
     if (task.answer) {
       const answer = document.createElement("div"); answer.className = "text final";
       answer.innerHTML = renderMarkdown(task.answer); body.append(answer);
@@ -2765,7 +2893,16 @@ function showSession(session, tasks) {
   if (state.taskId) {
     const current = tasks.find((task) => task.id === state.taskId);
     state.taskMeta = current || { id: state.taskId };
-    if (current) addMessage("user", { text: current.goal, taskId: current.id });
+    if (current) {
+      addMessage("user", { text: current.goal, taskId: current.id });
+      for (const question of current.clarifications ?? []) {
+        if (!question.answer && current.status === "waiting_for_user") showClarification(question, current.id);
+        else {
+          ensureAssistant();
+          state.clarificationCards.set(question.id, clarificationCard(state.assistantEl, question));
+        }
+      }
+    }
     $("btnCancel").disabled = false;
     $("taskId").textContent = state.taskId;
     streamTask(state.taskId);

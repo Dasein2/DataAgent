@@ -222,7 +222,7 @@ it("serves scoped business documents and projects only the active revision into 
     const liveTools = (await request(`/v1/tools?session_id=${session.id}`, 200)).tools;
     const liveNames = liveTools.map((t: any) => t.name).sort();
     const catalogue = (await request("/v1/tools", 200)).tools;
-    assert.equal(catalogue.length, 24);
+    assert.equal(catalogue.length, 25);
     assert.deepEqual(liveNames, catalogue.map((t: any) => t.name).filter((name: string) => !name.startsWith("dataset_") && !name.startsWith("business_")).sort());
     assert.deepEqual(requests.at(-1).tools.map((t: any) => t.function.name).sort(), liveNames);
     for (const name of ["job_get", "job_cancel", "chart_list", "chart_archive", "chart_revise"]) {

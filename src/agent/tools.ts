@@ -1,4 +1,6 @@
 import { Type } from "typebox";
+import { z } from "zod";
+import { ASK_USER, ClarificationQuestion, type TaskClarification } from "./clarification.js";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { BudgetConfig } from "../config.js";
 import type { SessionCapabilities } from "../db/types.js";
@@ -23,6 +25,7 @@ export interface ToolRuntime {
   taskStatus(): Record<string, unknown>;
   cancelActive(): Promise<boolean>;
   sourceBlocked?(): boolean;
+  askUser?(question: z.infer<typeof ClarificationQuestion>): Pick<TaskClarification, "id">;
   business?: import("../business/service.js").BusinessAnalysis;
 }
 
@@ -669,6 +672,20 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
   });
 
   const tools: ToolDefinition[] = [
+    defineTool({
+      name: ASK_USER,
+      label: "Clarify the analysis with the user",
+      description: "Pause for one material business decision that cannot be resolved from the conversation, reference material or database. Send this tool by itself. Give supported options only, or leave them out; the user can always answer in their own words.",
+      parameters: Type.Unsafe<z.infer<typeof ClarificationQuestion>>(z.toJSONSchema(ClarificationQuestion, { io: "input" })),
+      executionMode: "sequential",
+      execute: async (_id, params) => {
+        const validated = ClarificationQuestion.safeParse(params);
+        if (!validated.success) throw new AppError("INVALID_INPUT", "Ask one non-empty question with an impact and optional distinct choices.");
+        if (!runtime.askUser) throw new AppError("NO_ACTIVE_TASK", "No active analysis task");
+        const question = runtime.askUser(validated.data);
+        return { ...textOutput("Waiting for the user's answer. Do not assume an answer or run queries for it.", { question_id: question.id }), terminate: true };
+      },
+    }),
     ...analysisTools(runtime),
     sessionInfo,
     catalogSearch,

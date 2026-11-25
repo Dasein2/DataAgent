@@ -13,6 +13,7 @@ import { SaveProfileRequest } from "../db/profiles-store.js";
 import { ModelPatch } from "../agent/model-settings.js";
 import { ChannelSelection } from "../agent/channels.js";
 import { toolCatalog } from "../agent/tools.js";
+import { ClarificationAnswer } from "../agent/clarification.js";
 import { z } from "zod";
 import { ResultOperation } from "../analysis/operations.js";
 import { MetricRequest } from "../business/types.js";
@@ -428,8 +429,15 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     if (!session) throw new AppError("NO_ACTIVE_TASK", "Historical tasks cannot be steered");
     const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
     if (!text) throw new AppError("INVALID_INPUT", "text is required");
-    await session.steer(text);
+    await session.steer(text, req.params.id);
     res.json({ ok: true });
+  });
+
+  app.post("/v1/tasks/:id/answer", (req, res) => {
+    const { session, task } = service.findTask(req.params.id, ownerOf(req));
+    if (!session) throw new AppError("CLARIFICATION_NOT_PENDING", "这条追问已结束，请重新发起分析。");
+    const input = ClarificationAnswer.parse(req.body);
+    res.status(202).json({ task: session.answerClarification(task.id, input) });
   });
 
   app.get("/v1/tasks/:id/activity", (req, res) => {

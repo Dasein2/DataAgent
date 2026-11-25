@@ -192,11 +192,12 @@ when configured; `X-Caller-Id` scopes legacy ownership (default: a hash of the t
 | POST | `/v1/sessions/{id}/title` | name the session from its own conversation (works for live and saved sessions) |
 | GET | `/v1/sessions/{id}/tasks` | saved tasks, including final/partial answers and errors |
 | GET | `/v1/sessions/{id}/results` | result metadata for the session |
-| POST | `/v1/sessions/{id}/tasks` | submit an analysis goal (queued if the session is busy) |
-| GET | `/v1/tasks/{id}` | task state: `queued/running/succeeded/failed/cancelled/incomplete` |
+| POST | `/v1/sessions/{id}/tasks` | submit an analysis goal; queued if running, refused while awaiting clarification |
+| GET | `/v1/tasks/{id}` | task state: `queued/running/waiting_for_user/succeeded/failed/cancelled/incomplete` |
 | GET | `/v1/tasks/{id}/events` | SSE stream (resumable with `Last-Event-ID`) |
-| POST | `/v1/tasks/{id}/cancel` | cancel the running query and the task |
-| POST | `/v1/tasks/{id}/steer` | inject a follow-up instruction into the running task |
+| POST | `/v1/tasks/{id}/answer` | answer a pending clarification: `{question_id, option_id}` or `{question_id, text}` |
+| POST | `/v1/tasks/{id}/cancel` | cancel a queued, running or waiting task |
+| POST | `/v1/tasks/{id}/steer` | inject an instruction into a running task; not a clarification answer |
 | GET | `/v1/results/{id}` | paged rows: `?offset=0&limit=50` |
 | GET | `/v1/results/{id}/data.csv` | streamed CSV export (truncated results are named `-partial`) |
 | GET | `/v1/sessions/{id}/artifacts` | chart artifacts produced in the session |
@@ -245,7 +246,8 @@ SSE frame shape (`event:` mirrors `data.type`):
 ```
 
 Event types: `task_queued`, `task_started`, `turn_started`, `message_delta`, `reasoning_delta`,
-`tool_started`, `tool_finished`, `usage`, `retry`, `context_compacted`, `notice`, `task_finished`.
+`tool_started`, `tool_finished`, `usage`, `retry`, `context_compacted`, `notice`, `question_asked`,
+`question_answered`, `task_finished`.
 
 `succeeded` requires a complete, non-empty final assistant answer. A final model error is `failed`
 (`MODEL_ERROR`); a token limit, missing final answer, turn limit or interrupted execution is
@@ -257,10 +259,24 @@ The console reconnects interrupted streams with `Last-Event-ID`, suppresses dupl
 task state between retries so a missed terminal event does not leave the controls stuck. Loading a
 historical session also resumes an active task's progress.
 
+When the agent cannot resolve a material business choice from available evidence, `ask_user` settles
+its current Pi run and the task enters `waiting_for_user`. No other tool in that turn executes.
+The console displays a clarification card and allows one choice or a free-text answer. API clients
+read the pending question from `question_asked` or the last entry in `task.clarifications`. A reply
+requires the current question ID; duplicate or stale replies cannot resume the task again. The task
+continues in the same session under its original ID and cumulative budgets. `execution_ms` excludes
+user wait time, which is tracked separately in `waiting_ms`. A task can ask up to eight questions,
+one at a time, including when a new ambiguity surfaces during exploration. Each question requires
+at least two model turns left in the task budget. Each wait expires after 15 minutes or the
+configured session TTL, whichever is shorter.
+Waiting reserves the conversation, so queued work runs after the waiting task. Closing the session
+cancels a pending task. On restart, any remaining pending tasks become `incomplete` and retain
+their clarification history. Each clarification applies to its analysis task.
+
 Each question groups intermediate text, tool cards, retries and notices into one execution-process
 disclosure. Running tasks start expanded; completion (including cancellation/failure) collapses it.
 The final answer, charts and terminal error remain outside. The summary shows intermediate message
-count, distinct tool calls and wall-clock elapsed time, with retry/tool-error counts. SSE text deltas
+count, distinct tool calls and elapsed execution time, with retry/tool-error counts. SSE text deltas
 are not counted as separate messages and hidden reasoning is never included. Plain answers without
 intermediate content do not show an empty disclosure. Historical details load only when expanded via
 `GET /v1/tasks/:id/activity` (owner-authorized, compacted deltas); reopening the fold preserves its DOM.
@@ -269,19 +285,21 @@ history cannot be reconstructed from the final answer alone.
 
 ## Agent tools
 
-21 tool definitions. The model’s toolset is selected once when creating or reconnecting a session:
+The service has 25 tool definitions, gated by session capabilities:
 
+- Clarify: `ask_user`, available across all supported engines without a business catalog.
 - Discover: `session_info`, `catalog_search`, `catalog_overview`, `object_describe(objects)` (1–20 relations), `data_profile`.
 - Source read: `query_explain`, `query_execute` (`dry_run`, opt-in `reuse`).
-- Saved rows: `result_read` (`mode: "rows"` for paging/projection, `"summary"` for statistics), `result_transform` (local SQL over `source: {kind: "result" | "snapshot", id}`).
+- Saved rows: `result_read` (`mode: "rows"` for paging/projection, `"summary"` for statistics), `result_compute` (structured computation) and `result_transform` (local SQL over `source: {kind: "result" | "snapshot", id}`).
 - Local snapshots: `snapshot_create`, `snapshot_list`, `snapshot_drop`.
 - BI evidence: `chart_create`.
 - Controlled workspace: `dataset_create`, `dataset_list`, `dataset_drop`.
 - Task and chart management: `job_get`, `job_cancel`, `chart_list`, `chart_archive`, `chart_revise`.
+- Optional Doris pilot: `business_lookup`, `business_analyze` (an enabled published catalog is required).
 
 Management tools are available in the same conversation as analysis. The model is instructed to
-cancel SQL, rename charts, or archive/restore charts only when the user asks. A session gets 18
-tools on an engine with plan support, plus the 3 workspace tools when it has a writable workspace.
+cancel SQL, rename charts, or archive/restore charts only when the user asks. A session gets 20
+standard tools on an engine with plan support, plus the 3 workspace tools when it has a writable workspace.
 Engines without plan support omit `query_explain`. Tool visibility is not an access grant: workspace
 checks, source read-only enforcement, ownership, and budgets still apply. The workbench’s task,
 snapshot and artifact APIs are unchanged. The old `DATA_AGENT_TOOL_PROFILE` setting is ignored and

@@ -25,8 +25,9 @@ import { taskActivity, type ActivitySummary } from "./task-activity.js";
 import { generateSessionTitle, type GeneratedSessionTitle } from "./session-title.js";
 import { businessContextPrompt, contextSummary } from "../business-context/store.js";
 import type { BusinessContextFile } from "../business-context/types.js";
+import { ASK_USER, CLARIFICATION_WAIT_MS, MAX_CLARIFICATIONS, clarificationPrompt, type ClarificationAnswer, type TaskClarification } from "./clarification.js";
 
-export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "incomplete";
+export type TaskStatus = "queued" | "running" | "waiting_for_user" | "succeeded" | "failed" | "cancelled" | "incomplete";
 
 export interface TaskUsage {
   input: number;
@@ -49,6 +50,9 @@ export interface TaskRecord {
   turns: number;
   max_turns?: number;
   queries_used: number;
+  execution_ms?: number;
+  waiting_ms?: number;
+  clarifications?: TaskClarification[];
   results: string[];
   business_results?: string[];
   /** Chart artifacts produced by this task, in creation order. */
@@ -65,7 +69,10 @@ export interface TaskRecord {
 interface QueueItem {
   record: TaskRecord;
   maxTurns: number;
+  resumed?: boolean;
 }
+
+type StagedQuestion = Pick<TaskClarification, "id" | "question" | "impact" | "options">;
 
 interface FinalAssistantMessage {
   stopReason?: string;
@@ -104,6 +111,8 @@ export class AnalysisSession {
   private changingModel = false;
   private modelSelection?: { provider: string; modelId: string; thinkingLevel?: ThinkingLevel };
   private current?: TaskRecord;
+  private clarificationTimer?: ReturnType<typeof setTimeout>;
+  private stagedQuestion?: StagedQuestion;
   private readonly queue: QueueItem[] = [];
   private readonly tasks = new Map<string, TaskRecord>();
   private settledResolve?: (aborted: boolean) => void;
@@ -144,6 +153,7 @@ export class AnalysisSession {
       ? new BusinessAnalysis(options.businessCatalog, options.businessContext.scope, db, options.results) : undefined;
     let session: AgentSession;
     let tools: ToolInfo[];
+    let analysis: AnalysisSession;
     try {
       await mkdir(cwd, { recursive: true });
       const toolRuntime: ToolRuntime = {
@@ -153,6 +163,7 @@ export class AnalysisSession {
         currentTaskId: () => sessionRef.current?.id,
         taskStatus: () => (sessionRef.current ? { ...sessionRef.current, max_turns: sessionRef.current.max_turns ?? app.budgets.maxTurns } : { status: "idle" }),
         cancelActive: () => db.cancel(),
+        askUser: (input) => analysis.stageClarification(input),
         sourceBlocked: () => Boolean(sessionRef.current?.source_recovery) || db.snapshot().status === "unavailable",
         business,
       };
@@ -205,7 +216,7 @@ export class AnalysisSession {
       throw error;
     }
 
-    const analysis = new AnalysisSession(
+    analysis = new AnalysisSession(
       db.id,
       options.ownerKey,
       db,
@@ -225,6 +236,28 @@ export class AnalysisSession {
     }
     analysis.title = options.title;
     analysis.modelSelection = options.modelSelection;
+    // Preserve Pi's existing hooks. The assistant message exposes the full batch, so
+    // no sibling tool can start even if it precedes ask_user in the model's output.
+    const beforeToolCall = session.agent.beforeToolCall;
+    session.agent.beforeToolCall = async (context, signal) => {
+      if (context.toolCall.name !== ASK_USER &&
+          (analysis.stagedQuestion || context.assistantMessage.content.some(part => part.type === "toolCall" && part.name === ASK_USER))) {
+        return { block: true, terminate: true, reason: "Other tools cannot run in the same turn as ask_user." };
+      }
+      return beforeToolCall?.(context, signal);
+    };
+    const finishTurn = session.agent.finishTurn;
+    session.agent.finishTurn = async (turn, signal) => {
+      const decision = await finishTurn?.(turn, signal);
+      if (!analysis.stagedQuestion) return decision || undefined;
+      // End this Pi run after the tool results have been recorded, without aborting it.
+      // A stale queued steer is not an answer to the pending question.
+      if (session.pendingMessageCount) {
+        session.clearQueue();
+        if (analysis.current) broker.publish(analysis.current.id, "notice", { code: "CLARIFICATION_PENDING", text: "未送达的插入指令未执行。请在追问卡片中重新补充。" });
+      }
+      return { action: "end" };
+    };
     analysis.agent.subscribe((event) => {
       analysis.mapEvent(event);
     });
@@ -243,7 +276,7 @@ export class AnalysisSession {
   }
 
   get isBusy(): boolean {
-    return this.changingModel || this.draining || !this.agent.isIdle;
+    return this.changingModel || this.draining || this.current?.status === "waiting_for_user" || !this.agent.isIdle;
   }
 
   /** Reserve the session before any asynchronous credential/catalogue work. */
@@ -324,7 +357,7 @@ export class AnalysisSession {
         created_at: task.created_at,
         finished_at: task.finished_at,
       })),
-      current_task_id: this.current && ["queued", "running"].includes(this.current.status) ? this.current.id : null,
+      current_task_id: this.current && ["queued", "running", "waiting_for_user"].includes(this.current.status) ? this.current.id : null,
       queued_tasks: this.queue.length,
       business_context: this.businessContextSelection(),
       business_pilot: this.business ? { enabled: this.business.enabled } : undefined,
@@ -368,6 +401,8 @@ export class AnalysisSession {
   submit(goal: string, options: { maxTurns?: number } = {}): TaskRecord {
     if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
     if (this.changingModel) throw new AppError("SESSION_BUSY", "正在切换模型，请稍后发送。");
+    if (this.stagedQuestion || this.current?.status === "waiting_for_user")
+      throw new AppError("SESSION_BUSY", "请先回答或取消当前分析的追问。");
     const snapshot = this.db.snapshot();
     if (snapshot.status === "unavailable") throw new AppError("SESSION_UNAVAILABLE", snapshot.unavailable_reason ?? "Open a new session");
     const maxTurns = Math.min(options.maxTurns ?? this.app.budgets.maxTurns, this.app.budgets.maxTurns);
@@ -394,8 +429,68 @@ export class AnalysisSession {
     return record;
   }
 
+  private stageClarification(input: Pick<TaskClarification, "question" | "impact" | "options">) {
+    const task = this.current;
+    if (!task || task.status !== "running" || this.abortRequested || this.timedOut)
+      throw new AppError("NO_ACTIVE_TASK", "No running analysis can ask for clarification");
+    if (this.stagedQuestion) throw new AppError("SESSION_BUSY", "Only one question can be asked at a time");
+    if ((task.clarifications?.length ?? 0) >= MAX_CLARIFICATIONS || this.maxTurns - this.turns < 2)
+      throw new AppError("TASK_BUDGET_EXCEEDED", "The clarification limit was reached or fewer than two turns remain to explore and answer. State the unresolved limitation without guessing.");
+    const id = randomUUID();
+    this.stagedQuestion = { ...input, id };
+    return { id };
+  }
+
+  private pendingQuestion(task: TaskRecord) {
+    const question = task.clarifications?.at(-1);
+    return question && !question.answer ? question : undefined;
+  }
+
+  answerClarification(taskId: string, input: ClarificationAnswer): TaskRecord {
+    const previous = this.tasks.get(taskId);
+    if (previous?.error?.code === "CLARIFICATION_EXPIRED" && this.pendingQuestion(previous)?.id === input.question_id)
+      throw new AppError("CLARIFICATION_EXPIRED", "追问已过期，请重新发起分析。");
+    const task = this.current;
+    const question = task && this.pendingQuestion(task);
+    if (this.closed || task?.id !== taskId || task.status !== "waiting_for_user" || question?.id !== input.question_id)
+      throw new AppError("CLARIFICATION_NOT_PENDING", "这条追问已处理或不是当前待答问题。");
+    if (Date.now() >= Date.parse(question.expires_at)) {
+      this.endClarification(task, "CLARIFICATION_EXPIRED");
+      throw new AppError("CLARIFICATION_EXPIRED", "追问已过期，请重新发起分析。");
+    }
+    const option = "option_id" in input ? question.options?.find(entry => entry.id === input.option_id) : undefined;
+    if ("option_id" in input && !option) throw new AppError("INVALID_INPUT", "请选择当前追问的有效选项。");
+    this.stopClarificationClock(task);
+    question.answer = { text: "text" in input ? input.text : option!.label, option_id: option?.id, answered_at: new Date().toISOString() };
+    task.status = "queued";
+    this.queue.unshift({ record: task, maxTurns: task.max_turns ?? this.app.budgets.maxTurns, resumed: true });
+    this.saveTask(task);
+    this.broker.publish(task.id, "question_answered", { question_id: question.id, ...question.answer });
+    this.touch();
+    void this.drain();
+    return task;
+  }
+
+  private stopClarificationClock(task: TaskRecord): void {
+    clearTimeout(this.clarificationTimer);
+    this.clarificationTimer = undefined;
+    const question = this.pendingQuestion(task);
+    if (question) task.waiting_ms = (task.waiting_ms ?? 0) + Math.max(0, Date.now() - Date.parse(question.asked_at));
+  }
+
+  private endClarification(task: TaskRecord, code: "TASK_CANCELLED" | "CLARIFICATION_EXPIRED"): void {
+    if (task.status !== "waiting_for_user") return;
+    this.stopClarificationClock(task);
+    task.status = code === "TASK_CANCELLED" ? "cancelled" : "incomplete";
+    task.error = { code, message: code === "TASK_CANCELLED" ? "已取消等待回答的分析。" : "追问等待超时，未执行后续分析。" };
+    task.finished_at = new Date().toISOString();
+    this.current = this.sessionRef.current = undefined;
+    this.finishTask(task, task.execution_ms);
+    void this.drain();
+  }
+
   private async drain(): Promise<void> {
-    if (this.draining) return;
+    if (this.draining || this.current?.status === "waiting_for_user") return;
     this.draining = true;
     try {
       while (this.queue.length > 0 && !this.closed) {
@@ -403,8 +498,9 @@ export class AnalysisSession {
         if (!item) break;
         if (item.record.status !== "queued") continue;
         try {
-          await this.runTask(item.record, item.maxTurns);
+          await this.runTask(item.record, item.maxTurns, item.resumed ?? false);
         } catch (error) {
+          this.stagedQuestion = undefined;
           item.record.status = "failed";
           item.record.error = isAppError(error)
             ? { code: error.code, message: error.message }
@@ -412,24 +508,23 @@ export class AnalysisSession {
           item.record.finished_at = new Date().toISOString();
           this.finishTask(item.record);
         }
-        this.current = undefined;
-        this.sessionRef.current = undefined;
+        if ((item.record.status as TaskStatus) === "waiting_for_user") return;
+        this.current = this.sessionRef.current = undefined;
       }
     } finally {
       this.draining = false;
-      this.current = undefined;
-      this.sessionRef.current = undefined;
     }
   }
 
-  private async runTask(task: TaskRecord, maxTurns: number): Promise<void> {
+  private async runTask(task: TaskRecord, maxTurns: number, resumed: boolean): Promise<void> {
     const snapshot = this.db.snapshot();
-    if (snapshot.status === "unavailable") throw new AppError("SESSION_UNAVAILABLE", snapshot.unavailable_reason ?? "Reconnect this session to continue");
+    if (!resumed && snapshot.status === "unavailable") throw new AppError("SESSION_UNAVAILABLE", snapshot.unavailable_reason ?? "Reconnect this session to continue");
     this.current = task;
     this.sessionRef.current = task;
     this.abortRequested = false;
     this.timedOut = false;
-    this.turns = 0;
+    this.turns = task.turns;
+    this.stagedQuestion = undefined;
     this.maxTurns = maxTurns;
     this.turnBudgetExceeded = false;
     this.settledAborted = false;
@@ -438,12 +533,13 @@ export class AnalysisSession {
     this.sourceRequestsInFlight.clear();
     this.agent.setActiveToolsByName(this.effectiveTools.map(t => t.name));
     task.status = "running";
-    task.started_at = new Date().toISOString();
-    const queriesBefore = this.db.snapshot().queries.used;
+    task.started_at ??= new Date().toISOString();
+    const queriesBefore = snapshot.queries.used;
     const startedAt = Date.now();
+    const remainingMs = this.app.budgets.taskTimeoutMs - (task.execution_ms ?? 0);
     const usageBefore = this.agent.getSessionStats();
     this.saveTask(task);
-    this.broker.publish(task.id, "task_started", { goal: task.goal, max_turns: maxTurns });
+    this.broker.publish(task.id, "task_started", { goal: task.goal, max_turns: maxTurns, resumed });
 
     let settledResolve: ((aborted: boolean) => void) | undefined;
     const settled = new Promise<boolean>((resolve) => {
@@ -454,18 +550,22 @@ export class AnalysisSession {
     const timer = setTimeout(() => {
       this.timedOut = true;
       this.agent.abort();
-    }, this.app.budgets.taskTimeoutMs);
+    }, Math.max(1, remainingMs));
     timer.unref?.();
 
     let failure: unknown;
     try {
+      if (remainingMs <= 0) {
+        this.timedOut = true;
+        throw new AppError("TASK_TIMEOUT", "No execution time remains");
+      }
       await this.db.observeOperations((op) => {
         const operations = task.operations ??= {};
         const totals = operations[op.kind] ??= { count: 0, duration_ms: 0 };
         totals.count++;
         totals.duration_ms += op.duration_ms;
         this.broker.publish(task.id, "db_operation", op);
-      }, () => this.agent.prompt(task.goal), (request) => {
+      }, () => this.agent.prompt(resumed ? clarificationPrompt(task.goal, task.clarifications ?? []) : task.goal), (request) => {
         if (this.current?.id !== task.id || task.finished_at) return;
         const requests = task.source_requests ??= {};
         const totals = requests[request.kind] ??= { count: 0, duration_ms: 0 };
@@ -482,15 +582,22 @@ export class AnalysisSession {
       await Promise.race([settled, delay(30_000)]);
     } catch (error) {
       failure = error;
-      await Promise.race([settled, delay(5_000)]).catch(() => undefined);
+      if (!this.timedOut || remainingMs > 0) await Promise.race([settled, delay(5_000)]).catch(() => undefined);
     } finally {
       clearTimeout(timer);
       this.settledResolve = undefined;
     }
 
     const usageAfter = this.agent.getSessionStats();
-    task.usage = diffUsage(usageBefore, usageAfter);
+    const usage = diffUsage(usageBefore, usageAfter);
+    for (const key of Object.keys(usage) as Array<keyof TaskUsage>) usage[key] += task.usage?.[key] ?? 0;
+    task.usage = usage;
     task.turns = this.turns;
+    task.queries_used += Math.max(0, this.db.snapshot().queries.used - queriesBefore);
+    task.execution_ms = (task.execution_ms ?? 0) + Math.max(0, Date.now() - startedAt);
+    // The hook stages the request before Pi settles; expose it only when the tools and
+    // transcript have settled, and only if no cancellation/failure won the race.
+    const staged = this.stagedQuestion as StagedQuestion | undefined;
     try {
       const results = await this.db.listResults();
       task.results = results.filter((result) => result.taskId === task.id).map((result) => result.id);
@@ -506,6 +613,7 @@ export class AnalysisSession {
 
     // Event callbacks update this field while prompt() is awaited.
     const finalMessage = this.finalMessage as FinalAssistantMessage | undefined;
+    this.stagedQuestion = undefined;
     if (this.abortRequested) {
       task.status = "cancelled";
       task.error = { code: "TASK_CANCELLED", message: "Task was cancelled" };
@@ -513,7 +621,7 @@ export class AnalysisSession {
       task.status = "failed";
       task.error = {
         code: "TASK_TIMEOUT",
-        message: `Task exceeded the ${Math.round(this.app.budgets.taskTimeoutMs / 1000)}s wall-clock limit`,
+        message: `Task exceeded the ${Math.round(this.app.budgets.taskTimeoutMs / 1000)}s execution limit`,
       };
     } else if (failure) {
       task.status = "failed";
@@ -532,6 +640,20 @@ export class AnalysisSession {
     } else if (this.settledAborted || finalMessage?.stopReason === "aborted") {
       task.status = "incomplete";
       task.error = { code: "TASK_INTERRUPTED", message: "Agent execution was interrupted" };
+    } else if (staged) {
+      const now = Date.now();
+      const waitMs = Math.min(CLARIFICATION_WAIT_MS, this.app.sessionTtlMs);
+      const question: TaskClarification = { ...staged, asked_at: new Date(now).toISOString(), expires_at: new Date(now + waitMs).toISOString() };
+      (task.clarifications ??= []).push(question);
+      task.status = "waiting_for_user";
+      // Interim narration is not an answer to the analysis.
+      delete task.answer;
+      this.touch();
+      this.saveTask(task);
+      this.clarificationTimer = setTimeout(() => this.endClarification(task, "CLARIFICATION_EXPIRED"), waitMs);
+      this.clarificationTimer.unref?.();
+      this.broker.publish(task.id, "question_asked", { ...question, execution_ms: task.execution_ms, waiting_ms: task.waiting_ms ?? 0 });
+      return;
     } else if (this.turns === 0 || !finalMessage?.text || finalMessage.hasTools || finalMessage.stopReason !== "stop") {
       task.status = "incomplete";
       task.error = { code: "TASK_INCOMPLETE", message: "The agent did not produce a complete final answer" };
@@ -539,11 +661,10 @@ export class AnalysisSession {
       task.status = "succeeded";
     }
 
-    task.queries_used = Math.max(0, this.db.snapshot().queries.used - queriesBefore);
     // Stamped last: `finished_at` is what a polling client watches, so it must not be visible while
     // status is still "running".
     task.finished_at = new Date().toISOString();
-    this.finishTask(task, Date.now() - startedAt);
+    this.finishTask(task, task.execution_ms);
   }
 
   private saveTask(task: TaskRecord): void {
@@ -561,6 +682,8 @@ export class AnalysisSession {
       answer: task.answer ?? "",
       error: task.error ?? null,
       duration_ms: durationMs,
+      waiting_ms: task.waiting_ms,
+      clarifications: task.clarifications,
       activity: task.activity,
       turns: task.turns,
       usage: task.usage,
@@ -574,7 +697,7 @@ export class AnalysisSession {
   }
 
   async cancelTask(taskId?: string): Promise<boolean> {
-    if (taskId && this.current?.id !== taskId) {
+    if (taskId && (this.current?.id !== taskId || this.current.status === "queued")) {
       const queued = this.queue.find((item) => item.record.id === taskId);
       if (queued) {
         queued.record.status = "cancelled";
@@ -587,19 +710,28 @@ export class AnalysisSession {
       return false;
     }
 
-    if (!this.current || this.current.status !== "running") return false;
+    if (this.current?.status === "waiting_for_user") {
+      this.endClarification(this.current, "TASK_CANCELLED");
+      return true;
+    }
+    const running = this.current;
+    if (!running || running.status !== "running") return false;
 
     this.abortRequested = true;
     // Control channel: cancel the query directly, outside the serialised queue.
     await this.db.cancel().catch(() => false);
-    this.agent.abort();
+    if (this.current === running && running.status === "running") void this.agent.abort();
     return true;
   }
 
-  async steer(text: string): Promise<void> {
-    if (!this.current) throw new AppError("NO_ACTIVE_TASK", "No task is running; submit a task instead");
+  async steer(text: string, taskId?: string): Promise<void> {
+    const task = this.current;
+    if (task?.status === "waiting_for_user" || this.stagedQuestion)
+      throw new AppError("SESSION_BUSY", "请在追问卡片中回答当前问题。");
+    if (!task || task.status !== "running" || (taskId && task.id !== taskId))
+      throw new AppError("NO_ACTIVE_TASK", "No matching task is running");
     await this.agent.steer(text);
-    this.broker.publish(this.current.id, "notice", { code: "STEERED", text });
+    this.broker.publish(task.id, "notice", { code: "STEERED", text });
   }
 
   unsubscribeAll(taskId: string, afterSeq = 0): TaskEvent[] {

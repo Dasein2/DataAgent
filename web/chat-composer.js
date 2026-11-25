@@ -77,7 +77,8 @@ export function initChatComposer({ api, state, applySession, onError }) {
     messages.classList.toggle("task-running", Boolean(state.taskId));
     $("btnSend").hidden = Boolean(state.taskId);
     $("btnCancel").hidden = !state.taskId;
-    $("btnSteer").hidden = !state.taskId;
+    $("btnSteer").hidden = !state.taskId || Boolean(state.pendingQuestion);
+    $("btnCancel").textContent = state.pendingQuestion ? "取消分析" : "■ 停止";
     if (switching) $("btnSend").disabled = true;
   }
   function sessionChanged() {

@@ -23,6 +23,7 @@ export function createTaskActivity(host, { task = {}, load, onEvents = () => {},
   host.append(root);
   const terminal = new Set(["succeeded", "failed", "cancelled", "incomplete"]);
   let finished = terminal.has(task.status);
+  let waiting = false, executionMs = 0, runningSince = 0;
   let counts = { messages: 0, tool_calls: 0, errors: 0, retries: 0, ...task.activity };
   let started = Date.parse(task.started_at || task.created_at || "") || now();
   let duration = counts.duration_ms;
@@ -32,14 +33,14 @@ export function createTaskActivity(host, { task = {}, load, onEvents = () => {},
   root.open = !finished;
 
   function draw() {
-    const time = duration ?? (finished ? undefined : now() - started);
+    const time = duration ?? (finished ? undefined : waiting ? executionMs : runningSince ? executionMs + Math.max(0, now() - runningSince) : now() - started);
     label.textContent = counts.messages + " 条消息 · " + counts.tool_calls + " 次工具调用 · 耗时 " + formatActivityDuration(time);
     const hints = [];
-    if (!finished) hints.push("执行中");
+    if (!finished) hints.push(waiting ? "等待回答" : "执行中");
     if (counts.errors) hints.push(counts.errors + " 次工具错误");
     if (counts.retries) hints.push(counts.retries + " 次重试");
     status.textContent = hints.join(" · ");
-    root.dataset.status = finished ? task.status || "finished" : "running";
+    root.dataset.status = finished ? task.status || "finished" : waiting ? "waiting_for_user" : "running";
   }
   draw();
 
@@ -74,7 +75,14 @@ export function createTaskActivity(host, { task = {}, load, onEvents = () => {},
     observe(event) {
       if (finished) return;
       const data = event.data || {};
-      if (event.type === "task_started" && event.at) started = Date.parse(event.at) || started;
+      if (event.type === "task_started" && event.at) {
+        if (data.resumed) runningSince = Date.parse(event.at) || now();
+        else started = Date.parse(event.at) || started;
+      } else if (event.type === "question_asked") {
+        waiting = true; executionMs = data.execution_ms ?? Math.max(0, now() - started);
+      } else if (event.type === "question_answered") {
+        waiting = false; runningSince = Date.parse(event.at) || now();
+      }
       if (event.type === "message_delta" && String(data.text || "").trim()) {
         if (!textOpen) { counts.messages++; textMessage = textOpen = true; }
       } else if (["tool_started", "turn_started", "usage", "retry", "notice"].includes(event.type)) {

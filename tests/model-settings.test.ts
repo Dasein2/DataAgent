@@ -295,7 +295,7 @@ it("describes every agent tool from metadata alone and stays in sync with the fa
   const catalog = toolCatalog();
   const built = createDatabaseTools({ db: {}, budgets: {} } as never).map((tool) => tool.name);
   assert.deepEqual(catalog.map((tool) => tool.name), built);
-  assert.equal(catalog.length, 24);
+  assert.equal(catalog.length, 25);
 
   const chart = catalog.find((tool) => tool.name === "chart_create")!;
   assert.equal(chart.readOnly, false);
