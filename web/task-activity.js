@@ -30,11 +30,11 @@ export function createTaskActivity(host, { task = {}, load, onEvents = () => {},
   if (duration == null && task.finished_at) duration = Math.max(0, Date.parse(task.finished_at) - started);
   let textMessage = false, textOpen = false, loading = false, loaded = !load;
   const calls = new Set(), results = new Set();
-  root.open = !finished;
+  root.open = false;
 
   function draw() {
     const time = duration ?? (finished ? undefined : waiting ? executionMs : runningSince ? executionMs + Math.max(0, now() - runningSince) : now() - started);
-    label.textContent = counts.messages + " 条消息 · " + counts.tool_calls + " 次工具调用 · 耗时 " + formatActivityDuration(time);
+    label.textContent = "执行过程 · " + counts.messages + " 条消息 · " + counts.tool_calls + " 次工具调用 · 耗时 " + formatActivityDuration(time);
     const hints = [];
     if (!finished) hints.push(waiting ? "等待回答" : "执行中");
     if (counts.errors) hints.push(counts.errors + " 次工具错误");
@@ -100,7 +100,7 @@ export function createTaskActivity(host, { task = {}, load, onEvents = () => {},
       if (answerOutside && textMessage) counts.messages = Math.max(0, counts.messages - 1);
       task = { ...task, ...result };
       const end = Date.parse(result.finished_at || "");
-      duration = Number.isFinite(result.duration_ms) ? result.duration_ms : Number.isFinite(end) ? Math.max(0, end - started) : Math.max(0, now() - started);
+      duration = Number.isFinite(result.execution_ms) ? result.execution_ms : Number.isFinite(result.duration_ms) ? result.duration_ms : Number.isFinite(end) ? Math.max(0, end - started) : Math.max(0, now() - started);
       if (result.activity) counts = { ...counts, ...result.activity };
       finished = true;
       root.open = false;

@@ -17,6 +17,7 @@
     "test:integration": "node --import tsx --test \"tests/integration/*.test.ts\"",
     "smoke": "bash scripts/smoke-http.sh",
     "test:integration:local": "node scripts/test-integration-local.mjs",
+    "eval:experience": "tsx scripts/evaluate-answer-experience.ts",
     "sync:vendor": "node -e \"require('node:fs').copyFileSync('node_modules/echarts/dist/echarts.min.js','web/vendor/echarts.min.js')\""
   },
   "dependencies": {

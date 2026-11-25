@@ -815,6 +815,8 @@
 <script type="module">
 import { followTask } from "/task-stream.js";
 import { createTaskActivity } from "/task-activity.js";
+import { createTaskProgress } from "/task-progress.js";
+import { renderAnswer, attachResultEvidence } from "/answer-evidence.js";
 import { createProcessRenderer } from "/task-tools.js";
 import { createExplorer } from "/explore.js";
 import { initWorkbench } from "/workbench.js";
@@ -831,6 +833,7 @@ const state = {
   pendingQuestion: null,
   clarificationCards: new Map(),
   streamAbort: null,
+  taskCursor: 0,
   profiles: [],
   sessions: [],
   unreadSessions: new Set(), // 跟踪有新完成任务的会话
@@ -851,6 +854,9 @@ const state = {
   lastSegmentText: "",
   activity: null,
   taskMeta: null,
+  progress: null,
+  answerNode: null,
+  finishedTaskId: null,
   lastTextNode: null,
   trailingText: false,
 };
@@ -889,8 +895,7 @@ document.querySelectorAll("[data-prompt]").forEach((button) => {
 
 setInterval(() => {
   state.activity?.tick();
-  const since = Number($("taskActivity").dataset.since);
-  if (since) { const label = $("taskActivity").textContent.split(" · ")[0]; $("taskActivity").textContent = label + " · " + Math.floor((Date.now() - since) / 1000) + "s"; }
+  state.progress?.tick();
 }, 1000);
 
 // 定时轮询所有会话状态，只有真正变化时才重新渲染（否则重建列表会重置滚动位置、闪滚动条）
@@ -1997,31 +2002,45 @@ $("btnSend").onclick = async () => {
   state.segmentText = "";
   state.lastSegmentText = "";
   state.activity = state.taskMeta = state.lastTextNode = null;
+  state.progress = state.answerNode = state.finishedTaskId = null;
+  state.taskCursor = 0;
+  state.taskMeta = { status: "submitting", created_at: new Date().toISOString() };
   state.trailingText = false;
+  ensureAssistant();
+  const submissionHost = state.assistantEl;
+  state.activity.root.hidden = true;
+  $("taskId").textContent = $("turnInfo").textContent = $("taskActivity").textContent = "";
+  $("taskPill").textContent = "正在提交…";
   $("btnSend").disabled = true;
   $("btnCancel").disabled = false;
   try {
     const data = await api("/v1/sessions/" + id + "/tasks", { method: "POST", body: { goal } });
     void loadHistory();
-    if (state.sessionId !== id) return;
+    if (state.sessionId !== id || state.assistantEl !== submissionHost) return;
     state.clarificationCards.clear();
     state.hasConversation = true;
     setTitleButtonSource(titleNamingSessionId === state.sessionId ? "naming" : "idle");
     state.taskId = data.task.id;
     state.taskMeta = data.task;
+    state.progress.bind(data.task);
+    state.activity.root.hidden = false;
+    state.activity.root.dataset.taskId = data.task.id;
+    state.assistantEl.closest(".msg").dataset.taskId = data.task.id;
     userBody.closest(".msg").dataset.taskId = data.task.id;
     composer.update();
     $("taskId").textContent = data.task.id;
     $("taskPill").className = "pill running";
-    $("taskPill").textContent = "running";
+    $("taskPill").textContent = "正在分析…";
     streamTask(data.task.id);
   } catch (error) {
-    if (state.sessionId !== id) return;
+    if (state.sessionId !== id || state.assistantEl !== submissionHost) return;
     $("btnSend").disabled = !state.sessionReady || Boolean(pendingSessionId);
     $("btnCancel").disabled = true;
     userBody.closest(".msg").classList.add("send-failed");
     if (!$("goal").value) { $("goal").value = goal; composer.resize(); }
-    addMessage("assistant", { text: "任务创建失败: " + (error.message || error) });
+    state.progress?.failSubmission();
+    state.assistantEl.append(statusNote("任务创建失败: " + (error.message || error), "error"));
+    $("taskPill").textContent = "提交失败";
   } finally {
     submittingTask = false;
     composer.setSubmitting(false);
@@ -2034,32 +2053,41 @@ function streamTask(taskId) {
   const controller = new AbortController();
   state.streamAbort = controller;
   void followTask({
-    taskId, signal: controller.signal,
+    taskId, signal: controller.signal, initialCursor: state.taskCursor || 0,
     headers: authHeaders(),
     onEvent: (event) => { if (state.streamAbort === controller) handleEvent(event); },
-    onCursor: (cursor) => sessionStorage.setItem("data-agent-task-cursor:" + taskId, String(cursor)),
-    onConnection: (status) => {
+    onCursor: (cursor) => {
       if (state.streamAbort !== controller) return;
-      $("taskPill").textContent = status === "reconnecting" ? "连接中断，正在恢复…" : state.pendingQuestion ? "等待回答" : "running";
+      state.taskCursor = cursor;
+    },
+    onSnapshot: (task) => {
+      if (state.streamAbort !== controller || task.id !== state.taskId) return;
+      state.progress?.snapshot(task);
+      for (const question of task.clarifications ?? []) {
+        if (question.answer) handleClarificationAnswer({ question_id: question.id, ...question.answer }, task.id);
+        else if (task.status === "waiting_for_user") showClarification(question, task.id);
+      }
+    },
+    onConnection: (status) => {
+      if (state.streamAbort !== controller || state.finishedTaskId === taskId) return;
+      state.progress?.connection(status);
+      $("taskPill").textContent = status === "reconnecting" ? "进度恢复中…" : state.pendingQuestion ? "等待回答" : "正在分析…";
     },
   }).catch((error) => {
     if (controller.signal.aborted || state.streamAbort !== controller) return;
-    $("taskPill").className = "pill failed";
-    $("taskPill").textContent = "进度连接失败，请刷新会话";
-    state.clarificationCards.get(state.pendingQuestion)?.finish(undefined, "进度连接失败，请刷新会话。");
-    state.pendingQuestion = null;
-    state.taskId = null;
-    $("btnSend").disabled = !state.sessionReady;
-    $("btnCancel").disabled = true;
+    $("taskPill").textContent = "进度不可用，可尝试恢复";
+    state.progress?.connection("unavailable");
+    // A transport/auth problem is not a terminal analysis event. Keep the task and
+    // pending question reserved until an authoritative task state says otherwise.
     composer.update();
-    setStatus("connStatus", error.message, "err");
+    setAnalysisStatus("进度连接不可用：" + error.message + "；可恢复进度或重新登录后打开会话。", true);
   });
 }
 function clarificationCard(host, question, taskId) {
   const card = document.createElement("section");
   card.className = "clarification-card";
   const stage = document.createElement("p");
-  stage.textContent = question.kind === "intent_confirmation" ? "需求确认" : "分析中需确认";
+  stage.textContent = question.kind === "intent_confirmation" ? "需求确认" : "需要你确认";
   const title = document.createElement("h3");
   title.id = "clarification-" + question.id;
   title.textContent = question.question;
@@ -2162,19 +2190,32 @@ function handleClarificationAnswer(data, taskId) {
   state.clarificationCards.get(data.question_id)?.finish(data);
   if (state.pendingQuestion !== data.question_id) return;
   state.pendingQuestion = null;
-  $("taskPill").textContent = "running";
-  $("taskActivity").textContent = "继续分析…";
+  state.progress?.snapshot({ status: "queued" });
+  $("taskPill").textContent = "正在分析…";
+  $("taskActivity").textContent = "";
   composer.update();
+}
+
+function showAnswer(source, status = "succeeded") {
+  if (!source?.trim()) return;
+  ensureAssistant();
+  if (!state.answerNode) state.answerNode = document.createElement("div");
+  renderAnswer(state.answerNode, source, { renderMarkdown, status });
+  // Answer precedes the collapsed technical history, while the status stays above it.
+  state.assistantEl.insertBefore(state.answerNode, state.activity.root);
+  composer.setSource(state.assistantEl, source);
 }
 
 function handleEvent(event) {
   const data = event.data || {};
-  if (["task_started", "message_delta", "tool_started", "tool_finished", "question_asked", "retry", "notice"].includes(event.type)) ensureAssistant();
+  if (event.task_id && (state.finishedTaskId === event.task_id || event.task_id !== state.taskId)) return;
+  if (["task_started", "message_delta", "tool_started", "tool_finished", "question_asked", "answer_ready", "task_finished", "retry", "notice"].includes(event.type)) ensureAssistant();
   state.activity?.observe(event);
+  state.progress?.observe(event);
   switch (event.type) {
     case "task_started":
       $("taskPill").className = "pill running";
-      $("taskPill").textContent = data.phase === "intent_confirmation" ? "理解需求…" : "running";
+      $("taskPill").textContent = data.phase === "intent_confirmation" ? "理解需求…" : "正在分析…";
       break;
     case "question_asked":
       showClarification(data, event.task_id);
@@ -2196,8 +2237,7 @@ function handleEvent(event) {
       break;
     case "tool_started": {
       workbench.toolEvent("tool_started", data);
-      $("taskActivity").textContent = "正在执行 " + data.tool;
-      $("taskActivity").dataset.since = String(Date.now());
+      $("taskActivity").textContent = "";
       ensureAssistant();
       closeSegment();
       state.trailingText = false;
@@ -2206,14 +2246,22 @@ function handleEvent(event) {
     }
     case "tool_finished": {
       workbench.toolEvent("tool_finished", data);
-      $("taskActivity").textContent = "整理分析证据…";
-      delete $("taskActivity").dataset.since;
+      $("taskActivity").textContent = "";
       if (data.details?.budget) workbench.updateBudget(data.details.budget);
       ensureAssistant();
       renderProcessEvent(event, state.activity.body);
       const chartId = data.details?.chart_id;
-      // Charts remain next to the conclusion, never hidden in the process disclosure.
-      if (chartId && !data.is_error) void renderArtifactInto(state.assistantEl, chartId);
+      // Keep intermediate charts out of the main answer until a completed response is ready.
+      if (chartId && !data.is_error) state.taskMeta = { ...state.taskMeta, artifacts: [...new Set([...(state.taskMeta?.artifacts || []), chartId])] };
+      break;
+    }
+    case "answer_ready": {
+      const follow = isNearBottom();
+      closeSegment();
+      if (state.trailingText && state.lastSegmentText.trim() === String(data.answer || "").trim()) state.lastTextNode?.remove();
+      showAnswer(data.answer);
+      for (const id of state.taskMeta?.artifacts || []) void renderArtifactInto(state.assistantEl, id);
+      if (follow) $("messages").scrollTop = $("messages").scrollHeight;
       break;
     }
     case "usage":
@@ -2241,25 +2289,23 @@ function handleEvent(event) {
       state.pendingQuestion = null;
       const finalAnswer = typeof data.answer === "string" ? data.answer.trim() : "";
       const trailingAnswer = finalAnswer && state.trailingText && state.lastSegmentText.trim() === finalAnswer;
-      if (finalAnswer) {
-        const node = trailingAnswer ? state.lastTextNode : document.createElement("div");
-        node.className = "text final";
-        if (!trailingAnswer) node.innerHTML = renderMarkdown(finalAnswer);
-        state.assistantEl.appendChild(node);
-        composer.setSource(state.assistantEl, finalAnswer);
-      }
+      if (trailingAnswer) state.lastTextNode?.remove();
+      if (finalAnswer) showAnswer(finalAnswer, data.status);
+      attachResultEvidence(state.assistantEl, data.results, openResult);
       if (Array.isArray(data.artifacts)) {
         for (const artifactId of data.artifacts) void renderArtifactInto(state.assistantEl, artifactId);
       }
       for (const resultId of data.business_results ?? []) void renderBusinessReport(state.assistantEl, resultId);
       if (data.error) state.assistantEl.appendChild(statusNote(data.error.code + ": " + data.error.message, "error"));
       state.activity.finish(data, { answerOutside: Boolean(trailingAnswer) });
+      state.finishedTaskId = event.task_id || state.taskId;
       state.taskId = null;
+      state.streamAbort?.abort();
       composer.update();
       if (follow) $("messages").scrollTop = $("messages").scrollHeight;
       const status = data.status || "finished";
       $("taskPill").className = "pill " + status;
-      $("taskPill").textContent = status;
+      $("taskPill").textContent = ({ succeeded: "分析完成", failed: "分析失败", cancelled: "已取消", incomplete: "分析未完成" })[status] || status;
       $("btnSend").disabled = !state.sessionReady;
       $("btnCancel").disabled = true;
       $("btnRefresh").click();
@@ -2356,7 +2402,13 @@ function closeSegment() {
 function ensureAssistant() {
   if (!state.assistantEl) {
     state.assistantEl = addMessage("assistant", { taskId: state.taskId });
-    state.activity = createTaskActivity(state.assistantEl, { task: { ...state.taskMeta, id: state.taskId, status: "running" } });
+    const host = state.assistantEl;
+    state.progress = createTaskProgress(host, {
+      task: { ...state.taskMeta, id: state.taskId, status: state.taskMeta?.status || "running" },
+      onCancel: () => state.assistantEl === host ? cancelCurrentTask() : undefined,
+      onRetry: () => { if (state.assistantEl === host && state.taskId) streamTask(state.taskId); },
+    });
+    state.activity = createTaskActivity(host, { task: { ...state.taskMeta, id: state.taskId } });
   }
   return state.assistantEl;
 }
@@ -2392,9 +2444,18 @@ function cellToString(cell) {
 
 $("btnDrawerClose").onclick = () => $("drawer").classList.remove("open");
 
+async function cancelCurrentTask() {
+  const taskId = state.taskId;
+  if (!taskId) return;
+  const result = await api("/v1/tasks/" + taskId + "/cancel", { method: "POST" });
+  if (state.taskId === taskId && ["succeeded", "failed", "cancelled", "incomplete"].includes(result.task?.status)) {
+    handleEvent({ task_id: taskId, type: "task_finished", data: result.task });
+  }
+  if (!result.cancelled && !["succeeded", "failed", "cancelled", "incomplete"].includes(result.task?.status)) throw new Error("取消未被服务端接受");
+}
 $("btnCancel").onclick = async () => {
-  if (!state.taskId) return;
-  try { await api("/v1/tasks/" + state.taskId + "/cancel", { method: "POST" }); } catch (error) { console.warn(error); }
+  try { await cancelCurrentTask(); }
+  catch (error) { setAnalysisStatus("取消请求未确认：" + error.message + "，请重试。", true); }
 };
 
 $("btnSteer").onclick = async () => {
@@ -2817,6 +2878,8 @@ function clearTranscript() {
   state.segmentText = "";
   state.lastSegmentText = "";
   state.activity = state.taskMeta = state.lastTextNode = null;
+  state.progress = state.answerNode = state.finishedTaskId = null;
+  state.taskCursor = 0;
   state.trailingText = false;
   $("messages").replaceChildren(welcome);
   $("btnCancel").disabled = true;
@@ -2887,9 +2950,11 @@ function showSession(session, tasks) {
     }
     for (const question of task.clarifications ?? []) clarificationCard(body, question);
     if (task.answer) {
-      const answer = document.createElement("div"); answer.className = "text final";
-      answer.innerHTML = renderMarkdown(task.answer); body.append(answer);
+      const answer = document.createElement("div");
+      renderAnswer(answer, task.answer, { renderMarkdown, status: task.status || "succeeded" });
+      body.insertBefore(answer, body.firstChild);
     }
+    attachResultEvidence(body, task.results, openResult);
     if (task.error) body.append(statusNote(task.error.code + ": " + task.error.message, "error"));
     for (const artifactId of task.artifacts || []) void renderArtifactInto(body, artifactId);
     for (const resultId of task.business_results ?? []) void renderBusinessReport(body, resultId);
@@ -2902,6 +2967,7 @@ function showSession(session, tasks) {
     state.taskMeta = current || { id: state.taskId };
     if (current) {
       addMessage("user", { text: current.goal, taskId: current.id });
+      ensureAssistant();
       for (const question of current.clarifications ?? []) {
         if (!question.answer && current.status === "waiting_for_user") showClarification(question, current.id);
         else {

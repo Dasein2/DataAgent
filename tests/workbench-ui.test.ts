@@ -2,6 +2,34 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createContext, runInContext, Script } from "node:vm";
 import { it } from "node:test";
+import { createServer } from "node:http";
+import { createHttpApp } from "../src/api/http.js";
+import { AnalysisService } from "../src/agent/service.js";
+import { testConfig, cleanup } from "./support.js";
+
+it("all eagerly imported console modules are served over HTTP, including progress and evidence", async () => {
+  const app = await testConfig();
+  const service = await AnalysisService.create(app);
+  const server = createServer(await createHttpApp(service));
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const page = await fetch(base).then(res => res.text());
+    const urls = [...page.matchAll(/^import[^\n]+from "(\/[^"\n]+)";/gm)].map(match => match[1]!);
+    assert.ok(urls.includes("/task-progress.js"));
+    assert.ok(urls.includes("/answer-evidence.js"));
+    for (const url of urls) {
+      const response = await fetch(base + url);
+      assert.equal(response.status, 200, url);
+      assert.match(response.headers.get("content-type")!, /javascript/, url);
+      assert.ok((await response.text()).length > 0);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await service.shutdown(); await cleanup(app);
+  }
+});
 
 it("catalog qualifies names using the engine delimiter and escapes embedded delimiters", async () => {
   const source = await readFile(new URL("../web/catalog.js", import.meta.url), "utf8");
@@ -16,7 +44,7 @@ it("console and workbench modules parse, and chart downloads retain live authent
   const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script);
   new Script(script.replace(/^import[^\n]*;\s*$/gm, ""));
-  for (const file of ["charts.js", "explore.js", "workbench.js", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js"]) {
+  for (const file of ["charts.js", "explore.js", "workbench.js", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js", "task-progress.js", "answer-evidence.js"]) {
     const source = await readFile(new URL("../web/" + file, import.meta.url), "utf8");
     new Script(source.replace(/^import[^\n]*;\s*$/gm, "").replace(/export (?=(?:async )?function)/g, ""));
   }

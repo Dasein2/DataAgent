@@ -18,6 +18,7 @@ export const ClarificationAnswer = z.union([
 export type ClarificationAnswer = z.infer<typeof ClarificationAnswer>;
 
 export type TaskClarification = z.infer<typeof ClarificationQuestion> & {
+  /** intent_confirmation is retained for historical tasks; new questions use follow_up. */
   kind?: "intent_confirmation" | "follow_up";
   id: string;
   asked_at: string;
@@ -25,20 +26,9 @@ export type TaskClarification = z.infer<typeof ClarificationQuestion> & {
   answer?: { text: string; option_id?: string; answered_at: string };
 };
 
-export const INTENT_CONFIRMATION_GUIDANCE = [
-  "The current task is awaiting its initial intent confirmation. Call ask_user by itself now, even if the request is already clear.",
-  "In question, summarize your understanding in the user's language, including the requested outcome and any relevant scope already specified. Do not silently add unrequested defaults: label any proposed definition, period or filter as a proposal. In impact, explain what the user is confirming or what the choice affects.",
-  "If the user needs to pick a business definition, give concrete, meaningful options. Otherwise omit options and the service will offer a confirm button. The user can always correct the request in their own words.",
-  "Use only the conversation and supplied business context. Do not query metadata or data or produce analysis results until the user replies.",
-].join(" ");
-
-export function intentConfirmationOptions(options: TaskClarification["options"]): NonNullable<TaskClarification["options"]> {
-  return options?.length ? options : [{ id: "confirm", label: "确认并开始分析" }];
-}
-
 export function clarificationPrompt(goal: string, clarifications: readonly TaskClarification[]): string {
   // Restate the goal and the confirmed decisions in case Pi has compacted earlier turns.
   return "Continue the same analysis using the user's clarification below. Keep other requirements unchanged. " +
-    "Apply the user's latest corrections over earlier assumptions. A confirmation reply accepts the described scope; it does not answer unresolved choices. Any text produced before confirmation is not database evidence. Confirming the proposed scope authorizes starting the analysis, while any unresolved business choices can still be clarified. Use confirmed choices when planning SQL and disclose the actual scope in the answer. Ask another focused question if continued exploration uncovers a material decision that cannot be resolved from evidence. Carry forward decisions that are already clear and still apply.\n\n" +
+    "Apply the user's latest corrections over earlier assumptions. Reuse the database context and evidence already gathered; a clarification does not restart discovery. A general confirmation does not settle any unresolved business choice, and model narration is not database evidence. Use the chosen scope when planning SQL and disclose the actual scope in the answer. Compute only the chosen population; do not add totals for rejected alternatives just to explain them. For a month, use exact half-open boundaries (for January: >= January 1 and < February 1), and describe these dates accurately. Do not repeat resolved questions or ask for permission to start. Ask another focused question only if continued exploration uncovers a new material decision that cannot be resolved from evidence. Carry forward decisions that are already clear and still apply.\n\n" +
     JSON.stringify({ goal, clarifications: clarifications.map(({ question, answer }) => ({ question, answer: answer?.text })) });
 }

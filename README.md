@@ -247,7 +247,11 @@ SSE frame shape (`event:` mirrors `data.type`):
 
 Event types: `task_queued`, `task_started`, `turn_started`, `message_delta`, `reasoning_delta`,
 `tool_started`, `tool_finished`, `usage`, `retry`, `context_compacted`, `notice`, `question_asked`,
-`question_answered`, `task_finished`.
+`question_answered`, `answer_ready`, `task_finished`.
+
+`answer_ready` carries a completed, non-tool assistant response (`{answer}`), before final evidence
+bookkeeping. It is not emitted for intermediate query previews and is not a terminal task state;
+clients must still process `task_finished` for the authoritative status, partial/failure label and evidence.
 
 `succeeded` requires a complete, non-empty final assistant answer. A final model error is `failed`
 (`MODEL_ERROR`); a token limit, missing final answer, turn limit or interrupted execution is
@@ -257,39 +261,65 @@ succeed. Every queued task keeps its own `max_turns`.
 
 The console reconnects interrupted streams with `Last-Event-ID`, suppresses duplicates and polls
 task state between retries so a missed terminal event does not leave the controls stuck. Loading a
-historical session also resumes an active task's progress.
+historical session also resumes an active task's progress. A per-question status card appears before
+the submit request returns, displays event-backed stages and elapsed execution time, pauses while
+waiting for a user choice, and exposes cancellation. Long queries show an explicit waiting message,
+not invented percentages. Stream outages retain the task reservation and offer recovery; they do
+not turn a running analysis into a failed task. Polling also restores pending clarification cards.
 
-Every new analysis task starts with an intent confirmation, including follow-up tasks in an existing
-session. The model first summarizes its understanding through `ask_user`; before the user replies,
-only that tool is available and other model-issued tools cannot execute. The console displays the
-proposed scope with meaningful choices, or a “confirm and start” button if no choice is necessary.
-“Other / add details” accepts free-text corrections. This confirmation is task-local, not a business
-catalog definition. If the model fails to produce a structured question, a clearly labelled fallback
-asks the user to confirm or correct their original request; unconfirmed model output is not a report.
+Analysis tasks start with the full capability-gated toolset, not a mandatory intent confirmation.
+The model uses conversation, supplied business context and published definitions first, then targeted
+metadata reads and bounded samples when needed to understand the available data. A clear request
+proceeds directly. Once there is enough context to identify a material business choice that evidence
+cannot settle, the model proactively calls `ask_user` before analysis that depends on that choice.
+Questions explain the impact and offer grounded choices when known; “Other / add details” accepts
+free-text corrections. There is no per-task question quota, generic “confirm and start” gate or
+requirement to inspect the whole database. Obvious user-only choices may be asked immediately.
 
-After confirmation, the full capability-gated toolset is restored. If exploration reveals a material
-business choice that the evidence cannot settle, the model can call `ask_user` again. Each question
-settles the current Pi run and enters `waiting_for_user`; no other tool in that turn executes. API clients
+Each question settles the current Pi run and enters `waiting_for_user`; no other tool in that turn
+executes. After a reply, analysis continues with the context already gathered rather than restarting
+discovery. A later, newly discovered material ambiguity can prompt another question. API clients
 read the pending question from `question_asked` or the last entry in `task.clarifications`. A reply
 requires the current question ID; duplicate or stale replies cannot resume the task again. The task
 continues in the same session under its original ID and cumulative budgets. `execution_ms` excludes
 user wait time, which is tracked separately in `waiting_ms`. A task can ask up to eight questions,
-one at a time, including the initial confirmation. New tasks require `max_turns >= 3`. Additional
-questions require at least two model turns left in the task budget. Each wait expires after 15 minutes or the
+one at a time. New tasks require `max_turns >= 1`; asking a question requires at least two model
+turns left in the task budget. Each wait expires after 15 minutes or the
 configured session TTL, whichever is shorter.
 Waiting reserves the conversation, so queued work runs after the waiting task. Closing the session
 cancels a pending task. On restart, any remaining pending tasks become `incomplete` and retain
 their clarification history. Each clarification applies to its analysis task.
 
+The model is instructed to answer only the requested scope, stop once sufficient evidence and
+material correctness checks are available, and avoid unsolicited recommendations or extra analyses.
+A value question leads with the number/unit/window; a comparison or distribution uses a compact
+chart/table; causal claims are limited by available evidence. Detailed reports and SQL are provided
+when explicitly requested. These are model instructions, not a guarantee of model compliance.
+
 Each question groups intermediate text, tool cards, retries and notices into one execution-process
-disclosure. Running tasks start expanded; completion (including cancellation/failure) collapses it.
-The final answer, charts and terminal error remain outside. The summary shows intermediate message
+disclosure, collapsed by default during execution and again on completion. The completed answer is
+placed before technical history. Fenced SQL in an answer is moved to a collapsed SQL disclosure,
+without hiding prose or important caveats. Saved results have a separate collapsed data-evidence
+entry to inspect rows, SQL and execution time. The final answer, charts and terminal error remain outside. The summary shows intermediate message
 count, distinct tool calls and elapsed execution time, with retry/tool-error counts. SSE text deltas
 are not counted as separate messages and hidden reasoning is never included. Plain answers without
 intermediate content do not show an empty disclosure. Historical details load only when expanded via
 `GET /v1/tasks/:id/activity` (owner-authorized, compacted deltas); reopening the fold preserves its DOM.
 Old retained event histories receive optional summary metadata when first listed. Deleted or missing
 history cannot be reconstructed from the final answer alone.
+
+## Experience acceptance
+
+`npm run eval:experience -- --env-file .env.e2e --pi-provider <provider> --pi-model <model>` runs four synthetic scenarios (value,
+distribution/chart, evidence-grounded clarification and causal limits) with the configured real model
+against a fresh isolated PGlite database. It writes `.tmp/answer-experience-eval.json` with answers,
+questions, SQL, tool counts and answer-ready/execution timings, then removes its temporary data.
+It never opens production connections or changes the application default. Pi overrides use the chosen
+channel’s own endpoint and credentials, not the environment model key. Use `--case clarification`
+to rerun a single scenario. A blocked model channel stops the run; a blocked channel or failed smoke
+check returns a nonzero exit code. Review answer quality manually; these
+timings exclude browser rendering and are not a before/after production benchmark. See
+[experience acceptance](docs/analysis-experience-acceptance.md) for checks and current limitations.
 
 ## Agent tools
 

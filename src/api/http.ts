@@ -691,7 +691,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       () => res.status(404).end(),
     );
   });
-  for (const file of ["chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js", "business-report.js", "business-catalog.js"]) {
+  for (const file of ["chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js", "task-progress.js", "answer-evidence.js", "business-report.js", "business-catalog.js"]) {
     app.get("/" + file, (_req, res) => { void readFile(new URL(file, webRoot), "utf8").then(code => res.type(file.endsWith("css") ? "text/css" : "application/javascript").send(code), () => res.status(404).end()); });
   }
   // Vendored ECharts: served from this origin so the console needs no CDN and no build step.

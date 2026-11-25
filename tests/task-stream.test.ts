@@ -49,6 +49,34 @@ it("aborts pending reconnection when the user switches sessions", async () => {
   assert.equal(calls, 2);
 });
 
+it("polling restores a pending clarification during an outage before retrying the stream", async () => {
+  const connection: string[] = [], snapshots: any[] = [];
+  let streams = 0;
+  await followTask({ taskId, signal: new AbortController().signal, wait: async () => {}, onEvent: () => {},
+    onConnection: (state: string) => connection.push(state), onSnapshot: (task: any) => snapshots.push(task),
+    fetchImpl: async (path: string) => {
+      if (path.endsWith("/events")) {
+        if (streams++ === 0) throw new Error("offline");
+        return stream(event(1, "task_finished"));
+      }
+      assert.equal(connection.at(-1), "reconnecting");
+      return json({ task: { id: taskId, status: "waiting_for_user", execution_ms: 600, clarifications: [{ id: "q1", question: "采用哪个口径？" }] } });
+    },
+  });
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].clarifications[0].id, "q1");
+});
+
+it("an explicit restart cursor does not replay previously rendered deltas", async () => {
+  const seen: any[] = [];
+  await followTask({ taskId, initialCursor: 2, signal: new AbortController().signal, onEvent: (e: any) => seen.push(e),
+    fetchImpl: async (_path: string, options: any) => {
+      assert.equal(options.headers["Last-Event-ID"], "task_test:2");
+      return stream(event(1), event(2), event(3, "task_finished"));
+    } });
+  assert.deepEqual(seen.map(e => e.seq), [3]);
+});
+
 it("polls a terminal task after a silent SSE connection stalls", async () => {
   const seen: any[] = [];
   await followTask({ taskId, signal: new AbortController().signal, idleTimeoutMs: 5, onEvent: (e: any) => seen.push(e),

@@ -877,6 +877,42 @@ dialog header button:last-child {
   #modelChipName { max-width: 180px; }
   #composer .composer-actions { gap: 5px; }
 }
+.task-progress { min-width: 0; margin: 2px 0 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.task-progress-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.task-progress-title { font-size: 13px; font-weight: 600; }
+.task-progress-time { margin-left: auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.task-progress-head button { padding: 3px 8px; min-height: 28px; font-size: 11px; }
+.task-progress-dot { width: 12px; height: 12px; flex: none; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: asset-spin .9s linear infinite; }
+.task-progress-note { margin: 6px 0 0; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.task-progress[data-state="waiting"] .task-progress-dot,
+.task-progress[data-state="unavailable"] .task-progress-dot,
+.task-progress[data-state="succeeded"] .task-progress-dot,
+.task-progress[data-state="failed"] .task-progress-dot,
+.task-progress[data-state="submission_failed"] .task-progress-dot,
+.task-progress[data-state="incomplete"] .task-progress-dot,
+.task-progress[data-state="cancelled"] .task-progress-dot { animation: none; border-color: var(--muted); }
+.task-progress[data-state="succeeded"] .task-progress-dot { border-color: var(--ok); background: var(--ok); }
+.task-progress[data-state="failed"] .task-progress-dot,
+.task-progress[data-state="submission_failed"] .task-progress-dot { border-color: var(--err); }
+.task-progress[data-state="waiting"] { border-color: var(--accent); }
+.task-progress[data-state="succeeded"] { background: transparent; padding-block: 6px; border-color: transparent; }
+.task-progress[data-state="succeeded"] .task-progress-note { display: none; }
+.task-process { min-width: 0; margin: 8px 0; }
+.task-process-head { color: var(--muted); font-size: 11px; cursor: pointer; overflow-wrap: anywhere; }
+.task-process-status { margin-left: 8px; }
+.task-process-body { padding-top: 8px; }
+.answer-prose { overflow-wrap: anywhere; }
+.answer-partial { color: var(--warn); font-size: 12px; font-weight: 600; }
+.answer-sql, .task-result-evidence { margin: 8px 0; min-width: 0; font-size: 12px; }
+.answer-sql > summary, .task-result-evidence > summary { color: var(--muted); cursor: pointer; }
+.task-result-evidence > p { color: var(--muted); font-size: 11px; }
+.task-result-evidence > button { margin: 0 5px 5px 0; }
+@media (max-width: 760px) {
+  .task-progress { padding: 10px; }
+  .task-progress-title { flex: 1; }
+  .task-progress-time { margin-left: 20px; }
+  .task-progress-head button { min-height: 34px; }
+}
 .clarification-card { min-width: 0; margin-block: 10px; padding: 12px 14px; border: 1px solid var(--border); border-inline-start: 3px solid var(--accent); border-radius: 8px; background: var(--panel); overflow-wrap: anywhere; }
 .clarification-card h3 { margin: 0; font-size: 14px; }
 .clarification-card p { margin: 6px 0; color: var(--muted); }

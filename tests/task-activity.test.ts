@@ -42,6 +42,7 @@ class Element {
   constructor(tag: string) { this.tag = tag; }
   append(...nodes: Element[]) { for (const n of nodes) { n.remove(); n.parent = this; this.children.push(n); } }
   appendChild(node: Element) { this.append(node); return node; }
+  insertBefore(node: Element, ref?: Element) { node.remove(); node.parent = this; const index = ref ? this.children.indexOf(ref) : -1; if (index < 0) this.children.push(node); else this.children.splice(index, 0, node); return node; }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((n) => n !== this); this.parent = undefined; }
   classList = { add() {}, remove() {} };
   get childNodes() { return this.children; }
@@ -63,10 +64,10 @@ async function harness() {
   return { context, host, create(options: any) { context.options = options; return runInContext("createTaskActivity(host, options)", context); } };
 }
 
-test("running disclosure groups one task, finishes collapsed and keeps error/retry counts", async () => {
+test("running disclosure starts and finishes collapsed and keeps error/retry counts", async () => {
   const { create } = await harness();
   const panel = create({ task: { id: task.id, started_at: task.started_at }, now: () => Date.parse(task.finished_at!) });
-  assert.equal(panel.root.open, true);
+  assert.equal(panel.root.open, false);
   panel.body.append(new Element("div"));
   for (const e of [ev("message_delta", { text: "working" }), ev("message_delta", { text: "…" }),
     ev("tool_started", { call_id: "a" }), ev("tool_started", { call_id: "a" }),
@@ -108,31 +109,39 @@ for (const status of ["succeeded", "failed", "cancelled", "incomplete"]) {
     const fold = new Element("details"); fold.append(processBody); host.append(fold); processBody.append(text);
     let closed = false, copied = "";
     const elements: Record<string, any> = {};
-    const state = { assistantEl: host, activity: { observe() {}, finish() { closed = true; } }, taskId: "task_live",
+    const state = { assistantEl: host, activity: { root: fold, observe() {}, finish() { closed = true; } }, taskId: "task_live",
       trailingText: true, lastSegmentText: answer, lastTextNode: text, sessionReady: true, clarificationCards: new Map() };
     const context = createContext({ state, document: { createElement: (tag: string) => new Element(tag) },
       $: (id: string) => elements[id] ??= { textContent: "", dataset: {}, click() {} },
       workbench: { refreshContext: async () => {}, updateUsage() {} },
       composer: { setSource(_body: Element, source: string) { copied = source; }, update() {} },
       ensureAssistant() {}, closeSegment() {}, isNearBottom: () => false, renderMarkdown: (s: string) => s,
+      renderAnswer(node: Element, source: string) { node.className = "text final"; node.textContent = source; }, attachResultEvidence() {}, openResult() {},
       statusNote: (s: string) => { const note = new Element("div"); note.textContent = s; return note; },
       renderArtifactInto() {},
     });
-    runInContext(script.slice(script.indexOf("function handleEvent("), script.indexOf("/** Agent-level status")), context);
-    context.event = { type: "task_finished", data: { status, answer, error: status === "succeeded" ? null : { code: "TASK_" + status.toUpperCase(), message: "fixture" } } };
+    runInContext(script.slice(script.indexOf("function showAnswer("), script.indexOf("/** Agent-level status")), context);
+    context.event = { task_id: "task_live", type: "answer_ready", data: { answer } };
     runInContext("handleEvent(event)", context);
-    assert.equal(text.parent, host, "moves the final streamed node outside rather than duplicating it");
+    assert.equal(host.childNodes.filter(n => n.className === "text final").length, 1);
+    context.event = { task_id: "task_live", type: "task_finished", data: { status, answer, error: status === "succeeded" ? null : { code: "TASK_" + status.toUpperCase(), message: "fixture" } } };
+    runInContext("handleEvent(event)", context);
+    assert.equal(text.parent, undefined, "the trailing process copy is removed when the answer is promoted");
+    assert.equal(host.children[0]?.className, "text final", "the answer precedes technical history");
     assert.equal(processBody.childNodes.length, 0);
     assert.equal(host.childNodes.filter((n) => n.className === "text final").length, 1);
     assert.equal(closed, true); assert.equal(state.taskId, null); assert.equal(copied, answer);
     if (status !== "succeeded") assert.match(host.textContent, /TASK_/);
+    const childCount = host.children.length;
+    runInContext("handleEvent(event)", context);
+    assert.equal(host.children.length, childCount, "late terminal replay never duplicates answer or error");
   });
 }
 
-for (const freeText of [false, true]) test(`intent card submits ${freeText ? "Other corrections" : "the selected answer"} once and becomes read-only`, async () => {
+for (const kind of ["follow_up", "intent_confirmation"]) for (const freeText of [false, true]) test(`${kind} card submits ${freeText ? "Other corrections" : "the selected answer"} once and becomes read-only`, async () => {
   const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
   const host = new Element("div");
-  const question = { id: "question-fixture", kind: "intent_confirmation", question: "<strong>按哪一天统计？</strong>", impact: "影响统计范围。", options: [
+  const question = { id: "question-fixture", kind, question: "<strong>按哪一天统计？</strong>", impact: "影响统计范围。", options: [
     { id: "paid", label: "按支付时间" }, { id: "created", label: "按下单时间" },
   ] };
   const requests: unknown[] = [];
@@ -151,7 +160,8 @@ for (const freeText of [false, true]) test(`intent card submits ${freeText ? "Ot
   assert.equal(host.children.length, 1, "SSE replay cannot duplicate a restored card");
   assert.match(host.textContent, /<strong>/, "a model-authored question is rendered as text");
   assert.equal(elements.taskPill.textContent, "等待回答");
-  assert.match(host.textContent, /需求确认/);
+  assert.ok(host.textContent.includes(kind === "intent_confirmation" ? "需求确认" : "需要你确认"));
+  assert.ok(!host.textContent.includes("确认并开始分析"));
   const details = host.querySelectorAll("details")[0]!;
   assert.equal(details.open, false);
   assert.match(details.textContent, /其他／补充/);

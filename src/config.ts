@@ -56,8 +56,6 @@ export interface AppConfig {
   port: number;
   apiToken: string;
   dataDir: string;
-  /** Test seam only; omitted in loaded service configuration, where intent confirmation is required. */
-  intentConfirmation?: boolean;
   sessionTtlMs: number;
   maxSessions: number;
   /** Allow connecting to loopback / RFC1918 targets. Self-hosted deployments usually need this on. */

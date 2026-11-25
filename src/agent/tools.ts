@@ -101,6 +101,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     promptSnippet: "Run one read-only SQL statement and get a result_id for paging",
     promptGuidelines: [
       "Send exactly one statement per call; multiple statements are rejected.",
+      "If discovery revealed unresolved time-field, population or metric choices, call ask_user alone before calculating their totals. Do not compare all possible definitions instead of asking. Bounded samples can establish available values, not choose the business meaning.",
       "Add a LIMIT to exploratory queries over large tables.",
       "result_read pages stored rows only. A truncated result is incomplete; rerun a reduced or aggregated source query.",
       "LIMIT bounds returned rows, not scan cost. Prefer selective date/partition filters.",
@@ -333,7 +334,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     description:
       "Sample a relation and summarise each column: null count, distinct count, numeric min/max, and a few sample values. Sampling is bounded; null/distinct figures describe the sample, not the full table.",
     promptSnippet: "Sample a table and summarise nulls, distinct values and ranges",
-    promptGuidelines: ["Increase sample_rows when a column's distribution matters; the cap is 200."],
+    promptGuidelines: ["For grounding a clarification about fields or status values, use a small head sample instead of an exploratory full-table GROUP BY or COUNT. Sample values show what was observed, not which business definition applies.", "Increase sample_rows when a column's distribution matters; the cap is 200."],
     parameters: Type.Object({
       name: Type.String({ description: "Relation name" }),
       schema: Type.Optional(Type.String({ description: "Schema or database" })),
@@ -675,7 +676,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     defineTool({
       name: ASK_USER,
       label: "Clarify the analysis with the user",
-      description: "Confirm the proposed scope at the start of a task, or pause for one unresolved business decision during analysis. Call this tool alone. Restate the scope for an initial confirmation. Give concrete choices when useful, or omit them to accept confirmation or a free-text answer.",
+      description: "Pause for a material business choice that available context cannot settle. First inspect relevant definitions, schema or bounded samples when needed to ground the question; do not ask routinely for permission to start. Call this tool alone, explain the impact and offer supported choices when known. The user can select an option or correct the scope with free text.",
       parameters: Type.Unsafe<z.infer<typeof ClarificationQuestion>>(z.toJSONSchema(ClarificationQuestion, { io: "input" })),
       executionMode: "sequential",
       execute: async (_id, params) => {

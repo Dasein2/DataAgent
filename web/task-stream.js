@@ -12,7 +12,7 @@ function pause(ms, signal) {
 
 /** Resume a task without replaying events; task polling repairs a missed terminal event. */
 export async function followTask({ taskId, headers = {}, signal, onEvent, onConnection = () => {},
-  onCursor = () => {}, fetchImpl = fetch, wait = pause, initialCursor = 0, idleTimeoutMs = 45_000 }) {
+  onCursor = () => {}, onSnapshot = () => {}, fetchImpl = fetch, wait = pause, initialCursor = 0, idleTimeoutMs = 45_000 }) {
   let cursor = initialCursor;
   let attempt = 0;
   const path = "/v1/tasks/" + encodeURIComponent(taskId);
@@ -68,12 +68,14 @@ export async function followTask({ taskId, headers = {}, signal, onEvent, onConn
       await reader?.cancel().catch(() => {});
     }
     if (signal.aborted) return;
-    // A task may finish while the stream is unavailable. Poll before every reconnect.
+    onConnection("reconnecting");
+    // A task may finish or wait for clarification while the stream is unavailable.
     try {
       const res = await fetchImpl(path, { headers, signal });
       if ([401, 403, 404].includes(res.status)) throw Object.assign(new Error("Task status HTTP " + res.status), { fatal: true });
       if (res.ok) {
         const { task } = await res.json();
+        onSnapshot(task);
         if (isTerminal(task.status)) {
           onEvent({ task_id: taskId, type: "task_finished", data: task });
           return;
@@ -83,7 +85,6 @@ export async function followTask({ taskId, headers = {}, signal, onEvent, onConn
       if (signal.aborted) return;
       if (error.fatal) throw error;
     }
-    onConnection("reconnecting");
     await wait(Math.min(30_000, 1_000 * 2 ** Math.min(attempt++, 5)), signal);
   }
 }

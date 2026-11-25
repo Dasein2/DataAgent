@@ -115,10 +115,11 @@ function historyHarness() {
     clearTranscript() { height = 0; scrollTop = 0; rendered.length = 0; state.taskId = null; },
     document: { createElement: () => ({ className: "", innerHTML: "" }) },
     addMessage(who: string, options: any = {}) {
-      const body = { who, options, innerHTML: "", replaceChildren() { this.innerHTML = ""; }, append(node: any) { this.innerHTML += node.innerHTML || ""; } };
+      const body = { who, options, innerHTML: "", replaceChildren() { this.innerHTML = ""; }, append(node: any) { this.innerHTML += node.innerHTML || ""; }, insertBefore(node: any) { this.innerHTML = (node.innerHTML || "") + this.innerHTML; } };
       rendered.push(body); height += 100; return body;
     },
     renderMarkdown: (text: string) => text,
+    renderAnswer(node: any, source: string) { node.innerHTML = source; }, attachResultEvidence() {}, openResult() {},
     applySession() {}, renderAssets() {}, streamTask() {},
     renderArtifactInto() { return Promise.resolve(); },
     requestAnimationFrame: (callback: () => void) => frames.push(callback),

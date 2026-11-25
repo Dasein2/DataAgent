@@ -25,7 +25,7 @@ import { taskActivity, type ActivitySummary } from "./task-activity.js";
 import { generateSessionTitle, type GeneratedSessionTitle } from "./session-title.js";
 import { businessContextPrompt, contextSummary } from "../business-context/store.js";
 import type { BusinessContextFile } from "../business-context/types.js";
-import { ASK_USER, CLARIFICATION_WAIT_MS, INTENT_CONFIRMATION_GUIDANCE, MAX_CLARIFICATIONS, clarificationPrompt, intentConfirmationOptions, type ClarificationAnswer, type TaskClarification } from "./clarification.js";
+import { ASK_USER, CLARIFICATION_WAIT_MS, MAX_CLARIFICATIONS, clarificationPrompt, type ClarificationAnswer, type TaskClarification } from "./clarification.js";
 
 export type TaskStatus = "queued" | "running" | "waiting_for_user" | "succeeded" | "failed" | "cancelled" | "incomplete";
 
@@ -73,7 +73,7 @@ interface QueueItem {
 }
 
 type QuestionInput = Pick<TaskClarification, "question" | "impact" | "options">;
-type StagedQuestion = QuestionInput & { id: string; kind: "intent_confirmation" | "follow_up" };
+type StagedQuestion = QuestionInput & { id: string; kind: "follow_up" };
 
 interface FinalAssistantMessage {
   stopReason?: string;
@@ -191,13 +191,10 @@ export class AnalysisSession {
               ? { ...message, toolsAdded: message.toolsAdded.filter(tool => !SOURCE_TOOLS.has(tool.name)) } : message) };
           });
           pi.on("before_agent_start", (event) => {
-            const current = sessionRef.current;
-            const initial = app.intentConfirmation !== false && current && !current.clarifications?.some(question => question.kind === "intent_confirmation" && question.answer);
-            const phase = initial ? `\n\n## Current task: initial confirmation\n${INTENT_CONFIRMATION_GUIDANCE}`
-              : current ? "\n\n## Current task: analysis\nContinue this same task using the user's confirmed scope and latest corrections. Do not repeat a general intent confirmation; ask only about newly discovered material ambiguities." : "";
-            // Provider-only projection. Don't keep obsolete reference bodies in Pi's transcript.
-            const context = contextRef.files.length ? "\n\n## Business Context\n" + contextRef.prompt : "";
-            if (phase || context) return { systemPrompt: event.systemPrompt + phase + context };
+            if (contextRef.files.length) {
+              // Provider-only projection. Don't keep obsolete reference bodies in Pi's transcript.
+              return { systemPrompt: event.systemPrompt + "\n\n## Business Context\n" + contextRef.prompt };
+            }
           });
         }],
       });
@@ -244,9 +241,6 @@ export class AnalysisSession {
     // no sibling tool can start even if it precedes ask_user in the model's output.
     const beforeToolCall = session.agent.beforeToolCall;
     session.agent.beforeToolCall = async (context, signal) => {
-      if (context.toolCall.name !== ASK_USER && analysis.needsIntentConfirmation) {
-        return { block: true, terminate: true, reason: "The user must confirm the task scope before other tools can run." };
-      }
       if (context.toolCall.name !== ASK_USER &&
           (analysis.stagedQuestion || context.assistantMessage.content.some(part => part.type === "toolCall" && part.name === ASK_USER))) {
         return { block: true, terminate: true, reason: "Other tools cannot run in the same turn as ask_user." };
@@ -256,7 +250,7 @@ export class AnalysisSession {
     const finishTurn = session.agent.finishTurn;
     session.agent.finishTurn = async (turn, signal) => {
       const decision = await finishTurn?.(turn, signal);
-      if (!analysis.stagedQuestion && !analysis.needsIntentConfirmation) return decision || undefined;
+      if (!analysis.stagedQuestion) return decision || undefined;
       // End this Pi run after the tool results have been recorded, without aborting it.
       // A stale queued steer is not an answer to the pending question.
       if (session.pendingMessageCount) {
@@ -272,10 +266,6 @@ export class AnalysisSession {
   }
 
   // ---------------------------------------------------------------- lifecycle
-
-  private get needsIntentConfirmation(): boolean {
-    return this.app.intentConfirmation !== false && Boolean(this.current && !this.current.clarifications?.some(question => question.kind === "intent_confirmation" && question.answer));
-  }
 
   get effectiveTools() {
     const blocked = this.db.snapshot().status === "unavailable" || Boolean(this.current?.source_recovery);
@@ -417,9 +407,8 @@ export class AnalysisSession {
     const snapshot = this.db.snapshot();
     if (snapshot.status === "unavailable") throw new AppError("SESSION_UNAVAILABLE", snapshot.unavailable_reason ?? "Open a new session");
     const maxTurns = Math.min(options.maxTurns ?? this.app.budgets.maxTurns, this.app.budgets.maxTurns);
-    const minTurns = this.app.intentConfirmation === false ? 1 : 3;
-    if (!Number.isInteger(maxTurns) || maxTurns < minTurns)
-      throw new AppError("INVALID_INPUT", `max_turns must be at least ${minTurns} to confirm the request and complete analysis`);
+    if (!Number.isInteger(maxTurns) || maxTurns < 1)
+      throw new AppError("INVALID_INPUT", "max_turns must be a positive integer");
     if (this.queue.length >= 8) throw new AppError("TASK_QUEUE_FULL", "Too many queued tasks for this session");
     const record: TaskRecord = {
       id: TASK_ID(),
@@ -447,11 +436,10 @@ export class AnalysisSession {
     if (!task || task.status !== "running" || this.abortRequested || this.timedOut)
       throw new AppError("NO_ACTIVE_TASK", "No running analysis can ask for clarification");
     if (this.stagedQuestion) throw new AppError("SESSION_BUSY", "Only one question can be asked at a time");
-    const initial = this.needsIntentConfirmation;
-    if (!initial && ((task.clarifications?.length ?? 0) >= MAX_CLARIFICATIONS || this.maxTurns - this.turns < 2))
+    if ((task.clarifications?.length ?? 0) >= MAX_CLARIFICATIONS || this.maxTurns - this.turns < 2)
       throw new AppError("TASK_BUDGET_EXCEEDED", "The clarification limit was reached or fewer than two turns remain to explore and answer. State the unresolved limitation without guessing.");
     const id = randomUUID();
-    this.stagedQuestion = { ...input, id, kind: initial ? "intent_confirmation" : "follow_up" };
+    this.stagedQuestion = { ...input, id, kind: "follow_up" };
     return { id };
   }
 
@@ -545,8 +533,7 @@ export class AnalysisSession {
     this.finalMessage = undefined;
     this.sourceInFlight.clear();
     this.sourceRequestsInFlight.clear();
-    const initial = this.needsIntentConfirmation;
-    this.agent.setActiveToolsByName(initial ? [ASK_USER] : this.effectiveTools.map(t => t.name));
+    this.agent.setActiveToolsByName(this.effectiveTools.map(t => t.name));
     task.status = "running";
     task.started_at ??= new Date().toISOString();
     const queriesBefore = snapshot.queries.used;
@@ -554,7 +541,7 @@ export class AnalysisSession {
     const remainingMs = this.app.budgets.taskTimeoutMs - (task.execution_ms ?? 0);
     const usageBefore = this.agent.getSessionStats();
     this.saveTask(task);
-    this.broker.publish(task.id, "task_started", { goal: task.goal, max_turns: maxTurns, resumed, phase: initial ? "intent_confirmation" : "analysis" });
+    this.broker.publish(task.id, "task_started", { goal: task.goal, max_turns: maxTurns, resumed, phase: "analysis", execution_ms: task.execution_ms ?? 0, waiting_ms: task.waiting_ms ?? 0 });
 
     let settledResolve: ((aborted: boolean) => void) | undefined;
     const settled = new Promise<boolean>((resolve) => {
@@ -612,13 +599,7 @@ export class AnalysisSession {
     task.execution_ms = (task.execution_ms ?? 0) + Math.max(0, Date.now() - startedAt);
     // The hook stages the request before Pi settles; expose it only when the tools and
     // transcript have settled, and only if no cancellation/failure won the race.
-    let staged = this.stagedQuestion as StagedQuestion | undefined;
-    // A model can ignore the tool schema. Still require an explicit reply; never treat
-    // unstructured first-turn prose as a result or a trusted restatement of the scope.
-    if (initial && !staged && ["stop", "toolUse"].includes((this.finalMessage as FinalAssistantMessage | undefined)?.stopReason ?? "")) {
-      staged = { id: randomUUID(), kind: "intent_confirmation", question: "按原始需求开始分析吗？",
-        impact: "未能生成需求复述。可以确认按上方原始需求开始探索，或补充你希望采用的口径。" };
-    }
+    const staged = this.stagedQuestion as StagedQuestion | undefined;
     try {
       const results = await this.db.listResults();
       task.results = results.filter((result) => result.taskId === task.id).map((result) => result.id);
@@ -665,7 +646,6 @@ export class AnalysisSession {
       const now = Date.now();
       const waitMs = Math.min(CLARIFICATION_WAIT_MS, this.app.sessionTtlMs);
       const question: TaskClarification = { ...staged, asked_at: new Date(now).toISOString(), expires_at: new Date(now + waitMs).toISOString() };
-      if (staged.kind === "intent_confirmation") question.options = intentConfirmationOptions(staged.options);
       (task.clarifications ??= []).push(question);
       task.status = "waiting_for_user";
       // Interim narration is not an answer to the analysis.
@@ -704,6 +684,7 @@ export class AnalysisSession {
       answer: task.answer ?? "",
       error: task.error ?? null,
       duration_ms: durationMs,
+      execution_ms: task.execution_ms,
       waiting_ms: task.waiting_ms,
       clarifications: task.clarifications,
       activity: task.activity,
@@ -741,14 +722,14 @@ export class AnalysisSession {
 
     this.abortRequested = true;
     // Control channel: cancel the query directly, outside the serialised queue.
-    if (!this.needsIntentConfirmation) await this.db.cancel().catch(() => false);
+    await this.db.cancel().catch(() => false);
     if (this.current === running && running.status === "running") void this.agent.abort();
     return true;
   }
 
   async steer(text: string, taskId?: string): Promise<void> {
     const task = this.current;
-    if (task?.status === "waiting_for_user" || this.stagedQuestion || this.needsIntentConfirmation)
+    if (task?.status === "waiting_for_user" || this.stagedQuestion)
       throw new AppError("SESSION_BUSY", "请在追问卡片中回答当前问题。");
     if (!task || task.status !== "running" || (taskId && task.id !== taskId))
       throw new AppError("NO_ACTIVE_TASK", "No matching task is running");
@@ -812,7 +793,7 @@ export class AnalysisSession {
       }
       case "message_update": {
         const update = event.assistantMessageEvent as { type?: string; delta?: string } | undefined;
-        if (update?.type === "text_delta" && update.delta && !this.needsIntentConfirmation) {
+        if (update?.type === "text_delta" && update.delta) {
           this.broker.publish(task.id, "message_delta", { text: update.delta });
         } else if (update?.type === "thinking_delta" && update.delta) {
           this.broker.publish(task.id, "reasoning_delta", { text: update.delta });
@@ -880,10 +861,16 @@ export class AnalysisSession {
             .map((part) => part.text)
             .join("")
             .trim();
-          if (text && !this.needsIntentConfirmation) task.answer = text;
+          if (text) task.answer = text;
+          const hasTools = (message.content ?? []).some(part => part.type === "toolCall");
+          if (text && !hasTools && message.stopReason === "stop" && !this.stagedQuestion && !this.abortRequested && !this.timedOut && !this.turnBudgetExceeded) {
+            // Completed model response, not an intermediate query preview. Final task status
+            // still arrives after result/artifact bookkeeping and can supersede this view.
+            this.broker.publish(task.id, "answer_ready", { answer: text });
+          }
           this.finalMessage = {
             text, stopReason: message.stopReason, errorMessage: message.errorMessage,
-            hasTools: (message.content ?? []).some((part) => part.type === "toolCall"),
+            hasTools,
           };
           this.saveTask(task);
           this.broker.publish(task.id, "usage", { ...this.agent.getSessionStats().tokens, context_usage: safeContextUsage(this.agent) });
