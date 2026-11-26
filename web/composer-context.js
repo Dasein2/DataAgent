@@ -11,14 +11,15 @@ export function initComposerContext({ api, state }) {
   const quoteBar = byId("replyPreview"), excerpt = byId("replyExcerpt");
   const drafts = new Map();
   let session, scope, quote, tables = [], scopes = [], blocked = true, serial = 0, timer;
-  let hits = [], highlighted = 0, match;
+  let hits = [], highlighted = 0, match, page;
   const pg = () => state.session?.engine === "postgres";
   const currentScope = () => scope || state.session?.default_scope || (!pg() && state.session?.database) || "";
   const url = suffix => `/v1/sessions/${encodeURIComponent(session)}/catalog/${suffix}`;
   function closeMenus() {
     ++serial; clearTimeout(timer); picker.hidden = mention.hidden = true;
+    page?.controller.abort(); page = null;
     toggle.setAttribute("aria-expanded", "false"); goal.removeAttribute("aria-activedescendant");
-    hits = []; match = null;
+    hits = []; highlighted = 0; match = null;
   }
   function label() {
     byId("scopeName").textContent = currentScope() || (pg() ? "选择 Schema" : "选择数据库");
@@ -80,43 +81,117 @@ export function initComposerContext({ api, state }) {
   };
   function pick(table) {
     const at = mentionAtCursor(goal.value, goal.selectionStart);
-    if (!at || at.start !== match?.start || at.end !== match?.end || at.query !== match.query) { closeMenus(); return; }
+    if (!page || !activePage(page) || !at) { closeMenus(); return; }
     const q = pg() ? '"' : '`';
     const token = '@' + [table.schema, table.name].map(s => q + s.replaceAll(q, q + q) + q).join('.');
     tables = tables.filter(t => goal.value.includes(t.token));
     if (!tables.some(t => t.token === token)) {
-      if (tables.length >= 20) { status(mention, "每条消息最多引用 20 张表"); return; }
+      if (tables.length >= 20) {
+        page.controller.abort(); page = null;
+        hits = [];
+        goal.removeAttribute("aria-activedescendant");
+        status(mention, "每条消息最多引用 20 张表");
+        return;
+      }
       tables.push({ schema: table.schema, name: table.name, token });
     }
     goal.setRangeText(token + " ", at.start, at.end, "end"); closeMenus(); goal.focus(); goal.dispatchEvent(new Event("input"));
   }
-  function markActive() {
-    [...mention.querySelectorAll("button")].forEach((node, i) => node.setAttribute("aria-selected", String(i === highlighted)));
+  function markActive({ scroll = true } = {}) {
+    mention.querySelectorAll("button").forEach((node, i) => node.setAttribute("aria-selected", String(i === highlighted)));
     const target = byId(`tableOption${highlighted}`);
-    if (target) { goal.setAttribute("aria-activedescendant", target.id); target.scrollIntoView({ block: "nearest" }); }
+    if (target) {
+      goal.setAttribute("aria-activedescendant", target.id);
+      if (scroll) target.scrollIntoView({ block: "nearest" });
+    } else goal.removeAttribute("aria-activedescendant");
+  }
+  function activePage(p) {
+    if (p !== page || blocked || mention.hidden || p.session !== state.sessionId || p.schema !== currentScope()) return false;
+    const at = mentionAtCursor(goal.value, goal.selectionStart);
+    return Boolean(at && match && goal.selectionStart === goal.selectionEnd &&
+      at.start === match.start && at.end === match.end && at.query === match.query);
+  }
+  function pageFooter(p) {
+    if (p.nextOffset === null) {
+      p.footer?.remove(); p.footer = null;
+    } else {
+      // Keep the same button during the request so its click still bubbles inside the picker.
+      if (!p.footer) {
+        p.footer = row("", false, () => void loadMentionPage(p, true));
+        p.footer.className = "context-more";
+        mention.append(p.footer);
+      }
+      const more = p.footer;
+      more.id = `tableOption${hits.length}`;
+      more.textContent = p.loading ? "正在加载…" : p.error ? "加载失败，点击重试" : `加载更多（已加载 ${hits.length} 张）`;
+      more.disabled = p.loading;
+      more.title = p.error || "继续读取当前库的匹配表；也可在 @ 后输入表名搜索";
+      more.setAttribute("aria-busy", String(p.loading));
+    }
+    markActive({ scroll: false });
+  }
+  async function loadMentionPage(p, keyboard = false) {
+    if (!activePage(p) || p.loading || p.nextOffset === null) return;
+    const offset = p.nextOffset, previousLength = hits.length;
+    p.loading = true; p.error = "";
+    if (hits.length || p.footer) pageFooter(p);
+    try {
+      const params = new URLSearchParams({ schema: p.schema, type: "table", search: p.query, limit: "30", offset: String(offset) });
+      const data = await api(url("objects?" + params), { signal: p.controller.signal });
+      if (!activePage(p)) return;
+      if (data.nextOffset !== null && (!Number.isInteger(data.nextOffset) || data.nextOffset <= offset))
+        throw new Error("目录分页结果无效，请重试");
+      const seen = new Set(hits.map(t => JSON.stringify([t.schema, t.name])));
+      const added = [];
+      for (const table of data.objects) {
+        const key = JSON.stringify([table.schema, table.name]);
+        if (table.schema === p.schema && !seen.has(key)) { seen.add(key); added.push(table); }
+      }
+      const scrollTop = mention.scrollTop;
+      if (!hits.length) mention.replaceChildren();
+      p.footer?.remove(); p.footer = null;
+      for (const table of added) {
+        const button = row(table.name, hits.length === highlighted, () => pick(table));
+        button.id = `tableOption${hits.length}`; button.title = `${table.schema}.${table.name}`;
+        hits.push(table); mention.append(button);
+      }
+      p.nextOffset = data.nextOffset;
+      if (!hits.length && p.nextOffset === null) status(mention, "当前库没有匹配的数据表");
+      // Append instead of rebuilding previous rows, keeping the user's scroll and highlight.
+      mention.scrollTop = scrollTop;
+      if (keyboard && added.length) highlighted = previousLength;
+      else if (p.nextOffset === null) highlighted = Math.min(highlighted, Math.max(0, hits.length - 1));
+    } catch (error) {
+      if (!activePage(p)) return;
+      p.error = error.message;
+      if (!hits.length) {
+        p.footer = null;
+        status(mention, `搜索失败：${p.error}`);
+      }
+    } finally {
+      if (activePage(p)) {
+        p.loading = false; pageFooter(p);
+        if (keyboard && hits.length > previousLength) markActive();
+      }
+    }
   }
   function findTables() {
     closeMenus();
     if (blocked || goal.selectionStart !== goal.selectionEnd) return;
     match = mentionAtCursor(goal.value, goal.selectionStart); if (!match) return;
-    mention.hidden = false; const ticket = serial, query = match.query;
+    mention.hidden = false; mention.scrollTop = 0;
     const schema = currentScope();
     if (!schema) { status(mention, "请先选择目标库或 Schema"); return; }
     status(mention, "正在查找数据表…");
-    timer = setTimeout(async () => {
-      try {
-        const params = new URLSearchParams({ schema, type: "table", search: query, limit: "30" });
-        const data = await api(url("objects?" + params)); if (ticket !== serial) return;
-        hits = data.objects; highlighted = 0;
-        if (!hits.length) { status(mention, "当前库没有匹配的数据表"); return; }
-        mention.replaceChildren(...hits.map((table, i) => {
-          const b = row(table.name, i === 0, () => pick(table)); b.id = `tableOption${i}`; b.title = `${table.schema}.${table.name}`; return b;
-        }));
-        goal.setAttribute("aria-activedescendant", "tableOption0");
-      } catch (error) { if (ticket === serial) status(mention, error.message); }
-    }, 130);
+    const p = page = { session, schema, query: match.query, nextOffset: 0,
+      loading: false, error: "", footer: null, controller: new AbortController() };
+    timer = setTimeout(() => void loadMentionPage(p), 130);
   }
-  goal.addEventListener("input", e => { if (!e.isComposing) findTables(); });
+  mention.addEventListener("scroll", () => {
+    if (page && !page.error && !page.loading && mention.scrollHeight > mention.clientHeight &&
+        mention.scrollTop + mention.clientHeight >= mention.scrollHeight - 24) void loadMentionPage(page);
+  }, { passive: true });
+  goal.addEventListener("input", e => { if (e.isComposing) closeMenus(); else findTables(); });
   goal.addEventListener("click", findTables);
   goal.addEventListener("compositionend", findTables);
   goal.addEventListener("keyup", e => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) findTables(); });
@@ -124,10 +199,15 @@ export function initComposerContext({ api, state }) {
     if (mention.hidden || e.isComposing || e.keyCode === 229) return;
     if (e.key === "Escape") { e.preventDefault(); closeMenus(); }
     if (e.key === "Tab") { closeMenus(); return; }
-    if (["ArrowDown", "ArrowUp"].includes(e.key) && hits.length) {
-      e.preventDefault(); highlighted = (highlighted + (e.key === "ArrowDown" ? 1 : -1) + hits.length) % hits.length; markActive();
+    const count = hits.length + (page?.footer ? 1 : 0);
+    if (["ArrowDown", "ArrowUp"].includes(e.key) && count) {
+      e.preventDefault(); highlighted = (highlighted + (e.key === "ArrowDown" ? 1 : -1) + count) % count; markActive();
     }
-    if (e.key === "Enter" && !e.shiftKey && !e.altKey) { e.preventDefault(); if (hits[highlighted]) pick(hits[highlighted]); else closeMenus(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      if (hits[highlighted]) pick(hits[highlighted]);
+      else if (page?.footer) void loadMentionPage(page, true);
+    }
   });
   document.addEventListener("click", e => { if (!e.target.closest("#scopeControl, #goal, #tablePicker")) closeMenus(); });
   return { update, setQuote,
