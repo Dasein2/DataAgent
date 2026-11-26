@@ -1,22 +1,13 @@
-import { AppError } from "../errors.js";
-import type { DbSession } from "../db/session.js";
-import type { ResultMeta, ResultStore } from "../results/store.js";
-import { CatalogDraft, type CatalogVersion, type BusinessTable } from "./types.js";
+import { AppError } from "../../src/errors.js";
+import type { DbSession } from "../../src/db/session.js";
+import type { ResultStore } from "../../src/results/store.js";
+import { CatalogDraft, type CatalogVersion, type BusinessTable } from "../../src/business/types.js";
 import { compileMetric, relationPassed, validateCatalog } from "./planner.js";
 import { BusinessCatalogStore, fingerprint } from "./store.js";
-import { buildBusinessView } from "./view.js";
+import { readBusinessView } from "../../src/business/view.js";
 export { BusinessCatalogStore };
 
 const cap = 2_000;
-export async function readBusinessView(store: ResultStore, meta: ResultMeta) {
-  if (!meta.business || meta.error) throw new AppError("NOT_FOUND", "No structured business report for this result");
-  const rows: unknown[][] = [];
-  if (meta.truncated === "none" && meta.rowCount <= cap) {
-    for await (const row of store.iterateRows(meta.id)) { rows.push(row); if (rows.length > cap) break; }
-  }
-  return buildBusinessView(meta, rows, meta.business);
-}
-
 export class BusinessAnalysis {
   constructor(private readonly catalog: BusinessCatalogStore, private readonly connection: string, private readonly db: DbSession, private readonly results: ResultStore) {}
   get enabled() { return Boolean(this.catalog.active(this.connection)?.enabled); }
@@ -108,7 +99,7 @@ export class BusinessAnalysis {
   }
 
   /** Re-bind against the pinned account, not a metadata snapshot from another role or connection. */
-  private async bind(catalog: CatalogVersion["catalog"], tables: BusinessTable[], request?: import("./types.js").MetricRequest) {
+  private async bind(catalog: CatalogVersion["catalog"], tables: BusinessTable[], request?: import("../../src/business/types.js").MetricRequest) {
     const descriptions: Record<string, string> = Object.create(null);
     const keys = new Map<string, Map<string, string>>();
     for (const t of tables) {

@@ -2,12 +2,12 @@ import { formatActivityDuration } from "./task-activity.js";
 
 const terminal = new Set(["succeeded", "failed", "cancelled", "incomplete", "submission_failed"]);
 const labels = { succeeded: "分析完成", failed: "分析失败", cancelled: "已取消", incomplete: "分析未完成", submission_failed: "任务未提交成功" };
-const discovery = new Set(["session_info", "catalog_search", "catalog_overview", "object_describe", "data_profile", "business_lookup"]);
+const discovery = new Set(["session_info", "catalog_search", "catalog_overview", "object_describe", "data_profile"]);
 const local = new Set(["result_read", "result_compute", "result_transform", "snapshot_list"]);
 export function toolProgressLabel(tool) {
   if (discovery.has(tool)) return "正在了解相关数据";
   if (tool === "query_explain") return "正在检查查询成本";
-  if (tool === "query_execute" || tool === "business_analyze") return "正在查询数据";
+  if (tool === "query_execute") return "正在查询数据";
   if (local.has(tool)) return "正在核对和计算结果";
   if (tool === "chart_create" || tool === "chart_revise") return "正在生成图表";
   if (tool === "ask_user") return "正在整理需要确认的问题";
@@ -87,10 +87,10 @@ export function createTaskProgress(host, { task = {}, now = Date.now, onCancel =
         status = "queued"; stage = "正在继续分析";
       } else if (event.type === "tool_started") {
         active.set(data.call_id, { tool: data.tool, at: Number.isFinite(at) ? at : now() }); stage = toolProgressLabel(data.tool);
-        activeSince = [...active.values()].find(call => ["query_execute", "business_analyze"].includes(call.tool))?.at ?? null;
+        activeSince = [...active.values()].find(call => call.tool === "query_execute")?.at ?? null;
       } else if (event.type === "tool_finished") {
         active.delete(data.call_id);
-        activeSince = [...active.values()].find(call => ["query_execute", "business_analyze"].includes(call.tool))?.at ?? null;
+        activeSince = [...active.values()].find(call => call.tool === "query_execute")?.at ?? null;
         if (!active.size) stage = data.is_error ? "正在处理查询问题" : "数据已返回，正在核对结果";
         else stage = toolProgressLabel([...active.values()].at(-1).tool);
       } else if (event.type === "retry") stage = "遇到临时问题，正在重试";

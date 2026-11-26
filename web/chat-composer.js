@@ -40,7 +40,7 @@ export async function copyText(text) {
   }
 }
 
-export function initChatComposer({ api, state, applySession, onError, isOpening = () => false }) {
+export function initChatComposer({ api, state, context, applySession, onError, isOpening = () => false }) {
   const $ = (id) => document.getElementById(id);
   const goal = $("goal"), messages = $("messages"), chip = $("btnModelChip");
   const sources = new WeakMap();
@@ -78,7 +78,7 @@ export function initChatComposer({ api, state, applySession, onError, isOpening 
       goal.value = "";
       resize();
     }
-    goal.placeholder = reply ? "输入补充或纠正，再点击发送…" : "描述你的分析问题…";
+    goal.placeholder = reply ? "输入补充或纠正，再点击发送…" : "描述你的分析问题，输入 @ 引用数据表…";
     goal.maxLength = reply ? 2000 : 20000;
     goal.readOnly = Boolean(reply && state.clarificationSending === reply.id);
     $("composerEditing").hidden = Boolean(reply) || !editing;
@@ -87,6 +87,7 @@ export function initChatComposer({ api, state, applySession, onError, isOpening 
   }
   function update() {
     const replying = syncReply();
+    context.update(!state.sessionId || !state.sessionReady || Boolean(state.taskId) || switching || submitting || isOpening());
     chip.disabled = !state.sessionId || !state.sessionReady || Boolean(state.taskId) || switching || submitting;
     chip.title = state.taskId ? "分析运行中，结束后可切换模型" : !state.sessionReady ? "恢复数据库连接后可切换模型" : "切换当前会话模型，不影响其他会话或全局默认";
     const agent = state.session?.agent;
@@ -120,7 +121,14 @@ export function initChatComposer({ api, state, applySession, onError, isOpening 
     }
     update();
   }
+  function showReplyLabel(body, source) {
+    if (!source) return;
+    const tag = el("div", "sent-reply", "↩ 回复 · " + source.trim().replace(/\s+/g, " ").slice(0, 180));
+    tag.title = tag.textContent;
+    body.before(tag);
+  }
   function attachMessage(body, who, options = {}) {
+    if (options.replyExcerpt) showReplyLabel(body, options.replyExcerpt);
     if (options.text !== undefined) { sources.set(body, options.text); body.textContent = options.text; }
     const wrap = body.closest(".msg");
     if (options.taskId) wrap.dataset.taskId = options.taskId;
@@ -132,6 +140,12 @@ export function initChatComposer({ api, state, applySession, onError, isOpening 
       const edit = el("button", "ghost", "编辑重发"); edit.type = "button"; edit.dataset.messageAction = "edit";
       edit.title = "将原文放入输入框，发送时追加为新消息";
       actions.append(edit);
+    } else if (who === "assistant") {
+      const replyButton = el("button", "ghost message-reply", "↩");
+      replyButton.type = "button"; replyButton.dataset.messageAction = "reply";
+      replyButton.title = "回复这条回答"; replyButton.setAttribute("aria-label", replyButton.title);
+      replyButton.hidden = !options.taskId || !options.text?.trim();
+      actions.append(replyButton);
     }
     wrap.append(actions);
   }
@@ -140,10 +154,15 @@ export function initChatComposer({ api, state, applySession, onError, isOpening 
     if (!button) return;
     const body = button.closest(".msg")?.querySelector(":scope > .body");
     const text = button.matches(".code-copy") ? button.closest(".code-block").querySelector("pre code").textContent : sources.get(body) ?? body.textContent;
-    if (button.dataset.messageAction === "edit") {
+    if (button.dataset.messageAction === "reply") {
+      if (state.pendingQuestion || submitting || isOpening()) return;
+      if (editing) clearEditing();
+      context.setQuote(body.closest(".msg").dataset.taskId, text);
+    } else if (button.dataset.messageAction === "edit") {
       if (reply) { goal.focus(); return; }
       // Running work is unaffected: only the draft changes, never steer/cancel/rewrite.
       if (goal.value && goal.value !== text && !window.confirm("输入框已有草稿，是否用这条消息替换？取消编辑时可以恢复原草稿。")) return;
+      context.setQuote();
       if (!editing) previousDraft = goal.value;
       editing = true; goal.value = text;
       $("composerEditing").hidden = false;
@@ -158,6 +177,7 @@ export function initChatComposer({ api, state, applySession, onError, isOpening 
   $("btnEditCancel").onclick = () => { clearEditing(true); goal.focus(); };
   goal.addEventListener("input", () => { resize(); update(); });
   goal.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented) return;
     if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter" && !event.shiftKey && !event.altKey) { event.preventDefault(); $("btnSend").click(); }
     if (event.key === "Escape" && editing && !reply) { event.preventDefault(); clearEditing(true); }
@@ -254,7 +274,13 @@ export function initChatComposer({ api, state, applySession, onError, isOpening 
   return {
     update, sessionChanged, resize, attachMessage,
     setSubmitting(value) { submitting = value; update(); },
-    setSource(body, source) { sources.set(body, source); },
+    setSource(body, source) {
+      sources.set(body, source);
+      const wrap = body.closest(".msg");
+      const button = wrap.querySelector('[data-message-action="reply"]');
+      if (button) button.hidden = !wrap.dataset.taskId || !source?.trim();
+    },
+    showReplyLabel,
     appendSource(body, text) { sources.set(body, (sources.get(body) || "") + text); },
     sent() { clearEditing(); goal.value = ""; resize(); },
   };

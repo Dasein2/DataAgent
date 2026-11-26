@@ -268,7 +268,7 @@ not invented percentages. Stream outages retain the task reservation and offer r
 not turn a running analysis into a failed task. Polling also restores pending clarification cards.
 
 Analysis tasks start with the full capability-gated toolset, not a mandatory intent confirmation.
-The model uses conversation, supplied business context and published definitions first, then targeted
+The model uses the conversation and supplied business context first, then targeted
 metadata reads and bounded samples when needed to understand the available data. A clear request
 proceeds directly. Once there is enough context to identify a material business choice that evidence
 cannot settle, the model proactively calls `ask_user` before analysis that depends on that choice.
@@ -324,7 +324,7 @@ timings exclude browser rendering and are not a before/after production benchmar
 
 ## Agent tools
 
-The service has 25 tool definitions, gated by session capabilities:
+The service has 23 tool definitions, gated by session capabilities:
 
 - Clarify: `ask_user`, available across all supported engines without a business catalog.
 - Discover: `session_info`, `catalog_search`, `catalog_overview`, `object_describe(objects)` (1–20 relations), `data_profile`.
@@ -334,7 +334,6 @@ The service has 25 tool definitions, gated by session capabilities:
 - BI evidence: `chart_create`.
 - Controlled workspace: `dataset_create`, `dataset_list`, `dataset_drop`.
 - Task and chart management: `job_get`, `job_cancel`, `chart_list`, `chart_archive`, `chart_revise`.
-- Optional Doris pilot: `business_lookup`, `business_analyze` (an enabled published catalog is required).
 
 Management tools are available in the same conversation as analysis. The model is instructed to
 cancel SQL, rename charts, or archive/restore charts only when the user asks. A session gets 20

@@ -14,7 +14,7 @@ import { analysisTools, recoveryHint } from "./analysis-tools.js";
 
 const TOOL_TEXT_BUDGET = 12_000;
 
-export const SOURCE_TOOLS = new Set(["query_execute", "query_explain", "catalog_overview", "catalog_search", "object_describe", "data_profile", "business_lookup", "dataset_create", "dataset_list", "dataset_drop", "business_analyze"]);
+export const SOURCE_TOOLS = new Set(["query_execute", "query_explain", "catalog_overview", "catalog_search", "object_describe", "data_profile", "dataset_create", "dataset_list", "dataset_drop"]);
 
 export interface ToolRuntime {
   db: DbSession;
@@ -22,11 +22,11 @@ export interface ToolRuntime {
   /** Chart artifacts are stored and compiled by the service, never by the model. */
   artifacts: ArtifactService;
   currentTaskId(): string | undefined;
+  targetScope?(): string | undefined;
   taskStatus(): Record<string, unknown>;
   cancelActive(): Promise<boolean>;
   sourceBlocked?(): boolean;
   askUser?(question: z.infer<typeof ClarificationQuestion>): Pick<TaskClarification, "id">;
-  business?: import("../business/service.js").BusinessAnalysis;
 }
 
 function textOutput(text: string, structured?: Record<string, unknown>) {
@@ -212,9 +212,11 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
       try {
         const snapshot = db.snapshot();
         const capabilities = snapshot.capabilities;
+        const targetScope = runtime.targetScope?.();
         const text = [
           `session_id=${snapshot.session_id}`,
           `engine=${snapshot.engine} (${capabilities.engineLabel}) environment=${snapshot.environment} database=${snapshot.database}`,
+          ...(targetScope ? [`target_database_or_schema=${targetScope}`] : []),
           `server_version=${capabilities.serverVersion || "unknown"}`,
           ...(capabilities.queryTimeout ? [`query_timeout=${JSON.stringify(capabilities.queryTimeout)}`] : []),
           `source_access=${capabilities.sourceAccess} read_only_proof=${capabilities.readOnlyProof}`,
@@ -231,6 +233,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
         return textOutput(text, {
           session_id: snapshot.session_id,
           engine: snapshot.engine,
+          ...(targetScope && { target_scope: targetScope }),
           query_timeout: capabilities.queryTimeout,
           environment: snapshot.environment,
           capabilities,
@@ -273,7 +276,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
           search: params.search,
           searchColumns: params.search_columns,
           refresh: params.refresh,
-          schema: params.schema,
+          schema: params.schema ?? runtime.targetScope?.(),
           kinds: params.kinds as never,
           limit: params.limit ?? 100,
         });
@@ -304,7 +307,9 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     executionMode: "parallel",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     execute: async (_id, params) => {
-      const objects = await db.describeMany(params.objects);
+      const targetScope = runtime.targetScope?.();
+      const requested = targetScope ? params.objects.map(item => ({ ...item, schema: item.schema ?? targetScope })) : params.objects;
+      const objects = await db.describeMany(requested);
       const sections = objects.map((item) => {
         if ("error" in item) {
           return `${item.schema ? `${item.schema}.` : ""}${item.name}: ${item.error}`;
@@ -345,7 +350,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     execute: async (_id, params) => {
       try {
-        const profile = await db.profile(params.schema ?? null, params.name, params.sample_rows ?? 50, undefined, params.sampling);
+        const profile = await db.profile(params.schema ?? runtime.targetScope?.() ?? null, params.name, params.sample_rows ?? 50, undefined, params.sampling);
         const lines = [
           `${profile.object.schema}.${profile.object.name} estimated_rows=${profile.rowCount ?? "unknown"} sampled=${profile.sampled} method=${profile.sampleMethod ?? "head"} sample_rows=${profile.sampleRows ?? "unknown"}`,
           "column\ttype\tnulls\tdistinct\tmin\tmax\tsamples",
@@ -740,10 +745,8 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
 export function selectTools<T extends { name: string }>(
   tools: readonly T[],
   caps: Pick<SessionCapabilities, "features" | "workspaceName" | "workspaceAccess">,
-  businessEnabled = false,
 ): T[] {
   return tools.filter(({ name }) => {
-    if (name.startsWith("business_")) return businessEnabled;
     if (name === "query_explain") return caps.features.explain;
     if (name.startsWith("dataset_")) return Boolean(caps.workspaceName) && caps.workspaceAccess !== "none";
     return true;

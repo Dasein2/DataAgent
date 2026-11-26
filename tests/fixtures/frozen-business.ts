@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import { guardSql } from "../../src/db/guard.js";
 import { CatalogDraft } from "../../src/business/types.js";
-import { compileMetric } from "../../src/business/planner.js";
+import { compileMetric } from "../../scripts/doris-pilot/planner.js";
 import { buildBusinessView } from "../../src/business/view.js";
 import type { ResultMeta } from "../../src/results/store.js";
 

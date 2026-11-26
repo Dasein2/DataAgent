@@ -1,5 +1,7 @@
 // Manual desktop/mobile acceptance: node --import tsx tests/fixtures/serve-frozen-business.ts
 // Binds to loopback only; no credentials, external model, or source DB are used.
+import { join } from "node:path";
+import { BusinessAnalysis, BusinessCatalogStore } from "../../scripts/doris-pilot/service.js";
 import { createServer } from "node:http";
 import { AnalysisService, callerKey } from "../../src/agent/service.js";
 import { createHttpApp } from "../../src/api/http.js";
@@ -52,12 +54,16 @@ DbSession.open = async ({ config: connection, app, results }) => {
 const service = await AnalysisService.create(config);
 const session = await service.createSession(ConnectionConfig.parse({ engine: "doris", host: "frozen-fixture", port: 9030, database: "sales", user: "frozen", password: "", environment: "non_production" }), callerKey(config.apiToken));
 session.setTitle("支付订单 · 冻结验收");
-const draft = await session.business!.draft(catalog);
-await session.business!.publish(draft.id, "构造数据，仅用于验收");
-await session.business!.enable(true);
-const full = await session.business!.analyze(trend);
-const totals = await session.business!.analyze({ ...trend, dimension: undefined });
-const extended = await session.business!.analyze({ ...trend, window: { ...trend.window, start: "2026-11-11" } });
+// Seed saved reports for the read-only historical viewer.
+const store = new BusinessCatalogStore(join(config.dataDir, "fixture-catalog.sqlite"));
+const fixture = new BusinessAnalysis(store, session.businessContextScope, session.db, service.results);
+const draft = await fixture.draft(catalog);
+await fixture.publish(draft.id, "构造数据，仅用于验收");
+await fixture.enable(true);
+const full = await fixture.analyze(trend);
+const totals = await fixture.analyze({ ...trend, dimension: undefined });
+const extended = await fixture.analyze({ ...trend, window: { ...trend.window, start: "2026-11-11" } });
+store.close();
 const app = await createHttpApp(service);
 const server = createServer((req, res) => {
   if (req.url === "/__fixture") {

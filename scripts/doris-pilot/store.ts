@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { AppError } from "../errors.js";
-import type { CatalogDraft, CatalogVersion } from "./types.js";
+import { AppError } from "../../src/errors.js";
+import type { CatalogDraft, CatalogVersion } from "../../src/business/types.js";
 
 export const fingerprint = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 

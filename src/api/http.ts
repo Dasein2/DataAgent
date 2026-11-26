@@ -12,11 +12,11 @@ import { AnalysisService, callerKey } from "../agent/service.js";
 import { SaveProfileRequest } from "../db/profiles-store.js";
 import { ModelPatch } from "../agent/model-settings.js";
 import { ChannelSelection } from "../agent/channels.js";
+import { TaskContextInput } from "../agent/task-context.js";
 import { toolCatalog } from "../agent/tools.js";
 import { ClarificationAnswer } from "../agent/clarification.js";
 import { z } from "zod";
 import { ResultOperation } from "../analysis/operations.js";
-import { MetricRequest } from "../business/types.js";
 import { BusinessContextDraft, BusinessContextIds } from "../business-context/types.js";
 import { DOCUMENT_TOKEN_LIMIT, SELECTION_TOKEN_LIMIT } from "../business-context/store.js";
 import { ProviderWrite, ProviderId } from "../agent/provider-store.js";
@@ -399,7 +399,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.json({ results: await service.listResults(req.params.id, ownerOf(req)) });
   });
 
-  app.post("/v1/sessions/:id/tasks", (req, res) => {
+  app.post("/v1/sessions/:id/tasks", async (req, res) => {
     const session = service.getSession(req.params.id, ownerOf(req));
     const goal = typeof req.body?.goal === "string" ? req.body.goal.trim() : "";
     if (!goal || goal.length > 20_000) {
@@ -408,7 +408,18 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     const maxTurns = req.body?.max_turns === undefined
       ? undefined
       : intParam(req.body.max_turns, config.budgets.maxTurns, 1, config.budgets.maxTurns, "max_turns");
-    const task = session.submit(goal, { maxTurns });
+    const context = TaskContextInput.optional().parse(req.body?.context);
+    if (context?.target_scope || context?.tables?.length) {
+      const allowed = new Set(session.db.catalogScopeNames());
+      if ((context.target_scope && !allowed.has(context.target_scope)) || context.tables?.some(t => !allowed.has(t.schema)))
+        throw new AppError("SQL_SCOPE_VIOLATION", "所选数据库不在当前连接的可访问范围内");
+      for (const table of context.tables ?? []) {
+        const { object } = await session.db.describe(table.schema, table.name);
+        if (object.schema !== table.schema || object.name !== table.name || !CATALOG_TABLE_KINDS.includes(object.kind as typeof CATALOG_TABLE_KINDS[number]))
+          throw new AppError("INVALID_INPUT", "所选数据表已不可用，请重新选择");
+      }
+    }
+    const task = session.submit(goal, { maxTurns, context });
     res.status(202).json({ task, events_url: `/v1/tasks/${task.id}/events` });
   });
 
@@ -647,36 +658,6 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     res.status(204).end();
   });
 
-  // Catalog publisher is an authenticated administrator (or the private bearer operator).
-  const pilot = (req: Request, id: string, mutate = false) => {
-    if (mutate && !(service.accounts ? auth.account(req)?.role === "admin" : Boolean(service.config.apiToken)))
-      throw new AppError("FORBIDDEN", "Business catalog changes require an authenticated administrator");
-    const session = service.getSession(id, ownerOf(req));
-    if (mutate && session.isBusy) throw new AppError("SESSION_BUSY", "Wait for the current task before changing business settings");
-    if (!session.business) throw new AppError("FEATURE_UNSUPPORTED", "The pilot needs a Doris connection with proven read-only privileges");
-    return session.business;
-  };
-  app.get("/v1/sessions/:id/business-catalog", async (req, res) => res.json(await pilot(req, req.params.id).list()));
-  app.get("/v1/sessions/:id/business-catalog/:version", async (req, res) => res.json(await pilot(req, req.params.id).get(req.params.version)));
-  app.post("/v1/sessions/:id/business-catalog", async (req, res) => res.status(201).json(await pilot(req, req.params.id, true).draft(req.body)));
-  app.post("/v1/sessions/:id/business-catalog/:version/publish", async (req, res) => {
-    const business = pilot(req, req.params.id, true);
-    const { reviewer } = z.strictObject({ reviewer: z.string().trim().min(1).max(100) }).parse(req.body);
-    res.status(201).json(await business.publish(req.params.version, reviewer));
-  });
-  app.put("/v1/sessions/:id/business-pilot", async (req, res) => {
-    const business = pilot(req, req.params.id, true);
-    const { enabled } = z.strictObject({ enabled: z.boolean() }).parse(req.body);
-    await business.enable(enabled);
-    res.json({ enabled });
-  });
-  app.post("/v1/sessions/:id/business-analysis", async (req, res) => {
-    const session = service.getSession(req.params.id, ownerOf(req));
-    if (session.isBusy) throw new AppError("SESSION_BUSY", "Wait for the current task before supplementing the analysis");
-    const { request, version } = z.strictObject({ request: MetricRequest, version: z.string().max(80) }).parse(req.body);
-    res.json(await pilot(req, req.params.id).analyze(request, { expectedVersion: version }));
-  });
-
   // Lightweight console (same API, no build step).
   const webRoot = new URL("../../web/", import.meta.url);
   app.get("/task-stream.js", (_req, res) => {
@@ -691,7 +672,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       () => res.status(404).end(),
     );
   });
-  for (const file of ["chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js", "task-progress.js", "answer-evidence.js", "business-report.js", "business-catalog.js"]) {
+  for (const file of ["composer-context.js", "chat-composer.js", "explore.js", "charts.js", "workbench.js", "workbench.css", "business-context.js", "catalog.js", "assets.js", "task-activity.js", "task-tools.js", "task-progress.js", "answer-evidence.js", "business-report.js"]) {
     app.get("/" + file, (_req, res) => { void readFile(new URL(file, webRoot), "utf8").then(code => res.type(file.endsWith("css") ? "text/css" : "application/javascript").send(code), () => res.status(404).end()); });
   }
   // Vendored ECharts: served from this origin so the console needs no CDN and no build step.

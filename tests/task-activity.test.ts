@@ -164,7 +164,7 @@ for (const kind of ["follow_up", "intent_confirmation"]) for (const freeText of 
     },
   });
   runInContext(composerSource.replace(/export (?=(?:async )?function)/g, "") +
-    '\nconst composer = initChatComposer({ api, state }); composer.sessionChanged(); $("goal").value = "保留原草稿";', context);
+    '\nconst composer = initChatComposer({ api, state, context: { update() {} } }); composer.sessionChanged(); $("goal").value = "保留原草稿";', context);
   runInContext(html.slice(html.indexOf('$("btnSend").onclick'), html.indexOf("function streamTask(")) +
     html.slice(html.indexOf("function clarificationCard("), html.indexOf("function handleEvent(")), context);
   runInContext('showClarification(question, "task_live"); showClarification(question, "task_live")', context);

@@ -30,7 +30,7 @@ import { AnalysisSession, type TaskRecord } from "./runtime.js";
 import { buildTitleTranscriptFromTasks, generateTitleFromModel, type GeneratedSessionTitle } from "./session-title.js";
 import { HistoryStore, connectionKey } from "./history.js";
 import { taskActivity } from "./task-activity.js";
-import { BusinessCatalogStore, readBusinessView } from "../business/service.js";
+import { readBusinessView } from "../business/view.js";
 import { parseResultValueRef } from "../business/types.js";
 import { compileResultOperation, type ResultOperation } from "../analysis/operations.js";
 import { BusinessContextStore, businessContextScope } from "../business-context/store.js";
@@ -151,7 +151,6 @@ export class AnalysisService {
   readonly history: HistoryStore;
   readonly profiles: ProfileStore;
   readonly businessContext: BusinessContextStore;
-  readonly businessCatalog: BusinessCatalogStore;
   private readonly modelSettings: ModelSettingsStore;
   /** Snapshot of the environment model configuration; console overrides are layered on top. */
   private readonly envModel: ModelConfig;
@@ -190,7 +189,6 @@ export class AnalysisService {
     this.broker = new EventBroker(5_000, this.history);
     this.profiles = new ProfileStore(join(app.dataDir, "connections.json"), app.profileSecretKey);
     this.businessContext = new BusinessContextStore(join(app.dataDir, "business-context"));
-    this.businessCatalog = new BusinessCatalogStore(join(app.dataDir, "business-catalog", "catalog.sqlite"));
   }
 
   static async create(app: AppConfig): Promise<AnalysisService> {
@@ -877,7 +875,6 @@ export class AnalysisService {
       title: savedTitle,
       modelSelection: selection,
       businessContext: { scope, files },
-      businessCatalog: this.businessCatalog,
     });
     this.history.saveSession(ownerKey, session.snapshot(), connectionKey(config), { scope, files }, profileId);
     this.sessions.set(session.id, session);
@@ -1213,6 +1210,5 @@ export class AnalysisService {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     await Promise.allSettled(sessions.map((session) => session.close()));
-    this.businessCatalog.close();
   }
 }

@@ -12,7 +12,6 @@ import type { AppConfig, ThinkingLevel } from "../config.js";
 import type { ConnectionConfig } from "../db/types.js";
 import { DbSession, type DbOperation } from "../db/session.js";
 import type { SourceRequest } from "../db/source-operations.js";
-import { BusinessAnalysis, type BusinessCatalogStore } from "../business/service.js";
 import { AppError, isAppError } from "../errors.js";
 import type { ResultStore } from "../results/store.js";
 import type { ArtifactService } from "../artifacts/service.js";
@@ -25,6 +24,7 @@ import { taskActivity, type ActivitySummary } from "./task-activity.js";
 import { generateSessionTitle, type GeneratedSessionTitle } from "./session-title.js";
 import { businessContextPrompt, contextSummary } from "../business-context/store.js";
 import type { BusinessContextFile } from "../business-context/types.js";
+import { promptWithContext, type TaskContext } from "./task-context.js";
 import { ASK_USER, CLARIFICATION_WAIT_MS, MAX_CLARIFICATIONS, clarificationPrompt, isFreeTextOption, type ClarificationAnswer, type TaskClarification } from "./clarification.js";
 
 export type TaskStatus = "queued" | "running" | "waiting_for_user" | "succeeded" | "failed" | "cancelled" | "incomplete";
@@ -38,6 +38,7 @@ export interface TaskUsage {
 }
 
 export interface TaskRecord {
+  context?: TaskContext;
   id: string;
   session_id: string;
   goal: string;
@@ -102,7 +103,6 @@ export class AnalysisSession {
     readonly businessContextScope: string,
     private readonly contextRef: { files: BusinessContextFile[]; prompt: string },
     private readonly history?: HistoryStore,
-    readonly business?: BusinessAnalysis,
   ) {}
 
   readonly createdAt = new Date();
@@ -142,7 +142,6 @@ export class AnalysisSession {
     title?: string;
     modelSelection?: { provider: string; modelId: string; thinkingLevel?: ThinkingLevel };
     businessContext: { scope: string; files: BusinessContextFile[] };
-    businessCatalog?: BusinessCatalogStore;
   }): Promise<AnalysisSession> {
     const { app, config, broker } = options;
     const db = await DbSession.open({ config, app, results: options.results, sessionId: options.sessionId });
@@ -150,8 +149,6 @@ export class AnalysisSession {
     const files = options.businessContext.files;
     const contextRef = { files, prompt: businessContextPrompt(files) };
     const sessionRef: { current?: TaskRecord } = {};
-    const business = options.businessCatalog && config.engine === "doris" && db.capabilitiesView.readOnlyProof === "grants"
-      ? new BusinessAnalysis(options.businessCatalog, options.businessContext.scope, db, options.results) : undefined;
     let session: AgentSession;
     let tools: ToolInfo[];
     let analysis: AnalysisSession;
@@ -162,14 +159,14 @@ export class AnalysisSession {
         budgets: app.budgets,
         artifacts: options.artifacts,
         currentTaskId: () => sessionRef.current?.id,
+        targetScope: () => sessionRef.current?.context?.target_scope,
         taskStatus: () => (sessionRef.current ? { ...sessionRef.current, max_turns: sessionRef.current.max_turns ?? app.budgets.maxTurns } : { status: "idle" }),
         cancelActive: () => db.cancel(),
         askUser: (input) => analysis.stageClarification(input),
         sourceBlocked: () => Boolean(sessionRef.current?.source_recovery) || db.snapshot().status === "unavailable",
-        business,
       };
       const caps = db.capabilitiesView;
-      const customTools = selectTools(createDatabaseTools(toolRuntime), caps, Boolean(business));
+      const customTools = selectTools(createDatabaseTools(toolRuntime), caps);
       tools = toolCatalog(customTools);
       const settingsManager = SettingsManager.inMemory();
       const resourceLoader = new DefaultResourceLoader({
@@ -230,7 +227,6 @@ export class AnalysisSession {
       options.businessContext.scope,
       contextRef,
       options.history,
-      business,
     );
     if (options.sessionId) {
       for (const task of options.history?.listTasks(db.id, options.ownerKey) ?? []) analysis.tasks.set(task.id, task);
@@ -269,7 +265,7 @@ export class AnalysisSession {
 
   get effectiveTools() {
     const blocked = this.db.snapshot().status === "unavailable" || Boolean(this.current?.source_recovery);
-    return this.tools.filter(t => !(blocked && SOURCE_TOOLS.has(t.name)) && (!t.name.startsWith("business_") || this.business?.enabled));
+    return this.tools.filter(t => !(blocked && SOURCE_TOOLS.has(t.name)));
   }
 
   get isClosed(): boolean {
@@ -361,7 +357,6 @@ export class AnalysisSession {
       current_task_id: this.current && ["queued", "running", "waiting_for_user"].includes(this.current.status) ? this.current.id : null,
       queued_tasks: this.queue.length,
       business_context: this.businessContextSelection(),
-      business_pilot: this.business ? { enabled: this.business.enabled } : undefined,
       agent: {
         model: String((this.agent.model as { id?: string } | undefined)?.id ?? "unknown"),
         provider: this.agent.model?.provider ?? null,
@@ -399,7 +394,7 @@ export class AnalysisSession {
 
   // ------------------------------------------------------------------- tasks
 
-  submit(goal: string, options: { maxTurns?: number } = {}): TaskRecord {
+  submit(goal: string, options: { maxTurns?: number; context?: TaskContext } = {}): TaskRecord {
     if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
     if (this.changingModel) throw new AppError("SESSION_BUSY", "正在切换模型，请稍后发送。");
     if (this.stagedQuestion || this.current?.status === "waiting_for_user")
@@ -410,7 +405,14 @@ export class AnalysisSession {
     if (!Number.isInteger(maxTurns) || maxTurns < 1)
       throw new AppError("INVALID_INPUT", "max_turns must be a positive integer");
     if (this.queue.length >= 8) throw new AppError("TASK_QUEUE_FULL", "Too many queued tasks for this session");
+    const context = options.context;
+    if (context?.reply_to) {
+      const parent = this.getTask(context.reply_to);
+      if (!parent.answer?.trim() || ["queued", "running", "waiting_for_user"].includes(parent.status))
+        throw new AppError("INVALID_INPUT", "请选择当前会话中已有最终回答的消息");
+    }
     const record: TaskRecord = {
+      ...(context && { context }),
       id: TASK_ID(),
       session_id: this.id,
       goal,
@@ -563,13 +565,16 @@ export class AnalysisSession {
         this.timedOut = true;
         throw new AppError("TASK_TIMEOUT", "No execution time remains");
       }
+      const question = resumed ? clarificationPrompt(task.goal, task.clarifications ?? []) : task.goal;
+      const parent = task.context?.reply_to ? this.getTask(task.context.reply_to) : undefined;
+      const prompt = promptWithContext(question, task.context, parent);
       await this.db.observeOperations((op) => {
         const operations = task.operations ??= {};
         const totals = operations[op.kind] ??= { count: 0, duration_ms: 0 };
         totals.count++;
         totals.duration_ms += op.duration_ms;
         this.broker.publish(task.id, "db_operation", op);
-      }, () => this.agent.prompt(resumed ? clarificationPrompt(task.goal, task.clarifications ?? []) : task.goal), (request) => {
+      }, () => this.agent.prompt(prompt), (request) => {
         if (this.current?.id !== task.id || task.finished_at) return;
         const requests = task.source_requests ??= {};
         const totals = requests[request.kind] ??= { count: 0, duration_ms: 0 };

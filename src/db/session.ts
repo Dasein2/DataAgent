@@ -41,6 +41,7 @@ export interface DatasetRecord {
 }
 
 export interface SessionSnapshot {
+  default_scope?: string;
   session_id: string;
   engine: string;
   database: string;
@@ -255,6 +256,7 @@ export class DbSession {
       session_id: this.id,
       engine: this.config.engine,
       database: this.config.database,
+      default_scope: this.defaultCatalogScope,
       host: this.config.host,
       label: this.config.label,
       environment: this.capabilities.environment,
@@ -566,7 +568,7 @@ export class DbSession {
     );
   }
 
-  private catalogScopeNames(): string[] {
+  catalogScopeNames(): string[] {
     return [...new Set([...this.allowedScopes, this.capabilities.workspaceName].filter((scope): scope is string => Boolean(scope)))];
   }
 

@@ -1,6 +1,5 @@
 import { initBusinessContext } from "/business-context.js";
 import { initCatalog } from "/catalog.js";
-import { initBusinessCatalog } from "/business-catalog.js";
 
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -9,7 +8,7 @@ const el = (tag, cls, text) => {
   return n;
 };
 
-export function initWorkbench({ api, state, openResult, buildChartCard, openSession, renderBusinessReport, refreshSession }) {
+export function initWorkbench({ api, state, openResult, buildChartCard, openSession, renderBusinessReport }) {
   let results = [],
     artifacts = [];
   const context = el("aside", "context-panel");
@@ -44,7 +43,6 @@ export function initWorkbench({ api, state, openResult, buildChartCard, openSess
   context.append(tabs, ...Object.values(sections));
   document.querySelector("main").append(context);
   const businessContext = initBusinessContext({ api, state, panel: sections.business, trigger: document.querySelector("#btnBusinessContext") });
-  const pilot = initBusinessCatalog({ api, state, panel: sections.business, changed: async () => { await refreshSession(); pilot.sessionChanged(true); } });
   const budget = el("div", "budget-strip");
   budget.setAttribute("role", "status");
   document.querySelector("#taskbar").after(budget);
@@ -204,7 +202,6 @@ export function initWorkbench({ api, state, openResult, buildChartCard, openSess
   let displayedSession = null;
   function sessionChanged() {
     businessContext.sessionChanged();
-    pilot.sessionChanged();
     catalog.sessionChanged();
     if (displayedSession !== state.sessionId) {
       timeline.replaceChildren();

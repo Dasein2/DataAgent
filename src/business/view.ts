@@ -1,4 +1,5 @@
-import type { ResultMeta } from "../results/store.js";
+import { AppError } from "../errors.js";
+import type { ResultMeta, ResultStore } from "../results/store.js";
 import { days, resultValueRef, type BusinessEvidence, type Window } from "./types.js";
 
 const fields = ["period_key", "business_day", "row_kind", "dimension_value", "metric_value", "numerator", "denominator", "invalid_rows", "deduction_rows"];
@@ -102,4 +103,14 @@ export function buildBusinessView(meta: ResultMeta, raw: unknown[][], evidence: 
   return { result_id: meta.id, executed_at: meta.createdAt, ...evidence, status, reasons: [...reasons],
     days: visible ? entries : entries.map(d => ({ ...d, current: null, comparison: null, change: null, comparison_zero: false, channels: [], deductions: [], breakdown_comparable: false })),
     max_change: visible ? maxChange : 0, empty: available && meta.rowCount === 0 } as const;
+}
+
+const cap = 2_000;
+export async function readBusinessView(store: ResultStore, meta: ResultMeta) {
+  if (!meta.business || meta.error) throw new AppError("NOT_FOUND", "No structured business report for this result");
+  const rows: unknown[][] = [];
+  if (meta.truncated === "none" && meta.rowCount <= cap) {
+    for await (const row of store.iterateRows(meta.id)) { rows.push(row); if (rows.length > cap) break; }
+  }
+  return buildBusinessView(meta, rows, meta.business);
 }

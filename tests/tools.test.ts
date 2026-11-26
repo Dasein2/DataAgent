@@ -21,12 +21,12 @@ it("always exposes analysis and management tools and gates workspace tools and E
     "result_compute", "result_read", "result_transform", "session_info", "snapshot_create", "snapshot_drop", "snapshot_list",
   ]);
   const writable = { ...caps, workspaceName: "analysis_ws", workspaceAccess: "views_only" as const };
-  assert.deepEqual(selectTools(catalog, writable, true), catalog);
+  assert.deepEqual(selectTools(catalog, writable), catalog);
   assert.deepEqual(names({ ...writable, workspaceAccess: "none" }), base);
   assert.deepEqual(names({ ...caps, workspaceAccess: "views_only" }), base);
   const noPlan = { ...caps, features: { ...caps.features, explain: false } };
   assert.deepEqual(names(noPlan), base.filter((name) => name !== "query_explain"));
-  for (const old of ["object_describe_batch", "result_summary", "snapshot_query"]) {
+  for (const old of ["object_describe_batch", "result_summary", "snapshot_query", "business_lookup", "business_analyze"]) {
     assert.ok(!catalog.some((t) => t.name === old));
   }
 });
@@ -36,6 +36,25 @@ function tool(name: string, db: Partial<ToolRuntime["db"]>) {
     db, budgets: { maxTurns: 10, maxQueries: 20, cellChars: 200 }, currentTaskId: () => "task_fixture", taskStatus: () => ({}),
   } as unknown as ToolRuntime).find((t) => t.name === name)!;
 }
+
+it("uses the selected task database for table discovery and honors explicitly qualified tables", async () => {
+  const searches: Array<string | undefined> = [];
+  const schemas: Array<string | undefined> = [];
+  let scope: string | undefined = "sales";
+  const db = {
+    catalogSearch: async (options: {schema?: string}) => { searches.push(options.schema); return []; },
+    describeMany: async (objects: Array<{schema?: string}>) => { schemas.push(...objects.map(o => o.schema)); return []; },
+  };
+  const tools = createDatabaseTools({ db, targetScope: () => scope, currentTaskId: () => "fixture", taskStatus: () => ({}),
+    budgets: { maxTurns: 10, maxQueries: 20, cellChars: 200 } } as unknown as ToolRuntime);
+  const call = (name: string, args: object) => tools.find(t => t.name === name)!.execute("call", args, undefined, undefined, {} as never);
+  await call("catalog_search", {});
+  await call("object_describe", { objects: [{ name: "orders" }, { schema: "accounting", name: "orders" }] });
+  scope = undefined;
+  await call("catalog_search", {});
+  assert.deepEqual(searches, ["sales", undefined]);
+  assert.deepEqual(schemas, ["sales", "accounting"]);
+});
 
 it("describes one or more objects through the same entry point and retains per-item errors", async () => {
   const orders = { name: "orders", schema: "sales" };

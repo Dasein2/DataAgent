@@ -1,5 +1,5 @@
-import { AppError } from "../errors.js";
-import { Day, MetricRequest, days, type BusinessEvidence, type BusinessMetric, type BusinessRelation, type BusinessTable, type CatalogDraft, type CatalogVersion, type Window } from "./types.js";
+import { AppError } from "../../src/errors.js";
+import { Day, MetricRequest, days, type BusinessEvidence, type BusinessMetric, type BusinessRelation, type BusinessTable, type CatalogDraft, type CatalogVersion, type Window } from "../../src/business/types.js";
 
 const q = (s: string) => '`' + s.replaceAll('`', '``') + '`';
 const col = (alias: string, field: string) => `${alias}.${q(field)}`;

@@ -1,7 +1,6 @@
 import { Type } from "typebox";
 import { z } from "zod";
 import { ResultOperation } from "../analysis/operations.js";
-import { MetricRequest } from "../business/types.js";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ToolRuntime } from "./tools.js";
 import { AppError } from "../errors.js";
@@ -48,28 +47,6 @@ export function analysisTools(runtime: ToolRuntime): ToolDefinition[] {
       },
     }),
     defineTool({
-      name: "business_lookup",
-      label: "Find published business definitions",
-      description: "For an enabled Doris domain, look up the metric or business vocabulary, candidate paths, and ambiguous attribution. Use a short meaningful phrase, not SQL. Ask only the distinction that changes the number. Catalog-only answers do not need a source SELECT.",
-      parameters: Type.Object({ question: Type.String({ minLength: 1, maxLength: 250 }) }),
-      annotations,
-      execute: async (_id, p) => output(await runtime.business?.lookup(p.question) ?? { candidates: [] }),
-    }),
-    defineTool({
-      name: "business_analyze",
-      label: "Run a published business metric",
-      description: "Supply a published metric ID, explicit [start,end) window, optional same-length comparison, grain and optional published dimension/filters. No SQL input. Returns exact evidence; use the task report for charts and do not treat unsupported dimensions as verified.",
-      parameters: Type.Unsafe<MetricRequest>(z.toJSONSchema(MetricRequest, { io: "input" })),
-      executionMode: "sequential",
-      annotations,
-      execute: async (_id, p, signal) => {
-        if (!runtime.business) throw new AppError("FEATURE_UNSUPPORTED", "Business metrics are unavailable");
-        const report = await runtime.business.analyze(p, { taskId: runtime.currentTaskId(), signal });
-        return output({ result_id: report.result_id, verification: report.status, reasons: report.reasons, metric: report.metric, version: report.version, timezone: report.timezone,
-          coverage_through: report.complete_through, days: report.days.slice(-8).map(d => ({ ...d, channels: d.channels.slice(0, 5), deductions: d.deductions.slice(0, 5) })), total_period_rows: report.days.length });
-      },
-    }),
-    defineTool({
       name: "catalog_overview",
       label: "Catalog overview",
       description:
@@ -80,7 +57,7 @@ export function analysisTools(runtime: ToolRuntime): ToolDefinition[] {
       }),
       executionMode: "parallel",
       annotations,
-      execute: async (_id, p) => output(await db.catalogOverview(p.schema, p.limit ?? 12)),
+      execute: async (_id, p) => output(await db.catalogOverview(p.schema ?? runtime.targetScope?.(), p.limit ?? 12)),
     }),
     defineTool({
       name: "result_transform",

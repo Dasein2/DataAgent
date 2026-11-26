@@ -28,6 +28,8 @@ function stubDatabase() {
     let closed = false;
     const id = options.sessionId ?? `sess_sdk${++nextId}`;
     return { id, capabilitiesView: capabilities, engineProfile: getProfile("postgres"), scopesView: ["public"],
+      catalogScopeNames: () => ["public", "sales"],
+      describe: async (schema: string, name: string) => ({ object: { schema, name, kind: name === "orders" ? "table" : "view" } }),
       expiresAt: new Date(Date.now() + 60_000), touch() {},
       snapshot: () => ({ session_id: id, database: "fixture", status: closed ? "closed" : "ready", capabilities, queries: { used: 0, limit: 60 } }),
       close: async () => { closed = true; }, cancel: async () => true, listResults: async () => [],
@@ -36,6 +38,66 @@ function stubDatabase() {
   };
   return () => { DbSession.open = original; };
 }
+
+it("delivers the selected older answer and qualified table to the model and persists the reply on its own turn", async () => {
+  const config = await testConfig();
+  const restore = stubDatabase();
+  const prompts: string[] = [];
+  let service: AnalysisService | undefined;
+  let http: ReturnType<typeof createServer> | undefined;
+  const model = createServer(async (req, res) => {
+    let raw = ""; for await (const chunk of req) raw += chunk;
+    const messages = JSON.parse(raw).messages;
+    prompts.push(textContent(messages.filter((m: any) => m.role === "user").at(-1)));
+    const answer = ["Orders in May were 120.", "The latest topic was regions.", "Details for May."][prompts.length - 1];
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ id: "quote", choices: [{ index: 0, delta: { role: "assistant", content: answer }, finish_reason: null }] })}\n\n`);
+    res.end(`data: ${JSON.stringify({ id: "quote", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+  });
+  const listen = (server: ReturnType<typeof createServer>) => new Promise<number>(resolve =>
+    server.listen(0, "127.0.0.1", () => resolve((server.address() as { port: number }).port)));
+  try {
+    config.model = { provider: "reply-fixture", modelId: "test", api: "openai-completions", apiKey: "test", thinkingLevel: "off", baseUrl: `http://127.0.0.1:${await listen(model)}/v1` };
+    service = await AnalysisService.create(config);
+    const session = await service.createSession(connection, "alice");
+    const other = await service.createSession(connection, "alice");
+    const port = await listen(http = createServer(await createHttpApp(service)));
+    const submit = (context: object, id = session.id) => fetch(`http://127.0.0.1:${port}/v1/sessions/${id}/tasks`, {
+      method: "POST", headers: { authorization: "Bearer test-token", "x-caller-id": "alice", "content-type": "application/json" },
+      body: JSON.stringify({ goal: "Break that down", context }),
+    });
+    const first = session.submit("Count May orders");
+    await until(() => !!first.finished_at);
+    const second = session.submit("Show the regions");
+    await until(() => !!second.finished_at);
+    assert.equal(first.status, "succeeded", JSON.stringify(first.error));
+    assert.equal(second.status, "succeeded", JSON.stringify(second.error));
+    const context = { reply_to: first.id, target_scope: "sales", tables: [{ schema: "sales", name: "orders" }] };
+    assert.equal((await submit(context, other.id)).status, 404);
+    assert.equal((await submit({ ...context, target_scope: "private" })).status, 403);
+    assert.equal((await submit({ ...context, tables: [{ schema: "private", name: "orders" }] })).status, 403);
+    assert.equal((await submit({ ...context, tables: [{ schema: "sales", name: "order_view" }] })).status, 400);
+    const created = await submit(context);
+    assert.equal(created.status, 202);
+    const { task } = await created.json();
+    await until(() => !!session.getTask(task.id).finished_at);
+    const saved = service.listTasksWithActivity(session.id, "alice").find(t => t.id === task.id)!;
+    assert.deepEqual(saved.context, context);
+    assert.equal(saved.goal, "Break that down");
+    assert.equal(prompts.length, 3);
+    assert.match(prompts[2]!, /Orders in May were 120/);
+    assert.doesNotMatch(prompts[2]!, /latest topic was regions/);
+    assert.ok(prompts[2]!.includes(`"task_id":"${first.id}"`));
+    assert.ok(prompts[2]!.includes('"target_database_or_schema":"sales"'));
+    assert.ok(prompts[2]!.includes('"mentioned_tables":[{"schema":"sales","name":"orders"}]'));
+  } finally {
+    restore();
+    for (const server of [http, model]) if (server?.listening) {
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+    await service?.shutdown(); await cleanup(config);
+  }
+});
 
 for (const concurrent of [false, true]) it(`removes source declarations after a Doris stream failure (${concurrent ? "with in-flight and queued calls" : "single attempt"}); saved data still computes`, async () => {
   const app = await testConfig(); app.analysis = { preflight: "off" }; app.budgets.taskTimeoutMs = 15_000;
@@ -192,6 +254,13 @@ it("serves scoped business documents and projects only the active revision into 
       assert.equal(res.status, expected, raw);
       return raw ? JSON.parse(raw) : null;
     };
+    // The retired catalog has no routes, including on connections that can still use business context.
+    for (const [method, suffix] of [["GET", "business-catalog"], ["GET", "business-catalog/old"],
+      ["POST", "business-catalog"], ["POST", "business-catalog/old/publish"], ["PUT", "business-pilot"], ["POST", "business-analysis"]]) {
+      const response = await request(`/v1/sessions/${session.id}/${suffix}`, 404, method);
+      assert.equal(response.error.message, "Unknown endpoint");
+    }
+    await request("/business-catalog.js", 404);
     const oldText = "fixture_gmv_excludes_refunds_v1";
     const newText = "fixture_gmv_excludes_refunds_v2";
     const { file } = await request(route, 201, "POST", { name: "GMV 口径", content: `# GMV\n${oldText}` });
@@ -222,8 +291,9 @@ it("serves scoped business documents and projects only the active revision into 
     const liveTools = (await request(`/v1/tools?session_id=${session.id}`, 200)).tools;
     const liveNames = liveTools.map((t: any) => t.name).sort();
     const catalogue = (await request("/v1/tools", 200)).tools;
-    assert.equal(catalogue.length, 25);
-    assert.deepEqual(liveNames, catalogue.map((t: any) => t.name).filter((name: string) => !name.startsWith("dataset_") && !name.startsWith("business_")).sort());
+    assert.equal(catalogue.length, 23);
+    assert.ok(catalogue.every((tool: { name: string }) => !tool.name.startsWith("business_")));
+    assert.deepEqual(liveNames, catalogue.map((t: any) => t.name).filter((name: string) => !name.startsWith("dataset_")).sort());
     assert.deepEqual(requests.at(-1).tools.map((t: any) => t.function.name).sort(), liveNames);
     for (const name of ["job_get", "job_cancel", "chart_list", "chart_archive", "chart_revise"]) {
       assert.ok(liveNames.includes(name), `ordinary sessions expose ${name}`);

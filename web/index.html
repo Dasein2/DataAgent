@@ -702,17 +702,31 @@
     </div>
     <div id="composer">
       <div id="taskbar"><span class="taskbar-label">分析任务</span><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span><span id="taskActivity" role="status" aria-live="polite"></span></div>
+      <div class="reply-preview" id="replyPreview" hidden>
+        <span aria-hidden="true">↩</span><strong>正在回复</strong><span id="replyExcerpt"></span>
+        <button type="button" class="ghost" id="clearReply" aria-label="取消引用" title="取消引用">×</button>
+      </div>
       <div class="composer-card" id="composerCard">
+        <div class="context-picker table-picker" id="tablePicker" role="listbox" aria-label="当前库的数据表" hidden></div>
         <div class="composer-editing" id="composerEditing" hidden><span>编辑重发 · 发送将追加新消息，不修改原消息</span><button type="button" class="ghost" id="btnEditCancel">取消编辑</button></div>
         <div class="composer-editing" id="composerClarifying" role="status" hidden>正在回答当前追问 · 发送后继续本次分析</div>
         <div class="composer-input-row">
           <label for="goal" class="sr-only">分析目标</label>
-          <textarea id="goal" rows="1" maxlength="20000" placeholder="描述你的分析问题…"></textarea>
+          <textarea id="goal" rows="1" maxlength="20000" aria-controls="tablePicker" aria-autocomplete="list" placeholder="描述你的分析问题，输入 @ 引用数据表…"></textarea>
           <button type="button" class="primary" id="btnSend" disabled title="Enter 发送，Shift + Enter 换行">发送<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14 0m-6-6 6 6-6 6" /></svg></button>
           <button type="button" class="ghost" id="btnCancel" disabled hidden>■ 停止</button>
         </div>
       </div>
       <div class="composer-actions">
+        <div id="scopeControl" class="scope-control">
+          <button type="button" class="model-chip" id="scopeToggle" aria-haspopup="dialog" aria-expanded="false" aria-controls="scopePicker" disabled>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v13c0 4 16 4 16 0V5M4 11c0 4 16 4 16 0"/></svg><span id="scopeName">选择数据库</span><span class="model-chip-chevron" aria-hidden="true">⌃</span>
+          </button>
+          <div id="scopePicker" class="context-picker scope-picker" role="dialog" aria-label="选择目标库或 Schema" hidden>
+            <input id="scopeSearch" type="search" autocomplete="off" placeholder="搜索数据库或 Schema…" aria-label="搜索数据库或 Schema" />
+            <div id="scopeChoices" role="listbox" aria-label="目标库或 Schema"></div>
+          </div>
+        </div>
         <div class="model-picker">
           <button type="button" class="model-chip" id="btnModelChip" aria-haspopup="listbox" aria-expanded="false" aria-controls="modelChoices" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="3"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/></svg><span id="modelChipName">选择模型</span><span class="model-chip-chevron" aria-hidden="true">⌃</span></button>
           <div class="model-popover" id="modelPopover" hidden>
@@ -824,6 +838,7 @@ import { initWorkbench } from "/workbench.js";
 import { createCharts } from "/charts.js";
 import { createBusinessReports } from "/business-report.js";
 import { initAssets, sessionTitle } from "/assets.js";
+import { initComposerContext } from "/composer-context.js";
 import { initChatComposer } from "/chat-composer.js";
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -865,12 +880,8 @@ const state = {
 };
 const { downloadFile, artifactTable, buildChartCard, renderArtifactInto, ensureEcharts } = createCharts({ api, state, authHeaders, escapeHtml, cellToString, openRef, refreshContext: () => workbench.refreshContext() });
 const exploreResult = createExplorer({ api, downloadFile, refreshContext: () => workbench.refreshContext() });
-const renderBusinessReport = createBusinessReports({ api, state, openRef, ensureEcharts, refreshContext: () => workbench.refreshContext() });
-const workbench = initWorkbench({ api, state, openResult, buildChartCard, openSession, renderBusinessReport, refreshSession: async () => {
-  const id = state.sessionId;
-  const next = await api("/v1/sessions/" + encodeURIComponent(id));
-  if (state.sessionId === id) applySession(next.session);
-} });
+const renderBusinessReport = createBusinessReports({ api, openRef, ensureEcharts });
+const workbench = initWorkbench({ api, state, openResult, buildChartCard, openSession, renderBusinessReport });
 const renderProcessEvent = createProcessRenderer({ escapeHtml, renderMarkdown, openResult, statusNote });
 const assets = initAssets({
   list: $("assetList"),
@@ -885,7 +896,8 @@ const assets = initAssets({
 });
 const welcome = $("welcome");
 let pendingSessionId = null;
-const composer = initChatComposer({ api, state, applySession, isOpening: () => Boolean(pendingSessionId), onError: (message) => setAnalysisStatus(message, true) });
+const composerContext = initComposerContext({ api, state });
+const composer = initChatComposer({ api, state, context: composerContext, applySession, isOpening: () => Boolean(pendingSessionId), onError: (message) => setAnalysisStatus(message, true) });
 let submittingTask = false;
 $("token").value = state.token;
 
@@ -2002,9 +2014,12 @@ $("btnSend").onclick = async () => {
     return;
   }
   if (!state.sessionReady || state.taskId) return;
+  const taskContext = composerContext.request();
+  const selections = composerContext.take();
   submittingTask = true;
   composer.setSubmitting(true);
   const userBody = addMessage("user", { text: goal });
+  composer.showReplyLabel(userBody, selections.quote?.text);
   composer.sent();
   state.assistantEl = null;
   state.textNode = null;
@@ -2023,7 +2038,7 @@ $("btnSend").onclick = async () => {
   $("btnSend").disabled = true;
   $("btnCancel").disabled = false;
   try {
-    const data = await api("/v1/sessions/" + id + "/tasks", { method: "POST", body: { goal } });
+    const data = await api("/v1/sessions/" + id + "/tasks", { method: "POST", body: { goal, context: taskContext } });
     void loadHistory();
     if (state.sessionId !== id || state.assistantEl !== submissionHost) return;
     state.clarificationCards.clear();
@@ -2045,7 +2060,7 @@ $("btnSend").onclick = async () => {
     if (state.sessionId !== id || state.assistantEl !== submissionHost) return;
     $("btnCancel").disabled = true;
     userBody.closest(".msg").classList.add("send-failed");
-    if (!$("goal").value) { $("goal").value = goal; composer.resize(); }
+    if (!$("goal").value) { $("goal").value = goal; composerContext.restore(selections); composer.resize(); }
     state.progress?.failSubmission();
     state.assistantEl.append(statusNote("任务创建失败: " + (error.message || error), "error"));
     $("taskPill").textContent = "提交失败";
@@ -2948,9 +2963,13 @@ function showSession(session, tasks) {
   clearTranscript();
   state.sessionId = session.session_id;
   state.hasConversation = tasks.length > 0 || Boolean(session.current_task_id);
+  const answers = new Map(tasks.map(task => [task.id, task.answer]));
+  function showUserTurn(task) {
+    addMessage("user", { text: task.goal, taskId: task.id, replyExcerpt: answers.get(task.context?.reply_to) });
+  }
   for (const task of tasks) {
     if (task.id === session.current_task_id) continue;
-    addMessage("user", { text: task.goal, taskId: task.id });
+    showUserTurn(task);
     const body = addMessage("assistant", { taskId: task.id, text: task.answer || "" });
     body.replaceChildren();
     if (task.activity?.messages || task.activity?.tool_calls) {
@@ -2977,7 +2996,7 @@ function showSession(session, tasks) {
     const current = tasks.find((task) => task.id === state.taskId);
     state.taskMeta = current || { id: state.taskId };
     if (current) {
-      addMessage("user", { text: current.goal, taskId: current.id });
+      showUserTurn(current);
       ensureAssistant();
       for (const question of current.clarifications ?? []) {
         if (!question.answer && current.status === "waiting_for_user") showClarification(question, current.id);

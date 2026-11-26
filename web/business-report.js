@@ -15,7 +15,7 @@ export function businessTrendOption({ days, comparison, index, type, zoom, anima
   };
 }
 
-export function createBusinessReports({ api, ensureEcharts, openRef, state, refreshContext }) {
+export function createBusinessReports({ api, ensureEcharts, openRef }) {
   async function render(host, id) {
     if ([...host.querySelectorAll("[data-business-result]")].some(n => n.dataset.businessResult === id)) return;
     const card = el("section", undefined, "business-report");
@@ -29,7 +29,6 @@ export function createBusinessReports({ api, ensureEcharts, openRef, state, refr
 
   function mount(card, report) {
     const { metric, days, dimension, request } = report;
-    const sessionId = state.sessionId;
     const dateRange = w => `${w.start} 至 ${w.end}（不含）`;
     const status = { verified: "✓ 已核验", limited: "◐ 限定范围", unconfirmed: "⚠ 待确认" }[report.status];
     const heading = el("h2", metric.label);
@@ -51,14 +50,13 @@ export function createBusinessReports({ api, ensureEcharts, openRef, state, refr
     const layout = el("div", undefined, "business-figures");
     const trend = el("div", undefined, "business-trend"); trend.setAttribute("aria-label", "趋势图：也可用日期选择器操作");
     const channels = el("div", undefined, "business-channels");
-    const supplement = el("div", undefined, "business-supplement");
     const hasTrend = request.grain === "day" && days.length > 1 && days.some(d => d.current || d.comparison);
     let type = "line", chart, index = Math.max(0, days.findLastIndex(d => d.current)), selectedChannel;
     select.selectedIndex = index;
     if (request.grain === "day" && days.length > 1) controls.append(select);
     if (hasTrend) layout.append(trend);
     layout.append(channels);
-    card.replaceChildren(heading, context, headline, controls, layout, reasons, definition, supplement);
+    card.replaceChildren(heading, context, headline, controls, layout, reasons, definition);
     const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
     const cell = (label, datum, unit = metric.unit) => datum ? button(`${label}${datum.value} ${unit}`, () => openRef(datum.ref)) : el("span", `${label}—`);
     function breakdown(label, current, previous, change, currentDay, previousDay, deductions = []) {
@@ -157,28 +155,6 @@ export function createBusinessReports({ api, ensureEcharts, openRef, state, refr
       }).catch(error => { trend.textContent = error.message; });
     }
 
-    if (!dimension || !request.comparison || report.status !== "verified") {
-      const form = el("form"); const message = el("p", undefined, "muted"); message.setAttribute("role", "status");
-      const dimensionSelect = el("select"); dimensionSelect.setAttribute("aria-label", "补查维度"); dimensionSelect.append(el("option", "保留原维度")); dimensionSelect.options[0].value = "";
-      const start = el("input"), end = el("input"); start.type = end.type = "date";
-      const startLabel = el("label", "对比期起始 "), endLabel = el("label", "对比期结束（不含） "); startLabel.append(start); endLabel.append(end);
-      const send = el("button", "确认补查（读取源库）"); send.type = "submit";
-      const panel = el("details"); panel.append(el("summary", dimension ? "补查对比期或重查" : "补查渠道或对比期"), form);
-      form.append(el("p", "仅确认后才重查。不覆盖原结果。"), dimensionSelect, startLabel, endLabel, send, message);
-      for (const d of report.available_dimensions ?? []) { const opt = el("option", d.label); opt.value = d.id; dimensionSelect.append(opt); }
-      form.onsubmit = async event => {
-        event.preventDefault();
-        if (!state.sessionReady || state.sessionId !== sessionId || !state.session?.business_pilot?.enabled) { message.textContent = "请在原连接重连并启用业务试点后补查"; return; }
-        if (Boolean(start.value) !== Boolean(end.value)) { message.textContent = "请选择完整对比期"; return; }
-        send.disabled = true; message.textContent = "正在执行补查…";
-        try {
-          const next = await api(`/v1/sessions/${sessionId}/business-analysis`, { method: "POST", body: { version: report.version, request: { ...request, dimension: dimensionSelect.value || request.dimension, comparison: start.value ? { start: start.value, end: end.value } : request.comparison } } });
-          const child = el("section", undefined, "business-report"); child.dataset.businessResult = next.result_id; card.after(child); mount(child, next); message.textContent = `已生成 ${next.result_id}`; child.querySelector("h2").tabIndex = -1; child.querySelector("h2").focus(); void refreshContext();
-        } catch (error) { message.textContent = error.message; }
-        finally { send.disabled = false; }
-      };
-      supplement.append(panel);
-    }
   }
   return render;
 }
