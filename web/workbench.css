@@ -673,6 +673,10 @@ dialog header button:last-child {
 .dashboard-grid .cc-plot {
   min-height: 300px;
 }
+.cc-heatmap-scroll { min-width: 0; }
+.cc-heatmap-scroll.expanded { max-height: min(72vh, 720px); overflow: auto; }
+.cc-heatmap-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cc-actions.cc-heatmap-actions { margin: 0 0 6px; }
 .ref-chip {
   border: 1px solid var(--border);
   border-radius: 4px;

@@ -75,6 +75,47 @@ export function chartViewport(option, width, height, dark = false) {
   return view;
 }
 
+/** Change presentation only: keep saved cell coordinates, values and colour scale intact. */
+export function heatmapDisplay(option, { full = false, showValues } = {}) {
+  const x = categoryAxis(option, "xAxis"), y = categoryAxis(option, "yAxis");
+  if (!x || !y || !option.series?.some(s => s.type === "heatmap")) return { option };
+  const series = option.series.map(s => s.type !== "heatmap" ? s : {
+    ...s,
+    label: {
+      ...s.label,
+      show: showValues ?? s.label?.show ?? false,
+      position: "inside",
+      fontSize: 11,
+      color: "#111827",
+      textBorderColor: "#fff",
+      textBorderWidth: 2,
+    },
+  });
+  if (!full) return { option: { ...option, series } };
+
+  const labelWidth = (data, min, max) => data.reduce((width, label) => {
+    const text = String(label);
+    const wide = text.replace(/[\x00-\x7F]/g, "").length;
+    return Math.max(width, Math.min(max, (text.length - wide) * 7 + wide * 12 + 12));
+  }, min);
+  const xSlot = labelWidth(x.data, 48, 152);
+  const yWidth = labelWidth(y.data, 72, 220);
+  const grid = { left: yWidth + 38, right: 24, top: option.title ? 56 : 32, bottom: 88, containLabel: false };
+  const axisWithLabels = (axis, saved, width) => {
+    const config = { ...axis, axisLabel: { ...axis.axisLabel, interval: 0, width, overflow: "truncate" } };
+    return Array.isArray(saved) ? [config, ...saved.slice(1)] : config;
+  };
+  const { dataZoom: _zoom, ...base } = option;
+  return {
+    option: { ...base, grid, series,
+      xAxis: axisWithLabels({ ...x, nameGap: 32 }, option.xAxis, xSlot - 8),
+      yAxis: axisWithLabels({ ...y, nameGap: yWidth + 16 }, option.yAxis, yWidth),
+    },
+    width: grid.left + grid.right + x.data.length * xSlot,
+    height: Math.max(300, grid.top + grid.bottom + y.data.length * 24),
+  };
+}
+
 /** Chart UI is a rendering of immutable server artifacts. No client aggregation. */
 export function createCharts({ api, state, authHeaders, escapeHtml, cellToString, openRef, refreshContext }) {
   const $ = (id) => document.getElementById(id);
@@ -186,9 +227,16 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
       "</span>";
     card.appendChild(head);
 
+    const option = compiled.option || {};
+    const isHeatmap = spec.type === "heatmap" && Boolean(categoryAxis(option, "xAxis") && categoryAxis(option, "yAxis"));
     const plot = document.createElement("div");
     plot.className = "cc-plot";
-    card.appendChild(plot);
+    const plotHost = isHeatmap ? document.createElement("div") : card;
+    if (isHeatmap) {
+      plotHost.className = "cc-heatmap-scroll";
+      card.appendChild(plotHost);
+    }
+    plotHost.appendChild(plot);
 
     const actions = document.createElement("div");
     actions.className = "cc-actions";
@@ -237,7 +285,6 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
     actions.appendChild(tableButton);
     actions.appendChild(csv);
 
-    const option = compiled.option || {};
     const refs = document.createElement("div");
     for (const item of summary.top || []) {
       const chip = document.createElement("button");
@@ -268,16 +315,20 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
     };
     actions.appendChild(archive);
     const yCount = categoryAxis(option, "yAxis")?.data.length ?? 0;
-    plot.style.height = (yCount > 6 ? Math.max(320, Math.min(460, yCount * 26 + 110)) : 300) + "px";
+    const compactHeight = yCount > 6 ? Math.max(320, Math.min(460, yCount * 26 + 110)) : 300;
+    plot.style.height = compactHeight + "px";
     const scrollHint = document.createElement("div");
     scrollHint.className = "cc-note";
     scrollHint.hidden = true;
-    card.insertBefore(scrollHint, actions);
+    card.insertBefore(scrollHint, isHeatmap ? plotHost : actions);
 
     ensureEcharts()
       .then((echarts) => {
         if (!card.isConnected) return;
         let currentOption = option;
+        let fullHeatmap = false;
+        let showHeatmapValues = Boolean(option.series?.find(s => s.type === "heatmap")?.label?.show);
+        let heatmapView = isHeatmap ? heatmapDisplay(option, { showValues: showHeatmapValues }) : null;
         const dark = document.documentElement.classList.contains("dark");
         const theme = {
           color: ["#628f91", "#bb856b", "#9b9a6b", "#7c8fad", "#ae7f94", "#a8b9b1"],
@@ -309,7 +360,8 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
           }
         });
         function applyViewport(force = false) {
-          const view = chartViewport(currentOption, chart.getWidth(), chart.getHeight(), dark);
+          const display = heatmapView?.option ?? currentOption;
+          const view = fullHeatmap ? display : chartViewport(display, chart.getWidth(), chart.getHeight(), dark);
           const sliders = view.dataZoom?.filter((slider) => slider.id?.startsWith("viewport-")) ?? [];
           const key = JSON.stringify(sliders);
           if (!force && key === viewportKey) return;
@@ -324,13 +376,56 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
             Object.assign(slider, range);
           }
           chart.setOption(next, true);
-          scrollHint.hidden = sliders.length === 0;
-          if (sliders.length) {
+          scrollHint.hidden = !fullHeatmap && sliders.length === 0;
+          if (fullHeatmap) {
+            scrollHint.textContent = `已展开全部 ${categoryAxis(display, "xAxis").data.length} 列 × ${yCount} 行；可上下左右滚动；下载 SVG 可保存整张图。`;
+          } else if (sliders.length) {
             const direction = sliders.length === 2 ? "下方和右侧" : sliders[0].orient === "vertical" ? "右侧" : "下方";
             scrollHint.textContent = `拖动${direction}滑条浏览数据，拖动滑条两端可调整显示范围。`;
           }
         }
         applyViewport();
+        if (isHeatmap) {
+          const tools = document.createElement("div");
+          tools.className = "cc-actions cc-heatmap-actions";
+          const expand = document.createElement("button");
+          const values = document.createElement("button");
+          for (const button of [expand, values]) {
+            button.type = "button";
+            button.className = "ghost";
+          }
+          expand.textContent = "展开全图";
+          values.textContent = "显示格内数值";
+          const reflect = () => {
+            for (const [button, on] of [[expand, fullHeatmap], [values, showHeatmapValues]]) {
+              button.classList.toggle("active", on);
+              button.setAttribute("aria-pressed", String(on));
+            }
+          };
+          const updateHeatmap = () => {
+            heatmapView = heatmapDisplay(option, { full: fullHeatmap, showValues: showHeatmapValues });
+            plot.style.minWidth = fullHeatmap ? heatmapView.width + "px" : "";
+            plot.style.height = (fullHeatmap ? heatmapView.height : compactHeight) + "px";
+            plotHost.classList.toggle("expanded", fullHeatmap);
+            plotHost.tabIndex = fullHeatmap ? 0 : -1;
+            if (fullHeatmap) {
+              plotHost.setAttribute("role", "region");
+              plotHost.setAttribute("aria-label", "完整热力图，可滚动查看");
+            } else {
+              plotHost.removeAttribute("role");
+              plotHost.removeAttribute("aria-label");
+              plotHost.scrollLeft = plotHost.scrollTop = 0;
+            }
+            chart.resize();
+            applyViewport(true);
+            reflect();
+          };
+          expand.onclick = () => { fullHeatmap = !fullHeatmap; updateHeatmap(); };
+          values.onclick = () => { showHeatmapValues = !showHeatmapValues; updateHeatmap(); };
+          reflect();
+          tools.append(expand, values);
+          card.insertBefore(tools, scrollHint);
+        }
         for (const chip of refs.children) {
           chip.onmouseenter = () => {
             const match = chip.dataset.ref.match(/#cell\[(.*)\]/);
@@ -404,8 +499,14 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
           const snapshot = chart.getOption();
           const width = chart.getWidth();
           const height = chart.getHeight();
+          // Expanded figures can be much larger than the visible card. Keep canvas allocation bounded.
+          const ratio = Math.min(2, 8192 / width, 8192 / height, Math.sqrt(16_000_000 / (width * height)));
+          if (ratio < 1) {
+            alert("全图尺寸过大，无法导出 PNG。请下载 SVG，或关闭「展开全图」后再导出当前视图。");
+            return;
+          }
           return api("/v1/artifacts/" + artifact.id + "/export-action", { method: "POST", body: { format: "png" } })
-            .then(() => pngFromOption(snapshot, theme, artifact.id, width, height))
+            .then(() => pngFromOption(snapshot, theme, artifact.id, width, height, ratio))
             .catch((error) => alert(error.message));
         };
         actions.appendChild(svg);
@@ -436,7 +537,7 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
   }
 
   /** Draw the current figure and its visible range with the canvas renderer for PNG. */
-  async function pngFromOption(option, theme, id, width, height) {
+  async function pngFromOption(option, theme, id, width, height, ratio) {
     const echarts = await ensureEcharts();
     const holder = document.createElement("div");
     holder.style.cssText = "position:absolute;left:-99999px;top:0";
@@ -447,7 +548,7 @@ export function createCharts({ api, state, authHeaders, escapeHtml, cellToString
       chart.setOption({ ...structuredClone(option), animation: false }, true);
       const url = chart.getDataURL({
         type: "png",
-        pixelRatio: 2,
+        pixelRatio: ratio,
         backgroundColor: "#ffffff",
       });
       const blob = await (await fetch(url)).blob();

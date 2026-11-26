@@ -75,7 +75,7 @@ ${planGuidance}
 - Types: bar, line, area, pie, donut, scatter, kpi, heatmap, table. Pie/donut need unique x categories and non-negative values, at most 20 categories. Scatter needs numeric x,y,value; KPI needs exactly one row and value. value_sort is explicit for single-series charts. stack mode must be explicit; percent mode changes coordinates only, not stored values/refs. bar/line take x (category), value (numeric) and an optional series column (one column, not a pivot). heatmap takes x, y and value, plus color.clip to stop one outlier from flattening the colour ramp.
 - Heatmap axes need an explicit order (for example the seven weekdays) or sort "numeric"/"label". There is no implicit string sort, because "10" would land before "2".
 - The chart layer never aggregates: the SQL result must already be one value per x (or per x×series) cell, otherwise the spec fails with CHART_DUPLICATE_CELL. Do the GROUP BY in SQL.
-- A result that was truncated cannot be charted. If a complete result exceeds the chart row/cell caps, reduce it locally when possible.
+- A result that was truncated cannot be charted. If a complete result exceeds the chart row/cell caps, reduce it locally when possible. A console viewport is not a chart data limit: if the saved heatmap already contains the requested categories, point the user to 展开全图 and 显示格内数值 rather than querying again or building a duplicate pivot just for labels.
 - The tool answers with a summary that includes refs (art_…#cell[field=value]). When you quote a number, cite its ref instead of retyping the digits; the console resolves refs to the exact row and the SQL that produced it.
 - Rendering, downloads (PNG/SVG/CSV) and switching figure type are console actions. Do not produce files or HTML yourself.
 

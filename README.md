@@ -381,8 +381,9 @@ reported (`missing`) and drawn as gaps, never as zero. Artifacts are deduplicate
 
 When categories don't fit, the console adds independent horizontal and/or vertical sliders. Dense
 scatter plots offer both sliders for zooming into a region. Drag the slider window to browse and its
-ends to resize the window. This affects only the view; the data table, CSV and artifact limits are
-unchanged.
+ends to resize the window. Heatmaps also offer **展开全图** (scroll the complete matrix) and
+**显示格内数值** (toggle cell labels), including for previously saved charts. These controls do
+not run SQL, rewrite the artifact, or change the data, CSV, or artifact limits.
 
 Downloads and figure-type switching are console actions on the stored artifact: CSV and
 streamed result export requests are audited to `data/audit/exports.ndjson`. SVG comes from the ECharts

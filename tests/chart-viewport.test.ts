@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as echarts from "echarts";
-import { chartViewport } from "../web/charts.js";
+import { chartViewport, heatmapDisplay } from "../web/charts.js";
 import { businessTrendOption } from "../web/business-report.js";
 
 const paymentDays = Array.from({ length: 10 }, (_, i) => ({ day: `2026-11-${i + 11}`, current: i < 8 ? null : { value: { value: i === 8 ? "450" : "360" } }, comparison: null }));
@@ -117,6 +117,35 @@ test("the ECharts viewport independently pans both heatmap axes without dropping
   } finally {
     chart.dispose();
   }
+});
+
+test("an expanded historical heatmap renders all 30 dates and 34 characters with optional numbers", () => {
+  const option = heatmap(30, 34);
+  const saved = { ...option, series: [{ ...option.series[0]!, label: { show: false } }] };
+  saved.series[0]!.data[0] = [0, 0, 961];
+  saved.series[0]!.data[1019] = [29, 33, 487];
+  const original = structuredClone(saved);
+  const compact = chartViewport(heatmapDisplay(saved, { showValues: true }).option, 400, 460);
+  assert.equal(compact.dataZoom.length, 2);
+  const expanded = heatmapDisplay(compact, { full: true, showValues: true });
+  assert.equal(expanded.option.dataZoom, undefined);
+  assert.ok(expanded.width > 1400 && expanded.height > 900);
+  assert.deepEqual(expanded.option.series[0].data, saved.series[0]!.data);
+  assert.deepEqual(expanded.option.visualMap, saved.visualMap);
+  const chart = echarts.init(null, undefined, { renderer: "svg", ssr: true, width: expanded.width, height: expanded.height });
+  try {
+    chart.setOption(structuredClone(expanded.option), true);
+    const visible = chart.renderToSVGString();
+    for (const name of [...labels("X", 30), ...labels("Y", 34)]) assert.ok(visible.includes(`>${name}</text>`), name);
+    assert.match(visible, />961<\/text>/);
+    assert.match(visible, />487<\/text>/);
+    assert.match(visible, />0<\/text>/, "zero-valued cells remain labeled");
+    chart.setOption(heatmapDisplay(saved, { full: true, showValues: false }).option, true);
+    const hidden = chart.renderToSVGString();
+    assert.doesNotMatch(hidden, />961<\/text>|>487<\/text>/);
+    assert.match(hidden, />Y33<\/text>/);
+    assert.deepEqual(saved, original);
+  } finally { chart.dispose(); }
 });
 
 test("a bar viewport keeps the value scale while a dense scatter exposes both value sliders", () => {
