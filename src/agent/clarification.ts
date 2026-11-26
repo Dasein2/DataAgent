@@ -11,6 +11,15 @@ export const ClarificationQuestion = z.strictObject({
   options: z.array(z.strictObject({ id: optionId, label: z.string().trim().min(1).max(160) })).min(1).max(4).optional(),
 }).refine(value => !value.options || new Set(value.options.map(option => option.id)).size === value.options.length, "Option IDs must be unique");
 
+/** The console supplies a free-text action; these placeholders are not answers. */
+export function isFreeTextOption(option: { id: string; label: string }): boolean {
+  const label = option.label.trim();
+  return /^(?:other|others|custom|free[_-]?text|user[_-]?input)$/i.test(option.id) ||
+    /^(?:其他|其它|自定义|自由输入|自行输入|手动输入)(?:[／/、 ]*(?:选项|口径|补充|输入|填写|说明))?$/u.test(label) ||
+    /^(?:其他|其它|另有|自定义|自由输入|自行输入|手动输入).*?(?:请说明|请填写|请输入|请补充|自行填写|自行输入|手动输入)/u.test(label) ||
+    /^(?:other|something else|custom|free[ -]text)(?:$|.*\b(?:please specify|please enter|type your own)\b)/i.test(label);
+}
+
 export const ClarificationAnswer = z.union([
   z.strictObject({ question_id: z.string().uuid(), option_id: optionId }),
   z.strictObject({ question_id: z.string().uuid(), text: z.string().trim().min(1).max(2_000) }),

@@ -410,15 +410,17 @@ export class DbSession {
         const controller = new AbortController();
         const state = { controller, cancelled: false };
         this.activeQuery = state;
-        let timedOut = false;
+        let timedOut = false, dispatched = false;
         const onOuterAbort = () => {
           state.cancelled = true;
+          if (controller.signal.aborted) return;
           controller.abort();
-          void this.cancelEngine();
+          if (dispatched) void this.cancelEngine();
         };
         options.signal?.addEventListener("abort", onOuterAbort, { once: true });
         if (options.signal?.aborted) onOuterAbort();
         const timer = setTimeout(() => {
+          if (controller.signal.aborted) return;
           timedOut = true;
           controller.abort();
           void this.cancelEngine();
@@ -429,6 +431,7 @@ export class DbSession {
           if (state.cancelled) throw new AppError("QUERY_CANCELLED", "Query cancelled before execution");
           options.assertPlanActive?.();
           this.queryCount += 1;
+          dispatched = true;
           const stats: QueryStats = await this.measure(guard.kind === "select" ? "source_select" : "metadata", () => this.engine.query(
             sql,
             {
@@ -461,6 +464,9 @@ export class DbSession {
               };
             })(),
           ));
+          dispatched = false;
+          if (this.activeQuery === state) this.activeQuery = undefined;
+          clearTimeout(timer);
           if (state.cancelled) {
             throw new AppError("QUERY_CANCELLED", "Query cancelled by caller");
           }
@@ -492,6 +498,9 @@ export class DbSession {
           });
           return meta;
         } catch (error) {
+          dispatched = false;
+          if (this.activeQuery === state) this.activeQuery = undefined;
+          clearTimeout(timer);
           const message = (error as Error).message;
           await writer.abort(message).catch(() => undefined);
           const cancelled = state.cancelled || Boolean(options.signal?.aborted);
@@ -915,10 +924,9 @@ export class DbSession {
 
   async cancel(): Promise<boolean> {
     const active = this.activeQuery;
-    if (active) {
-      active.cancelled = true;
-      active.controller.abort();
-    }
+    if (!active) return false; // Model-only turns and metadata lanes have no pinned SQL to interrupt.
+    active.cancelled = true;
+    active.controller.abort();
     if (!this.engine.cancelSupported) {
       await this.audit({ action: "query_cancel", outcome: "error", detail: "engine declares no cancellation channel" });
       return false;
@@ -963,6 +971,7 @@ export class DbSession {
     let timedOut = false;
     let cancelling: Promise<boolean> | undefined;
     const interrupt = () => {
+      if (state.controller.signal.aborted) return;
       state.controller.abort();
       cancelling ??= this.cancelEngine();
     };

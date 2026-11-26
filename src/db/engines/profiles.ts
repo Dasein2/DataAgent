@@ -44,7 +44,7 @@ export interface EngineProfile {
   rowEstimate: "table_rows" | "none";
   /** DDL can be rolled back in a transaction; false means create-then-register + cleanup. */
   transactionalDdl: boolean;
-  cancel: "backend-pid" | "query-id" | "connection-id" | "none";
+  cancel: "backend-pid" | "query-id" | "none";
   /** Sample strategy for data_profile. "head" is the first N rows and is labelled as such. */
   sampling: "random" | "head";
   /** Server version fingerprints (regex sources, case-insensitive). */
@@ -107,7 +107,7 @@ export const ENGINE_PROFILES: Record<EngineId, EngineProfile> = {
     foreignKeys: false,
     rowEstimate: "none",
     transactionalDdl: false,
-    cancel: "connection-id",
+    cancel: "query-id",
     sampling: "head",
     versionPatterns: ["doris", "^5\\.7\\.99"],
   },
@@ -128,7 +128,7 @@ export const ENGINE_PROFILES: Record<EngineId, EngineProfile> = {
     foreignKeys: false,
     rowEstimate: "none",
     transactionalDdl: false,
-    cancel: "connection-id",
+    cancel: "query-id",
     sampling: "head",
     versionPatterns: ["starrocks", "^5\\.7\\.99"],
   },

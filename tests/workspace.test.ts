@@ -43,6 +43,43 @@ it("marks an invalidated database connection unavailable and rejects queued work
   } finally { await cleanup(app); }
 });
 
+it("cancels only an active statement and accepts another query in the same Doris session", async () => {
+  const app = await testConfig();
+  app.budgets.queryTimeoutMs = 2_000;
+  const results = new ResultStore(join(app.dataDir, "results"));
+  const config = ConnectionConfig.parse({ engine: "doris", host: "fixture", port: 9030, database: "analytics", user: "reader", password: "" });
+  const db = new (DbSession as any)("sess_cancel", config, app, results) as DbSession;
+  let started!: () => void, release!: () => void, controls = 0;
+  const running = new Promise<void>(resolve => { started = resolve; });
+  const acknowledgement = new Promise<void>(resolve => { release = resolve; });
+  Object.assign(db, { allowedScopes: ["analytics"], capabilities: { sourceAccess: "read_only", workspaceAccess: "none" },
+    engine: { profile: getProfile("doris"), cancelSupported: true,
+      cancel: async () => { controls++; await acknowledgement; return true; },
+      query: async (sql: string, limits: any) => {
+        if (sql === "SELECT 1") {
+          await new Promise<void>(resolve => { limits.signal.addEventListener("abort", () => resolve(), { once: true }); started(); });
+        }
+        return { columns: [], rowCount: 0, bytes: 0, durationMs: 1, truncated: "none", warnings: [] };
+      } } });
+  try {
+    assert.equal(await db.cancel(), false, "no statement to cancel during model thinking");
+    assert.equal(controls, 0);
+    const signal = new AbortController();
+    const stopped = assert.rejects(db.query("SELECT 1", { signal: signal.signal, skipPreflight: true }), { code: "QUERY_CANCELLED" });
+    await running;
+    const cancel = db.cancel();
+    signal.abort(); // Model abort and Stop overlap, but still only one control request.
+    const next = db.query("SELECT 2", { skipPreflight: true });
+    assert.equal(controls, 1);
+    release();
+    assert.equal(await cancel, true);
+    await stopped;
+    assert.equal((await next).sql, "SELECT 2");
+    assert.equal(db.snapshot().status, "ready");
+    assert.equal(controls, 1);
+  } finally { release(); await cleanup(app); }
+});
+
 it("rejects a query timeout even when the driver resolves its interrupted stream normally", async () => {
   const app = await testConfig(); app.budgets.queryTimeoutMs = 5;
   try {

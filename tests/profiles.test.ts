@@ -93,8 +93,8 @@ describe("engine profiles", () => {
   it("declares cancellation and the default port per engine", () => {
     assert.equal(getProfile("postgres").cancel, "backend-pid");
     assert.equal(getProfile("mysql").cancel, "query-id");
-    assert.equal(getProfile("doris").cancel, "connection-id");
-    assert.equal(getProfile("starrocks").cancel, "connection-id");
+    assert.equal(getProfile("doris").cancel, "query-id");
+    assert.equal(getProfile("starrocks").cancel, "query-id");
 
     assert.equal(getProfile("postgres").defaultPort, 5432);
     assert.equal(getProfile("mysql").defaultPort, 3306);

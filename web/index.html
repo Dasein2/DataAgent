@@ -704,6 +704,7 @@
       <div id="taskbar"><span class="taskbar-label">分析任务</span><span class="pill" id="taskPill">idle</span><span id="taskId"></span><span id="turnInfo"></span><span id="taskActivity" role="status" aria-live="polite"></span></div>
       <div class="composer-card" id="composerCard">
         <div class="composer-editing" id="composerEditing" hidden><span>编辑重发 · 发送将追加新消息，不修改原消息</span><button type="button" class="ghost" id="btnEditCancel">取消编辑</button></div>
+        <div class="composer-editing" id="composerClarifying" role="status" hidden>正在回答当前追问 · 发送后继续本次分析</div>
         <div class="composer-input-row">
           <label for="goal" class="sr-only">分析目标</label>
           <textarea id="goal" rows="1" maxlength="20000" placeholder="描述你的分析问题…"></textarea>
@@ -831,6 +832,8 @@ const state = {
   sessionId: null,
   taskId: null,
   pendingQuestion: null,
+  clarificationInput: null,
+  clarificationSending: null,
   clarificationCards: new Map(),
   streamAbort: null,
   taskCursor: 0,
@@ -881,7 +884,8 @@ const assets = initAssets({
   onRenameGroup: renameConnectionGroup,
 });
 const welcome = $("welcome");
-const composer = initChatComposer({ api, state, applySession, onError: (message) => setAnalysisStatus(message, true) });
+let pendingSessionId = null;
+const composer = initChatComposer({ api, state, applySession, isOpening: () => Boolean(pendingSessionId), onError: (message) => setAnalysisStatus(message, true) });
 let submittingTask = false;
 $("token").value = state.token;
 
@@ -1648,7 +1652,6 @@ function applySession(session) {
   state.title = session.title || null;
   state.sessionReady = session.status === "ready";
   setConnectionBadge(session);
-  $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId);
   $("sessionToolbar").hidden = false;
   $("btnReconnect").hidden = state.sessionReady;
   $("btnClose").hidden = !["ready", "unavailable"].includes(session.status);
@@ -1682,7 +1685,6 @@ function applySession(session) {
     $("sessionInfo").innerHTML += '<span class="k">warning</span><span>' + escapeHtml(note) + "</span>";
   }
   if (typeof workbench !== "undefined") workbench.sessionChanged();
-  if (submittingTask) $("btnSend").disabled = true;
   composer.sessionChanged();
   void loadTools();
 }
@@ -1992,7 +1994,14 @@ function renderBlocks(source) {
 $("btnSend").onclick = async () => {
   const goal = $("goal").value.trim();
   const id = state.sessionId;
-  if (!goal || !id || !state.sessionReady || pendingSessionId || state.taskId || submittingTask || $("btnSend").disabled) return;
+  if (!goal || !id || pendingSessionId || submittingTask || $("btnSend").disabled) return;
+  if (state.pendingQuestion) {
+    if (state.clarificationInput === state.pendingQuestion) {
+      await state.clarificationCards.get(state.pendingQuestion)?.send({ text: goal });
+    }
+    return;
+  }
+  if (!state.sessionReady || state.taskId) return;
   submittingTask = true;
   composer.setSubmitting(true);
   const userBody = addMessage("user", { text: goal });
@@ -2034,7 +2043,6 @@ $("btnSend").onclick = async () => {
     streamTask(data.task.id);
   } catch (error) {
     if (state.sessionId !== id || state.assistantEl !== submissionHost) return;
-    $("btnSend").disabled = !state.sessionReady || Boolean(pendingSessionId);
     $("btnCancel").disabled = true;
     userBody.closest(".msg").classList.add("send-failed");
     if (!$("goal").value) { $("goal").value = goal; composer.resize(); }
@@ -2044,7 +2052,6 @@ $("btnSend").onclick = async () => {
   } finally {
     submittingTask = false;
     composer.setSubmitting(false);
-    if (state.sessionId === id) { $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId) || Boolean(pendingSessionId); composer.update(); }
   }
 };
 
@@ -2112,11 +2119,20 @@ function clarificationCard(host, question, taskId) {
     return { finish };
   }
   let sending = false;
-  async function send(input) {
-    if (sending || state.taskId !== taskId || state.pendingQuestion !== question.id) return;
+  function highlightChoice(choice) {
+    controls.querySelectorAll("button").forEach(button => {
+      if (button === choice) button.dataset.selected = "true";
+      else delete button.dataset.selected;
+    });
+  }
+  async function send(input, choice) {
+    if (sending || pendingSessionId || state.taskId !== taskId || state.pendingQuestion !== question.id) return;
     sending = true;
-    const inputs = controls.querySelectorAll("button, textarea");
-    inputs.forEach(node => { node.disabled = true; });
+    state.clarificationSending = question.id;
+    composer.update();
+    if (choice) highlightChoice(choice);
+    const buttons = controls.querySelectorAll("button");
+    buttons.forEach(node => { node.disabled = true; });
     status.hidden = false;
     status.textContent = "正在提交…";
     try {
@@ -2125,47 +2141,42 @@ function clarificationCard(host, question, taskId) {
       });
       const answered = task.clarifications?.find(entry => entry.id === question.id)?.answer;
       if (answered) handleClarificationAnswer({ question_id: question.id, ...answered }, taskId);
+      else throw new Error("未收到回答确认，请重试。");
     } catch (error) {
       if (state.taskId !== taskId || state.pendingQuestion !== question.id) return;
       status.textContent = error.message;
-      inputs.forEach(node => { node.disabled = false; });
+      highlightChoice(state.clarificationInput === question.id ? other : null);
+      buttons.forEach(node => { node.disabled = false; });
     } finally {
       sending = false;
+      if (state.clarificationSending === question.id) {
+        state.clarificationSending = null;
+        composer.update();
+      }
     }
   }
   for (const option of question.options ?? []) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "ghost";
+    button.className = "clarification-choice";
     button.textContent = option.label;
-    button.onclick = () => void send({ option_id: option.id });
+    button.onclick = () => void send({ option_id: option.id }, button);
     controls.append(button);
   }
-  const other = document.createElement("details");
-  other.open = !(question.options?.length);
-  const summary = document.createElement("summary");
-  summary.textContent = "其他／补充";
-  const form = document.createElement("form");
-  const input = document.createElement("textarea");
-  input.rows = 2;
-  input.required = true;
-  input.maxLength = 2000;
-  input.placeholder = "其他：输入你的补充或纠正…";
-  input.setAttribute("aria-label", "你的回答");
-  const submit = document.createElement("button");
-  submit.type = "submit";
-  submit.className = "primary";
-  submit.textContent = "提交补充并继续";
-  form.onsubmit = event => {
-    event.preventDefault();
-    const text = input.value.trim();
-    if (text) void send({ text });
-    else input.focus();
+  const other = document.createElement("button");
+  other.type = "button";
+  other.className = "clarification-choice";
+  other.textContent = question.options?.length ? "其他／补充" : "输入回答";
+  other.setAttribute("aria-controls", "goal");
+  other.onclick = () => {
+    if (sending || pendingSessionId || state.taskId !== taskId || state.pendingQuestion !== question.id) return;
+    state.clarificationInput = question.id;
+    highlightChoice(other);
+    composer.update();
+    $("goal").focus();
   };
-  form.append(input, submit);
-  other.append(summary, form);
   controls.append(other);
-  return { finish };
+  return { finish, send };
 }
 
 function showClarification(question, taskId) {
@@ -2179,7 +2190,9 @@ function showClarification(question, taskId) {
   state.pendingQuestion = question.id;
   state.clarificationCards.set(question.id, clarificationCard(state.assistantEl, question, taskId));
   $("taskPill").textContent = "等待回答";
-  $("taskActivity").textContent = "请回答下方问题以继续分析";
+  $("taskActivity").textContent = question.options?.length
+    ? "请选择一个口径，或点「其他／补充」后在输入框发送"
+    : "点「输入回答」后在输入框发送";
   delete $("taskActivity").dataset.since;
   composer.update();
   if (follow) $("messages").scrollTop = $("messages").scrollHeight;
@@ -2189,7 +2202,7 @@ function handleClarificationAnswer(data, taskId) {
   if (taskId !== state.taskId) return;
   state.clarificationCards.get(data.question_id)?.finish(data);
   if (state.pendingQuestion !== data.question_id) return;
-  state.pendingQuestion = null;
+  state.pendingQuestion = state.clarificationInput = state.clarificationSending = null;
   state.progress?.snapshot({ status: "queued" });
   $("taskPill").textContent = "正在分析…";
   $("taskActivity").textContent = "";
@@ -2286,7 +2299,7 @@ function handleEvent(event) {
       if (!(data.clarifications ?? []).some(question => question.id === state.pendingQuestion)) {
         state.clarificationCards.get(state.pendingQuestion)?.finish();
       }
-      state.pendingQuestion = null;
+      state.pendingQuestion = state.clarificationInput = state.clarificationSending = null;
       const finalAnswer = typeof data.answer === "string" ? data.answer.trim() : "";
       const trailingAnswer = finalAnswer && state.trailingText && state.lastSegmentText.trim() === finalAnswer;
       if (trailingAnswer) state.lastTextNode?.remove();
@@ -2306,7 +2319,6 @@ function handleEvent(event) {
       const status = data.status || "finished";
       $("taskPill").className = "pill " + status;
       $("taskPill").textContent = ({ succeeded: "分析完成", failed: "分析失败", cancelled: "已取消", incomplete: "分析未完成" })[status] || status;
-      $("btnSend").disabled = !state.sessionReady;
       $("btnCancel").disabled = true;
       $("btnRefresh").click();
       break;
@@ -2844,7 +2856,6 @@ $("mApi").addEventListener("change", () => {
 
 let historyListVersion = 0;
 let sessionViewVersion = 0;
-let pendingSessionId = null;
 
 async function loadHistory() {
   const version = ++historyListVersion;
@@ -2871,7 +2882,7 @@ function clearTranscript() {
   state.streamAbort?.abort();
   state.streamAbort = null;
   state.taskId = null;
-  state.pendingQuestion = null;
+  state.pendingQuestion = state.clarificationInput = state.clarificationSending = null;
   state.clarificationCards.clear();
   state.assistantEl = null;
   state.textNode = null;
@@ -2912,7 +2923,7 @@ async function deleteHistorySession(session) {
     if (pendingSessionId === id) {
       sessionViewVersion++;
       pendingSessionId = null;
-      $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId);
+      composer.update();
     }
     if (state.sessionId === id) {
       clearTranscript();
@@ -2997,7 +3008,7 @@ function showSession(session, tasks) {
 async function openSession(id) {
   const version = ++sessionViewVersion;
   pendingSessionId = id;
-  $("btnSend").disabled = true;
+  composer.update();
   setAnalysisStatus("正在载入会话…");
   // 清除未读标记
   state.unreadSessions.delete(id);
@@ -3010,7 +3021,7 @@ async function openSession(id) {
   } catch (error) {
     if (version !== sessionViewVersion) return;
     pendingSessionId = null;
-    $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId);
+    composer.update();
     setAnalysisStatus("加载会话失败：" + error.message, true);
   }
 }

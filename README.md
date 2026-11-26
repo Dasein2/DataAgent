@@ -273,7 +273,8 @@ metadata reads and bounded samples when needed to understand the available data.
 proceeds directly. Once there is enough context to identify a material business choice that evidence
 cannot settle, the model proactively calls `ask_user` before analysis that depends on that choice.
 Questions explain the impact and offer grounded choices when known; “Other / add details” accepts
-free-text corrections. There is no per-task question quota, generic “confirm and start” gate or
+free-text corrections through the main message input. Selecting it does not answer or resume the
+task until text is sent. There is no per-task question quota, generic “confirm and start” gate or
 requirement to inspect the whole database. Obvious user-only choices may be asked immediately.
 
 Each question settles the current Pi run and enters `waiting_for_user`; no other tool in that turn
@@ -438,10 +439,10 @@ to retain the profile policy. The SQL/model tools cannot increase the limit. Rec
 re-read settings after a DBA changes them. A larger limit does **not** fix missing partition
 filters, server overload or slow SQL.
 
-Doris/StarRocks cancellation uses `KILL <connection id>`. Cancellation, query timeout and result
-truncation can therefore make the session `unavailable`; subsequent database work is refused with
-`SESSION_UNAVAILABLE`. Read saved results, then use **恢复分析** (or create a new session) to continue.
-MySQL uses statement-only `KILL QUERY`.
+MySQL, Doris and StarRocks use statement-only `KILL QUERY <connection id>` without falling back
+to a connection kill. Stopping an analysis does not close its database session; if no SQL is active
+on the pinned connection, no cancellation command is dispatched there. A genuinely lost connection
+still reports `SESSION_UNAVAILABLE` and can be recovered with **恢复分析**.
 
 `DATA_AGENT_MODEL_THINKING=off|minimal|low|medium|high|xhigh|max` is passed to the SDK. Custom
 endpoint metadata also enables reasoning when the setting is not `off`; use `off` for endpoints

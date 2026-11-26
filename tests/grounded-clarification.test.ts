@@ -90,7 +90,8 @@ for (const engine of ["postgres", "mysql", "doris", "starrocks"] as const) it(`$
     else if (lastTool === "data_profile") call("ask_user", {
       question: "订单表同时有下单时间和支付时间。2026 年 1 月的订单数按哪个时间统计？",
       impact: "跨月支付的订单会归入不同月份；样例也包含已支付和已取消状态，可补充要纳入的状态。",
-      options: [{ id: "created", label: "按下单时间" }, { id: "paid", label: "按支付时间" }],
+      options: [{ id: "created", label: "按下单时间" }, { id: "paid", label: "按支付时间" },
+        { id: "unlisted", label: "其他事件类型或口径（请说明 event_type）" }],
     });
     else { send({ role: "assistant", content: answer }, null); send({}, "stop"); }
     res.end("data: [DONE]\n\n");
@@ -121,6 +122,13 @@ for (const engine of ["postgres", "mysql", "doris", "starrocks"] as const) it(`$
     assert.equal(question.kind, "follow_up");
     assert.deepEqual(question.options?.map(option => option.id), ["created", "paid"]);
     assert.ok(text(providerCalls[3].messages.at(-1)).includes("cancelled"), "the question follows an observed sample");
+
+    const rejected = await fetch(`${apiBase}/v1/tasks/${task.id}/answer`, { method: "POST", headers: {
+      authorization: "Bearer test-token", "x-caller-id": "alice", "content-type": "application/json",
+    }, body: JSON.stringify({ question_id: question.id, option_id: "unlisted" }) });
+    assert.equal(rejected.status, 400, await rejected.text());
+    assert.equal(task.status, "waiting_for_user");
+    assert.equal(question.answer, undefined);
 
     const response = await fetch(`${apiBase}/v1/tasks/${task.id}/answer`, { method: "POST", headers: {
       authorization: "Bearer test-token", "x-caller-id": "alice", "content-type": "application/json",

@@ -342,7 +342,7 @@ export class MysqlEngine implements Engine {
       aborted = true;
       // KILL QUERY makes the stream emit an error (or end), which settles the async iteration.
       cancellation = this.cancel();
-      // Safety net: if the server never reports the interruption, tear the connection down.
+      // Stop reading this result if the server does not acknowledge interruption in the stream.
       abortTimer = setTimeout(() => stream.destroy(new Error("Query aborted")), 8_000);
       abortTimer.unref?.();
     };
@@ -781,10 +781,9 @@ export class MysqlEngine implements Engine {
     if (!connection || this.unavailableReason || this.profile.cancel === "none") return false;
     const threadId = connection.threadId;
     if (!threadId) return false;
-    // MySQL uses KILL QUERY (statement only); Doris/StarRocks use KILL <connection id>, which tears
-    // the pinned connection down as well, so the session must be reopened afterwards.
-    const statement =
-      this.profile.cancel === "connection-id" ? `KILL ${Number(threadId)}` : `KILL QUERY ${Number(threadId)}`;
+    // MySQL, Doris and StarRocks accept a connection ID with the QUERY modifier.
+    // Never fall back to bare KILL: it disconnects the pinned analysis session.
+    const statement = `KILL QUERY ${Number(threadId)}`;
     let control: Connection | undefined;
     try {
       const stream = this.tunnel
@@ -792,19 +791,13 @@ export class MysqlEngine implements Engine {
         : undefined;
       control = await this.newConnection(stream);
       await sourceRequest("control", () => new Promise<void>((resolve, reject) => {
-        control!.query(statement, (error) => (error ? reject(error) : resolve()));
+        control!.query({ sql: statement, timeout: 5_000 }, (error) => (error ? reject(error) : resolve()));
       }));
-      if (this.profile.cancel === "connection-id") {
-        this.unavailableReason = `${this.profile.label} cancellation closed the database connection. Open a new analysis session to continue.`;
-        this.connection = undefined;
-        this.inReadOnly = false;
-        connection.destroy();
-      }
       return true;
     } catch {
       return false;
     } finally {
-      await new Promise<void>((resolve) => (control ? control.end(() => resolve()) : resolve()));
+      control?.destroy();
     }
   }
 }

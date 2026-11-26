@@ -676,7 +676,7 @@ export function createDatabaseTools(runtime: ToolRuntime): ToolDefinition[] {
     defineTool({
       name: ASK_USER,
       label: "Clarify the analysis with the user",
-      description: "Pause for a material business choice that available context cannot settle. First inspect relevant definitions, schema or bounded samples when needed to ground the question; do not ask routinely for permission to start. Call this tool alone, explain the impact and offer supported choices when known. The user can select an option or correct the scope with free text.",
+      description: "Pause for a material business choice that available context cannot settle. First inspect relevant definitions, schema or bounded samples when needed to ground the question; do not ask routinely for permission to start. Call this tool alone, explain the impact and offer supported choices when known. Supply only concrete choices, not Other/Custom/Please specify placeholders. The console supplies its own free-text action.",
       parameters: Type.Unsafe<z.infer<typeof ClarificationQuestion>>(z.toJSONSchema(ClarificationQuestion, { io: "input" })),
       executionMode: "sequential",
       execute: async (_id, params) => {

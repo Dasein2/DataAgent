@@ -40,12 +40,13 @@ export async function copyText(text) {
   }
 }
 
-export function initChatComposer({ api, state, applySession, onError }) {
+export function initChatComposer({ api, state, applySession, onError, isOpening = () => false }) {
   const $ = (id) => document.getElementById(id);
   const goal = $("goal"), messages = $("messages"), chip = $("btnModelChip");
   const sources = new WeakMap();
   const drafts = new Map();
   let displayedSession;
+  let reply;
   let editing = false, previousDraft = "", switching = false, submitting = false, opening = 0;
   let catalog = [], scope = "enabled", stars = new Set();
   try { stars = new Set(JSON.parse(localStorage.getItem("data-agent-model-prefs") || "[]")); } catch { /* optional storage */ }
@@ -65,7 +66,27 @@ export function initChatComposer({ api, state, applySession, onError }) {
     $("composerEditing").hidden = true;
     resize();
   }
+  function syncReply() {
+    const id = state.pendingQuestion === state.clarificationInput ? state.clarificationInput : null;
+    if (reply && (reply.id !== id || reply.session !== state.sessionId)) {
+      goal.value = reply.draft;
+      reply = undefined;
+      resize();
+    }
+    if (id && !reply) {
+      reply = { id, session: state.sessionId, draft: goal.value };
+      goal.value = "";
+      resize();
+    }
+    goal.placeholder = reply ? "输入补充或纠正，再点击发送…" : "描述你的分析问题…";
+    goal.maxLength = reply ? 2000 : 20000;
+    goal.readOnly = Boolean(reply && state.clarificationSending === reply.id);
+    $("composerEditing").hidden = Boolean(reply) || !editing;
+    $("composerClarifying").hidden = !reply;
+    return Boolean(reply);
+  }
   function update() {
+    const replying = syncReply();
     chip.disabled = !state.sessionId || !state.sessionReady || Boolean(state.taskId) || switching || submitting;
     chip.title = state.taskId ? "分析运行中，结束后可切换模型" : !state.sessionReady ? "恢复数据库连接后可切换模型" : "切换当前会话模型，不影响其他会话或全局默认";
     const agent = state.session?.agent;
@@ -75,15 +96,18 @@ export function initChatComposer({ api, state, applySession, onError }) {
     const usage = agent?.context_usage;
     $("modelContext").textContent = typeof usage?.tokens === "number" ? `上下文 ${usage.tokens.toLocaleString()} / ${(agent.context_window || usage.contextWindow || 0).toLocaleString()}` : "上下文用量待更新";
     messages.classList.toggle("task-running", Boolean(state.taskId));
-    $("btnSend").hidden = Boolean(state.taskId);
+    $("btnSend").hidden = Boolean(state.taskId) && !replying;
+    $("btnSend").disabled = switching || submitting || isOpening() || (replying
+      ? !state.taskId || goal.readOnly || !goal.value.trim()
+      : !state.sessionReady || Boolean(state.taskId));
     $("btnCancel").hidden = !state.taskId;
     $("btnSteer").hidden = !state.taskId || Boolean(state.pendingQuestion);
     $("btnCancel").textContent = state.pendingQuestion ? "取消分析" : "■ 停止";
-    if (switching) $("btnSend").disabled = true;
   }
   function sessionChanged() {
     if (displayedSession !== state.sessionId) {
-      if (displayedSession) drafts.set(displayedSession, { value: goal.value, editing, previousDraft });
+      if (displayedSession) drafts.set(displayedSession, { value: reply?.draft ?? goal.value, editing, previousDraft });
+      reply = undefined;
       displayedSession = state.sessionId;
       const draft = drafts.get(displayedSession);
       goal.value = draft?.value || "";
@@ -117,6 +141,7 @@ export function initChatComposer({ api, state, applySession, onError }) {
     const body = button.closest(".msg")?.querySelector(":scope > .body");
     const text = button.matches(".code-copy") ? button.closest(".code-block").querySelector("pre code").textContent : sources.get(body) ?? body.textContent;
     if (button.dataset.messageAction === "edit") {
+      if (reply) { goal.focus(); return; }
       // Running work is unaffected: only the draft changes, never steer/cancel/rewrite.
       if (goal.value && goal.value !== text && !window.confirm("输入框已有草稿，是否用这条消息替换？取消编辑时可以恢复原草稿。")) return;
       if (!editing) previousDraft = goal.value;
@@ -131,11 +156,11 @@ export function initChatComposer({ api, state, applySession, onError }) {
     }
   });
   $("btnEditCancel").onclick = () => { clearEditing(true); goal.focus(); };
-  goal.addEventListener("input", resize);
+  goal.addEventListener("input", () => { resize(); update(); });
   goal.addEventListener("keydown", (event) => {
     if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter" && !event.shiftKey && !event.altKey) { event.preventDefault(); $("btnSend").click(); }
-    if (event.key === "Escape" && editing) { event.preventDefault(); clearEditing(true); }
+    if (event.key === "Escape" && editing && !reply) { event.preventDefault(); clearEditing(true); }
   });
   // Existing quick prompts/catalog insertion write .value directly.
   goal.addEventListener("focus", resize);
@@ -196,7 +221,7 @@ export function initChatComposer({ api, state, applySession, onError }) {
       const result = await api(`/v1/sessions/${encodeURIComponent(id)}/model`, { method: "POST", body: { provider, modelId: model.id } });
       if (state.sessionId === id) applySession(result.session);
     } catch (error) { if (state.sessionId === id) onError("模型切换失败：" + error.message); }
-    finally { switching = false; $("btnSend").disabled = !state.sessionReady || Boolean(state.taskId); update(); }
+    finally { switching = false; update(); }
   }
   chip.onclick = async () => {
     if (!popover.hidden) { closePicker(); return; }

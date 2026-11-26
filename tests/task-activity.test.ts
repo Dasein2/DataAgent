@@ -140,47 +140,87 @@ for (const status of ["succeeded", "failed", "cancelled", "incomplete"]) {
 
 for (const kind of ["follow_up", "intent_confirmation"]) for (const freeText of [false, true]) test(`${kind} card submits ${freeText ? "Other corrections" : "the selected answer"} once and becomes read-only`, async () => {
   const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const composerSource = await readFile(new URL("../web/chat-composer.js", import.meta.url), "utf8");
   const host = new Element("div");
   const question = { id: "question-fixture", kind, question: "<strong>按哪一天统计？</strong>", impact: "影响统计范围。", options: [
     { id: "paid", label: "按支付时间" }, { id: "created", label: "按下单时间" },
   ] };
   const requests: unknown[] = [];
-  const state = { taskId: "task_live", pendingQuestion: null, clarificationCards: new Map(), assistantEl: host };
+  const failFirst = freeText && kind === "follow_up";
+  const state = { sessionId: "sess_live", sessionReady: true, taskId: "task_live", pendingQuestion: null, clarificationInput: null, clarificationCards: new Map(), assistantEl: host };
+  let focused = false;
   const elements: Record<string, any> = {};
-  const context = createContext({ state, question, document: { createElement: (tag: string) => new Element(tag) },
-    $: (id: string) => elements[id] ??= { dataset: {} }, composer: { update() {} },
+  const $ = (id: string) => elements[id] ??= {
+    dataset: {}, style: {}, value: "", scrollHeight: 32, classList: { toggle() {} },
+    addEventListener() {}, querySelectorAll() { return []; }, setAttribute() {}, focus() { focused = true; },
+  };
+  const context = createContext({ state, question, pendingSessionId: null, submittingTask: false,
+    document: { getElementById: $, createElement: (tag: string) => new Element(tag), addEventListener() {} }, $,
     isNearBottom: () => false, ensureAssistant() {}, closeSegment() {},
     api: async (path: string, options: unknown) => {
       requests.push({ path, options });
+      if (failFirst && requests.length === 1) throw new Error("发送失败，请重试");
       return { task: { clarifications: [{ ...question, answer: { text: "按支付时间" } }] } };
     },
   });
-  runInContext(html.slice(html.indexOf("function clarificationCard("), html.indexOf("function handleEvent(")), context);
+  runInContext(composerSource.replace(/export (?=(?:async )?function)/g, "") +
+    '\nconst composer = initChatComposer({ api, state }); composer.sessionChanged(); $("goal").value = "保留原草稿";', context);
+  runInContext(html.slice(html.indexOf('$("btnSend").onclick'), html.indexOf("function streamTask(")) +
+    html.slice(html.indexOf("function clarificationCard("), html.indexOf("function handleEvent(")), context);
   runInContext('showClarification(question, "task_live"); showClarification(question, "task_live")', context);
   assert.equal(host.children.length, 1, "SSE replay cannot duplicate a restored card");
   assert.match(host.textContent, /<strong>/, "a model-authored question is rendered as text");
   assert.equal(elements.taskPill.textContent, "等待回答");
   assert.ok(host.textContent.includes(kind === "intent_confirmation" ? "需求确认" : "需要你确认"));
   assert.ok(!host.textContent.includes("确认并开始分析"));
-  const details = host.querySelectorAll("details")[0]!;
-  assert.equal(details.open, false);
-  assert.match(details.textContent, /其他／补充/);
+  const choices = host.querySelectorAll("button");
+  assert.deepEqual(choices.map(button => button.textContent), ["按支付时间", "按下单时间", "其他／补充"]);
+  assert.ok(choices.every(button => button.className === "clarification-choice"));
+  assert.ok(choices.every(button => button.dataset.selected === undefined), "no answer is preselected");
+  const other = choices.at(-1)!;
+  assert.equal(host.querySelectorAll("textarea").length, 0, "free text uses the main composer");
   if (freeText) {
-    details.open = true;
-    (host.querySelectorAll("textarea")[0] as any).value = "  请按支付时间  ";
-    const form = host.querySelectorAll("form")[0] as any;
-    form.onsubmit({ preventDefault() {} }); form.onsubmit({ preventDefault() {} });
+    other.onclick!();
+    assert.equal(other.dataset.selected, "true");
+    assert.equal(focused, true);
+    assert.equal(requests.length, 0, "opening the composer must not answer the question");
+    assert.equal(state.pendingQuestion, question.id);
+    assert.equal(elements.goal.value, "", "new reply does not accidentally submit the old draft");
+    assert.equal(elements.btnSend.hidden, false);
+    assert.equal(elements.btnSend.disabled, true);
+    await elements.btnSend.onclick(); // blank input is not an answer
+    assert.equal(requests.length, 0);
+    elements.goal.value = "  请按支付时间  ";
+    runInContext("composer.update()", context);
+    assert.equal(elements.btnSend.disabled, false);
+    const sent = elements.btnSend.onclick();
+    assert.equal(elements.btnSend.disabled, true, "in-flight clarification cannot be resubmitted");
+    await Promise.all([sent, elements.btnSend.onclick()]);
+    if (failFirst) {
+      assert.equal(requests.length, 1);
+      assert.equal(state.pendingQuestion, question.id);
+      assert.equal(elements.goal.value, "  请按支付时间  ");
+      assert.equal(elements.btnSend.disabled, false);
+      assert.equal(other.dataset.selected, "true", "a retry keeps the free-text choice highlighted");
+      assert.match(host.textContent, /发送失败，请重试/);
+      await elements.btnSend.onclick();
+    }
   } else {
-    const choice = host.querySelectorAll("button")[0]!;
+    const choice = choices[0]!;
     choice.onclick!(); choice.onclick!();
+    assert.equal(choice.dataset.selected, "true");
+    assert.equal(other.dataset.selected, undefined);
   }
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(JSON.stringify(requests), JSON.stringify([{ path: "/v1/tasks/task_live/answer", options: {
+  const request = { path: "/v1/tasks/task_live/answer", options: {
     method: "POST", body: { question_id: question.id, ...(freeText ? { text: "请按支付时间" } : { option_id: "paid" }) },
-  } }]));
+  } };
+  assert.equal(JSON.stringify(requests), JSON.stringify(failFirst ? [request, request] : [request]));
   assert.match(host.textContent, /已确认：按支付时间/);
   assert.equal(host.querySelectorAll("button").length, 0);
   assert.equal(state.pendingQuestion, null);
+  assert.equal(elements.goal.value, "保留原草稿");
+  assert.equal(elements.btnSend.hidden, true, "the existing task resumes instead of starting a new task");
 });
 
 test("duration formatting does not invent elapsed time; plain answers hide an empty process", async () => {

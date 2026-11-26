@@ -17,7 +17,7 @@ function engineFixture(engine: "mysql" | "doris" | "starrocks", rows: unknown[][
     if (failure) throw failure;
   })()) }) };
   Object.assign(instance, { connection, inReadOnly: true, beginReadOnly: async () => {}, endReadOnly: async () => {},
-    newConnection: async () => ({ query: (sql: string, cb: Function) => { cancellation = sql; cb(); }, end: (cb: Function) => cb() }) });
+    newConnection: async () => ({ query: ({ sql }: { sql: string }, cb: Function) => { cancellation = sql; cb(); }, destroy() {} }) });
   return { instance, destroyed: () => destroyed, cancellation: () => cancellation };
 }
 
@@ -101,25 +101,45 @@ for (const engine of ["mysql", "doris", "starrocks"] as const) {
     const rows: unknown[][] = [];
     const result = await instance.query("SELECT 1", { ...limits, maxRows: 1 }, { onRow: (row) => { rows.push(row); } });
     assert.equal(result.truncated, "rows"); assert.deepEqual(rows, [[1]]);
-    if (engine !== "mysql") assert.match(instance.unavailableReason!, /Open a new/);
+    assert.equal(instance.unavailableReason, undefined);
   });
 }
 
 for (const engine of ["doris", "starrocks"] as const) {
-  it(`${engine}: invalidates a killed connection and refuses subsequent queries clearly`, async () => {
-    const f = engineFixture(engine, []);
+  it(`${engine}: cancels only the statement and reuses the same connection`, async () => {
+    const f = engineFixture(engine, [[1]]);
     assert.equal(await f.instance.cancel(), true);
-    assert.equal(f.cancellation(), "KILL 123"); assert.equal(f.destroyed(), true);
-    await assert.rejects(f.instance.query("SELECT 1", limits, { onRow: () => {} }), { code: "SESSION_UNAVAILABLE" });
+    assert.equal(f.cancellation(), "KILL QUERY 123");
+    assert.equal(f.destroyed(), false);
+    assert.equal((await f.instance.query("SELECT 1", limits, { onRow: () => {} })).rowCount, 1);
+  });
+  it(`${engine}: refused query cancellation never falls back to a connection kill`, async () => {
+    const f = engineFixture(engine, []);
+    const commands: string[] = [];
+    let controlClosed = false;
+    Object.assign(f.instance, { newConnection: async () => ({
+      query: ({ sql }: { sql: string }, cb: Function) => { commands.push(sql); cb(new Error("refused")); },
+      destroy: () => { controlClosed = true; },
+    }) });
+    assert.equal(await f.instance.cancel(), false);
+    assert.deepEqual(commands, ["KILL QUERY 123"]);
+    assert.equal(f.destroyed(), false);
+    assert.equal(controlClosed, true);
   });
   it(`${engine}: waits for cancellation acknowledgement before returning an interrupted stream`, async () => {
     const f = engineFixture(engine, [[1], [2]]);
     const controller = new AbortController();
-    let kills = 0;
+    let kills = 0, acknowledged = false;
     Object.assign(f.instance, { newConnection: async () => ({
-      query: (_sql: string, cb: Function) => { kills++; setTimeout(() => cb(), 5); }, end: (cb: Function) => cb(),
+      query: ({ sql }: { sql: string }, cb: Function) => {
+        assert.equal(sql, "KILL QUERY 123");
+        kills++; setTimeout(() => { acknowledged = true; cb(); }, 5);
+      }, destroy() {},
     }) });
     await f.instance.query("SELECT 1", { ...limits, signal: controller.signal }, { onRow: () => { controller.abort(); } });
-    assert.equal(kills, 1); assert.ok(f.instance.unavailableReason); assert.equal(f.destroyed(), true);
+    assert.equal(kills, 1);
+    assert.equal(acknowledged, true);
+    assert.equal(f.instance.unavailableReason, undefined);
+    assert.equal(f.destroyed(), false);
   });
 }

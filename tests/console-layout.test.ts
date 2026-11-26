@@ -164,7 +164,7 @@ test("opening a session no longer fetches result shortcuts for the transcript", 
   const context = createContext({
     sessionViewVersion: 0, pendingSessionId: null,
     state: { unreadSessions: new Set(), sessionId: null, sessionReady: false, taskId: null },
-    $: () => ({}), setAnalysisStatus() {},
+    $: () => ({}), setAnalysisStatus() {}, composer: { update() {} },
     api: async (path: string) => { paths.push(path); return path.endsWith("/tasks") ? { tasks: [] } : { session: { session_id: "sess_open" } }; },
     showSession: (...args: unknown[]) => shown.push(args),
   });

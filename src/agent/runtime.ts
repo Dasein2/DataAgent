@@ -25,7 +25,7 @@ import { taskActivity, type ActivitySummary } from "./task-activity.js";
 import { generateSessionTitle, type GeneratedSessionTitle } from "./session-title.js";
 import { businessContextPrompt, contextSummary } from "../business-context/store.js";
 import type { BusinessContextFile } from "../business-context/types.js";
-import { ASK_USER, CLARIFICATION_WAIT_MS, MAX_CLARIFICATIONS, clarificationPrompt, type ClarificationAnswer, type TaskClarification } from "./clarification.js";
+import { ASK_USER, CLARIFICATION_WAIT_MS, MAX_CLARIFICATIONS, clarificationPrompt, isFreeTextOption, type ClarificationAnswer, type TaskClarification } from "./clarification.js";
 
 export type TaskStatus = "queued" | "running" | "waiting_for_user" | "succeeded" | "failed" | "cancelled" | "incomplete";
 
@@ -439,7 +439,8 @@ export class AnalysisSession {
     if ((task.clarifications?.length ?? 0) >= MAX_CLARIFICATIONS || this.maxTurns - this.turns < 2)
       throw new AppError("TASK_BUDGET_EXCEEDED", "The clarification limit was reached or fewer than two turns remain to explore and answer. State the unresolved limitation without guessing.");
     const id = randomUUID();
-    this.stagedQuestion = { ...input, id, kind: "follow_up" };
+    const options = input.options?.filter(option => !isFreeTextOption(option));
+    this.stagedQuestion = { ...input, options: options?.length ? options : undefined, id, kind: "follow_up" };
     return { id };
   }
 
@@ -461,7 +462,8 @@ export class AnalysisSession {
       throw new AppError("CLARIFICATION_EXPIRED", "追问已过期，请重新发起分析。");
     }
     const option = "option_id" in input ? question.options?.find(entry => entry.id === input.option_id) : undefined;
-    if ("option_id" in input && !option) throw new AppError("INVALID_INPUT", "请选择当前追问的有效选项。");
+    if ("option_id" in input && (!option || isFreeTextOption(option)))
+      throw new AppError("INVALID_INPUT", "请选择具体口径，或输入补充内容后发送。");
     this.stopClarificationClock(task);
     question.answer = { text: "text" in input ? input.text : option!.label, option_id: option?.id, answered_at: new Date().toISOString() };
     task.status = "queued";
@@ -720,10 +722,13 @@ export class AnalysisSession {
     const running = this.current;
     if (!running || running.status !== "running") return false;
 
+    if (this.abortRequested) return true;
     this.abortRequested = true;
-    // Control channel: cancel the query directly, outside the serialised queue.
-    await this.db.cancel().catch(() => false);
-    if (this.current === running && running.status === "running") void this.agent.abort();
+    // Interrupt the pinned statement and the model together. A slow control connection must
+    // not let the model advance to another tool after the user has stopped this task.
+    const stoppingQuery = this.db.cancel().catch(() => false);
+    void this.agent.abort().catch(() => undefined);
+    await stoppingQuery;
     return true;
   }
 
