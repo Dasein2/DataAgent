@@ -1076,36 +1076,50 @@ export class DbSession {
     );
   }
 
-  async catalogOverview(schema?: string, limit = 12) {
-    const objects = await this.catalogSearch({ schema, limit: Math.min(50, limit) });
-    const descriptions = await this.describeMany(objects.slice(0, 20));
+  async catalogOverview(schema?: string, limit = 12, selectedObjects?: Array<{ schema?: string; name: string }>) {
+    if (selectedObjects && (selectedObjects.length < 1 || selectedObjects.length > 20))
+      throw new AppError("INVALID_INPUT", "Select between 1 and 20 objects for a catalog overview");
+    const objects = selectedObjects
+      ? selectedObjects.map((object) => ({ ...object, schema: object.schema ?? schema }))
+      : await this.catalogSearch({ schema, limit: Math.min(50, limit) });
+    const uniqueObjects = new Map(objects.slice(0, 20).map(object => [JSON.stringify([object.schema, object.name]), object]));
+    const descriptions = await this.describeMany([...uniqueObjects.values()]);
     const tables = descriptions.filter((d): d is typeof d & { description: ObjectDescription } => "description" in d);
+    const selectedKeys = selectedObjects && new Set(tables.map(({ description }) => `${description.object.schema}.${description.object.name}`));
+    const visibleForeignKeys = (table: ObjectDescription) => selectedKeys
+      ? table.foreignKeys.filter(fk => selectedKeys.has(fk.references)) : table.foreignKeys;
     const relationships: Array<{
       from: string;
       to: string;
       target_columns?: string[];
       evidence: string;
+      evidence_type: "declared_foreign_key" | "inferred_name_match";
       verified: boolean;
     }> = [];
     for (const { description: d } of tables) {
-      for (const fk of d.foreignKeys)
+      for (const fk of visibleForeignKeys(d)) {
         relationships.push({
           from: `${d.object.schema}.${d.object.name}(${fk.columns.join(",")})`,
           to: fk.references,
           target_columns: fk.referencedColumns,
-          evidence: "declared foreign key; still validate JOIN cardinality and filtering",
+          evidence: "database-declared foreign key; still validate JOIN cardinality and filtering",
+          evidence_type: "declared_foreign_key",
           verified: true,
         });
+      }
       for (const col of d.columns.filter((c) => c.name.endsWith("_id"))) {
+        if (d.foreignKeys.some(fk => fk.columns.includes(col.name))) continue;
         const stem = col.name.slice(0, -3);
         for (const { description: target } of tables)
-          if (target !== d && [stem, stem + "s"].includes(target.object.name) && target.primaryKey.length === 1)
+          if (target !== d && [stem, stem + "s"].includes(target.object.name) && target.primaryKey.length === 1) {
             relationships.push({
               from: `${d.object.schema}.${d.object.name}.${col.name}`,
               to: `${target.object.schema}.${target.object.name}.${target.primaryKey[0]}`,
-              evidence: "name heuristic only; validate uniqueness/cardinality before JOIN",
+              evidence: "field/table-name heuristic only; no database foreign key was observed; validate uniqueness/cardinality before JOIN",
+              evidence_type: "inferred_name_match",
               verified: false,
             });
+          }
       }
     }
     return {
@@ -1113,12 +1127,15 @@ export class DbSession {
         ...d.object,
         columns: d.columns.length,
         primary_key: d.primaryKey,
+        ...(selectedKeys && { foreign_keys: visibleForeignKeys(d).map(fk => ({ name: fk.name, columns: fk.columns, references: fk.references, referenced_columns: fk.referencedColumns })) }),
         partition_key: d.partitionKey,
         time_columns: d.columns.filter((c) => /date|time/i.test(c.type)).map((c) => c.name),
         large_table: (d.object.rowEstimate ?? 0) > 1_000_000,
       })),
       relationships,
-      scope: "bounded catalog sample, not a complete inventory",
+      scope: selectedObjects
+        ? "explicitly selected objects; relationships are limited to the selected objects"
+        : "bounded catalog sample, not a complete inventory",
       failures: descriptions.filter((d) => "error" in d),
     };
   }

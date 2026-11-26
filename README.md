@@ -326,8 +326,8 @@ timings exclude browser rendering and are not a before/after production benchmar
 
 The service has 23 tool definitions, gated by session capabilities:
 
-- Clarify: `ask_user`, available across all supported engines without a business catalog.
-- Discover: `session_info`, `catalog_search`, `catalog_overview`, `object_describe(objects)` (1–20 relations), `data_profile`.
+- Clarify: `ask_user`. When a choice maps to an observed field, its optional `field_ref` (e.g. `orders.paid_at`) accompanies the selected option on resume. Free-text replies do not inherit a field.
+- Discover: `session_info`, `catalog_search`, `catalog_overview`, `object_describe(objects)` (1–20 relations), `data_profile`. For relationships among specific tables, pass `objects` (1–20 names with optional schemas) to `catalog_overview` instead of sampling a schema. Declared foreign keys are distinguished from inferred name matches; neither proves a JOIN is one-to-one.
 - Source read: `query_explain`, `query_execute` (`dry_run`, opt-in `reuse`).
 - Saved rows: `result_read` (`mode: "rows"` for paging/projection, `"summary"` for statistics), `result_compute` (structured computation) and `result_transform` (local SQL over `source: {kind: "result" | "snapshot", id}`).
 - Local snapshots: `snapshot_create`, `snapshot_list`, `snapshot_drop`.

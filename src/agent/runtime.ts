@@ -467,7 +467,12 @@ export class AnalysisSession {
     if ("option_id" in input && (!option || isFreeTextOption(option)))
       throw new AppError("INVALID_INPUT", "请选择具体口径，或输入补充内容后发送。");
     this.stopClarificationClock(task);
-    question.answer = { text: "text" in input ? input.text : option!.label, option_id: option?.id, answered_at: new Date().toISOString() };
+    question.answer = {
+      text: "text" in input ? input.text : option!.label,
+      option_id: option?.id,
+      field_ref: option?.field_ref,
+      answered_at: new Date().toISOString(),
+    };
     task.status = "queued";
     this.queue.unshift({ record: task, maxTurns: task.max_turns ?? this.app.budgets.maxTurns, resumed: true });
     this.saveTask(task);

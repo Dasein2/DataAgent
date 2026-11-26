@@ -23,6 +23,7 @@ const text = (message: any) => typeof message?.content === "string" ? message.co
 const goal = "统计 2026 年 1 月的订单数";
 const correctedSql = "SELECT COUNT(*) AS orders FROM orders WHERE paid_at >= DATE '2026-01-01' AND paid_at < DATE '2026-02-01' AND status = 'paid'";
 const answer = "按支付时间统计，2026 年 1 月有 2 笔已支付订单。";
+const paidChoice = "按支付时间，只统计已支付订单";
 
 for (const engine of ["postgres", "mysql", "doris", "starrocks"] as const) it(`${engine}: discover schema and samples before asking; clear follow-ups skip confirmation`, async () => {
   const app = await testConfig(); app.budgets.taskTimeoutMs = 15_000;
@@ -80,9 +81,10 @@ for (const engine of ["postgres", "mysql", "doris", "starrocks"] as const) it(`$
         send({ role: "assistant", content: "先查看订单表结构和状态样例。" }, null);
         call("catalog_search", { search: "orders" });
       } else if (latest.startsWith("Continue the same analysis")) {
-        const payload = JSON.parse(latest.split("\n\n").at(-1));
+        const [choice] = JSON.parse(latest.split("\n\n").at(-1)).clarifications;
         // If a resume drops or changes the user's correction, produce a different real query result.
-        call("query_execute", { sql: payload.clarifications[0].answer.includes("只统计已支付") ? correctedSql : "SELECT 999 AS orders" });
+        const usePaymentTime = choice.option_id === "paid" ? choice.field_ref === "orders.paid_at" : choice.answer === paidChoice;
+        call("query_execute", { sql: usePaymentTime ? correctedSql : correctedSql.replaceAll("paid_at", "created_at") });
       } else if (latest === "再按刚才的支付口径统计一次") call("query_execute", { sql: correctedSql });
       else { send({ role: "assistant", content: "已收到。" }, null); send({}, "stop"); }
     } else if (lastTool === "catalog_search") call("object_describe", { objects: [{ name: "orders", schema: "public" }] });
@@ -90,7 +92,7 @@ for (const engine of ["postgres", "mysql", "doris", "starrocks"] as const) it(`$
     else if (lastTool === "data_profile") call("ask_user", {
       question: "订单表同时有下单时间和支付时间。2026 年 1 月的订单数按哪个时间统计？",
       impact: "跨月支付的订单会归入不同月份；样例也包含已支付和已取消状态，可补充要纳入的状态。",
-      options: [{ id: "created", label: "按下单时间" }, { id: "paid", label: "按支付时间" },
+      options: [{ id: "created", label: "按下单时间", field_ref: "orders.created_at" }, { id: "paid", label: paidChoice, field_ref: "orders.paid_at" },
         { id: "unlisted", label: "其他事件类型或口径（请说明 event_type）" }],
     });
     else { send({ role: "assistant", content: answer }, null); send({}, "stop"); }
@@ -99,7 +101,7 @@ for (const engine of ["postgres", "mysql", "doris", "starrocks"] as const) it(`$
   try {
     await database.exec(`CREATE TABLE orders(created_at date, paid_at date, status text); INSERT INTO orders VALUES
       ('2025-12-31','2026-01-01','paid'), ('2026-01-06','2026-01-06','paid'),
-      ('2026-01-04','2026-01-04','cancelled'), ('2026-01-08','2026-02-01','paid');`);
+      ('2026-01-04','2026-01-04','cancelled'), ('2026-02-01','2026-02-01','paid');`);
     app.model = { provider: "grounded-fixture", modelId: "local", api: "openai-completions", apiKey: "fixture", thinkingLevel: "off", baseUrl: `${await listen(provider)}/v1` };
     service = await AnalysisService.create(app);
     const connection = ConnectionConfig.parse({ engine, host: "fixture.test", port: engine === "postgres" ? 5432 : 3306, database: "fixture", user: "analyst", password: "test", environment: "non_production" });
@@ -130,13 +132,19 @@ for (const engine of ["postgres", "mysql", "doris", "starrocks"] as const) it(`$
     assert.equal(task.status, "waiting_for_user");
     assert.equal(question.answer, undefined);
 
+    const freeText = engine === "mysql";
     const response = await fetch(`${apiBase}/v1/tasks/${task.id}/answer`, { method: "POST", headers: {
       authorization: "Bearer test-token", "x-caller-id": "alice", "content-type": "application/json",
-    }, body: JSON.stringify({ question_id: question.id, text: "按支付时间，只统计已支付订单" }) });
+    }, body: JSON.stringify({ question_id: question.id, ...(freeText ? { text: paidChoice } : { option_id: "paid" }) }) });
     assert.equal(response.status, 202, await response.text());
     await until(() => Boolean(task.finished_at), 15_000);
     assert.equal(task.status, "succeeded", JSON.stringify(task.error));
     assert.equal(task.clarifications?.length, 1);
+    const resumed = text(providerCalls[4].messages.filter((message: any) => message.role === "user").at(-1));
+    assert.deepEqual(JSON.parse(resumed.split("\n\n").at(-1)!).clarifications, [{
+      question: question.question, answer: paidChoice, ...(freeText ? {} : { option_id: "paid", field_ref: "orders.paid_at" }),
+    }]);
+    assert.equal(service.history.getTask(task.id, "alice").clarifications?.[0]?.answer?.field_ref, freeText ? undefined : "orders.paid_at");
     assert.equal(task.turns, 6);
     assert.equal(task.queries_used, 1);
     assert.equal(task.answer, answer);

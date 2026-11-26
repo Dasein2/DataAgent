@@ -31,8 +31,8 @@
 
 | 范围 | 工具 |
 | --- | --- |
-| 按需澄清 | `ask_user`，先了解相关数据，再对无法确定且影响结果的业务选择主动追问；不强制每任务调用。支持点选或「其他／补充」自由回答 |
-| 发现 | `session_info`, `catalog_search`, `catalog_overview`, `object_describe`（`objects` 数组，1–20 个表/视图）, `data_profile` |
+| 按需澄清 | `ask_user`，只追问影响结果且无法从数据确定的业务选择。若选项有明确的字段依据，点选时会带上 `field_ref`（如 `orders.paid_at`）；自由回答不会继承选项字段。 |
+| 发现 | `session_info`, `catalog_search`, `catalog_overview`, `object_describe`, `data_profile`。`object_describe` 和 `catalog_overview` 都支持用 `objects` 点名 1–20 个表或视图；后者只列所选对象之间的关系，并区分声明外键与名称推测。不传 `objects` 则沿用按库抽样。 |
 | 源查询 | `query_execute`, `query_explain` |
 | 保存结果 | `result_read`（`mode=rows` 读行，`mode=summary` 看统计）, `result_transform` |
 | 本地快照 | `snapshot_create`, `snapshot_list`, `snapshot_drop` |

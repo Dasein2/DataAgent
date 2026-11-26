@@ -50,14 +50,18 @@ export function analysisTools(runtime: ToolRuntime): ToolDefinition[] {
       name: "catalog_overview",
       label: "Catalog overview",
       description:
-        "Bounded overview of tables, time columns, primary keys and declared/inferred relationships. Inferred JOIN paths must be verified for uniqueness/cardinality.",
+        "Overview of tables, time columns, primary keys and relationships. Pass objects for relationships among those tables only; otherwise limit bounds the catalog sample. Name matches are hints, not foreign keys. Verify JOIN cardinality before aggregating.",
       parameters: Type.Object({
         schema: Type.Optional(Type.String()),
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+        objects: Type.Optional(Type.Array(Type.Object({
+          name: Type.String({ minLength: 1, maxLength: 256 }),
+          schema: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        }, { additionalProperties: false }), { minItems: 1, maxItems: 20 })),
       }),
       executionMode: "parallel",
       annotations,
-      execute: async (_id, p) => output(await db.catalogOverview(p.schema ?? runtime.targetScope?.(), p.limit ?? 12)),
+      execute: async (_id, p) => output(await db.catalogOverview(p.schema ?? runtime.targetScope?.(), p.limit ?? 12, p.objects)),
     }),
     defineTool({
       name: "result_transform",

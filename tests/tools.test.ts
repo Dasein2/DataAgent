@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import { Check } from "typebox/value";
+import { DbSession } from "../src/db/session.js";
 import { createDatabaseTools, selectTools, toolCatalog, type ToolRuntime } from "../src/agent/tools.js";
 import type { SessionCapabilities } from "../src/db/types.js";
 import { AppError } from "../src/errors.js";
@@ -82,6 +83,56 @@ it("describes one or more objects through the same entry point and retains per-i
   assert.ok(!Check(describe.parameters, orders));
   assert.ok(!Check(describe.parameters, { objects: [] }));
   assert.ok(!Check(describe.parameters, { objects: Array(21).fill(orders) }));
+});
+
+for (const declared of [true, false]) it(`compares only named tables using ${declared ? "foreign key" : "name"} evidence`, async () => {
+  const orders = { schema: "sales", name: "orders", kind: "table" };
+  const refunds = { schema: "billing", name: "refunds", kind: "table" };
+  const orderKey = { name: "fk_order", columns: ["order_id"], references: "sales.orders", referencedColumns: ["id"] };
+  const externalKey = { name: "fk_vendor", columns: ["vendor_id"], references: "sales.vendors", referencedColumns: ["id"] };
+  const described: string[] = [], sampled: unknown[] = [];
+  const overview = tool("catalog_overview", {
+    catalogOverview: DbSession.prototype.catalogOverview, describeMany: DbSession.prototype.describeMany,
+    catalogSearch: async options => { sampled.push(options); return [refunds]; },
+    describe: async (schema, name) => {
+      const key = `${schema}.${name}`;
+      described.push(key);
+      if (key !== "sales.orders" && key !== "billing.refunds") throw new Error("object not found");
+      const isRefund = name === "refunds";
+      return { object: isRefund ? refunds : orders, primaryKey: ["id"], indexes: [],
+        columns: (isRefund ? ["id", "order_id", "vendor_id"] : ["id"]).map((col, ordinal) => ({ name: col, ordinal, type: "int", nullable: false })),
+        foreignKeys: isRefund ? [...(declared ? [orderKey] : []), externalKey] : [],
+      };
+    },
+  });
+  const run = async (input: object) => {
+    assert.ok(Check(overview.parameters, input));
+    const result = await overview.execute("call", input, undefined, undefined, {} as never);
+    assert.ok(!result.isError);
+    return result.details as Awaited<ReturnType<DbSession["catalogOverview"]>>;
+  };
+  const input = { schema: "sales", limit: 1, objects: [{ name: "orders" }, { name: "refunds", schema: "billing" }] };
+  assert.ok(!Check(overview.parameters, { objects: [] }));
+  assert.ok(!Check(overview.parameters, { objects: Array(21).fill({ name: "orders" }) }));
+  const selected = await run(input);
+  assert.deepEqual(described, ["sales.orders", "billing.refunds"]);
+  assert.deepEqual(sampled, []);
+  assert.deepEqual(selected.tables.map(table => table.name), ["orders", "refunds"]);
+  assert.doesNotMatch(JSON.stringify(selected), /sales\.vendors|fk_vendor/);
+  assert.equal(selected.relationships.length, 1);
+  const [edge] = selected.relationships;
+  assert.equal(edge!.evidence_type, declared ? "declared_foreign_key" : "inferred_name_match");
+  assert.equal(edge!.verified, declared);
+  assert.equal(edge!.from, declared ? "billing.refunds(order_id)" : "billing.refunds.order_id");
+  assert.equal(edge!.to, declared ? "sales.orders" : "sales.orders.id");
+  if (declared) assert.deepEqual(edge!.target_columns, ["id"]);
+
+  const partial = await run({ ...input, objects: [{ name: "missing" }, { name: "orders" }] });
+  assert.deepEqual(partial.failures, [{ schema: "sales", name: "missing", error: "object not found" }]);
+  assert.deepEqual(partial.relationships, []);
+  const sample = await run({ schema: "billing", limit: 1 });
+  assert.deepEqual(sampled, [{ schema: "billing", limit: 1 }]);
+  assert.ok(sample.relationships.some(edge => edge.to === "sales.vendors"), "unscoped sampling retains outward foreign keys");
 });
 
 it("blocks identical failed exploration and allows only one field/dialect correction per task", async () => {
