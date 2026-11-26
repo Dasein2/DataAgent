@@ -274,6 +274,27 @@ it("serves scoped business documents and projects only the active revision into 
     await request(`${prefix(other.id)}/${file.id}`, 404);
     await request(`${route}/..%2Fdefaults`, 400);
     await request(route, 400, "POST", { name: "过长", content: "字".repeat(3_000) });
+    // Uploaded .md files: new names are created, a repeated name replaces in place, one bad file is reported.
+    const uploaded = await request(`${route}/import`, 200, "POST", {
+      documents: [
+        { name: "上传口径 A", content: "# A\nuploaded_markdown_a" },
+        { name: "上传口径 B", content: "# B\nuploaded_markdown_b" },
+        { name: "上传口径 A", content: "# A\nuploaded_markdown_a_v2" },
+        { name: "空文档", content: "   " },
+        { name: "超预算", content: "字".repeat(12_000) },
+      ],
+    });
+    assert.deepEqual(uploaded.created.map((file: any) => file.name), ["上传口径 A", "上传口径 B"]);
+    assert.deepEqual(uploaded.updated.map((file: any) => file.name), ["上传口径 A"]);
+    assert.deepEqual(uploaded.failed.map((item: any) => item.name), ["空文档", "超预算"]);
+    assert.ok(uploaded.created.every((file: any) => file.content === undefined));
+    assert.equal(uploaded.updated[0].estimatedTokens > 0, true);
+    const imported = (await request(`${route}/${uploaded.updated[0].id}`, 200)).file;
+    assert.match(imported.content, /uploaded_markdown_a_v2/);
+    assert.equal((await request(route, 200)).files.filter((file: any) => file.name === "上传口径 A").length, 1);
+    await request(`${route}/import`, 400, "POST", { documents: [] });
+    const bobImported = await request(`${prefix(bob.id)}/import`, 200, "POST", { documents: [{ name: "bob 的口径", content: "b" }] }, "bob");
+    assert.deepEqual(bobImported.created.map((file: any) => file.name), ["bob 的口径"]);
     await request(`${route}/selection`, 404, "PUT", { ids: ["ctx_00000000000000000000"] });
     const heavy = [];
     for (let i = 0; i < 5; i++) heavy.push((await request(route, 201, "POST", { name: `大文档 ${i}`, content: "x".repeat(7_000) })).file.id);

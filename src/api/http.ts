@@ -17,8 +17,8 @@ import { toolCatalog } from "../agent/tools.js";
 import { ClarificationAnswer } from "../agent/clarification.js";
 import { z } from "zod";
 import { ResultOperation } from "../analysis/operations.js";
-import { BusinessContextDraft, BusinessContextIds } from "../business-context/types.js";
-import { DOCUMENT_TOKEN_LIMIT, SELECTION_TOKEN_LIMIT } from "../business-context/store.js";
+import { BusinessContextDraft, BusinessContextIds, BusinessContextImport } from "../business-context/types.js";
+import { DOCUMENT_TOKEN_LIMIT, SELECTION_TOKEN_LIMIT, contextSummary } from "../business-context/store.js";
 import { ProviderWrite, ProviderId } from "../agent/provider-store.js";
 import { accountAuth } from "./account-auth.js";
 
@@ -631,6 +631,14 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
     const { businessContextScope } = service.getSession(req.params.id, ownerOf(req));
     const file = service.businessContext.create(businessContextScope, BusinessContextDraft.parse(req.body));
     res.status(201).json({ file });
+  });
+  // Uploaded .md files are read in the browser and posted as text, so no multipart handling or temp
+  // files are needed. Same-named documents are replaced; one bad file never fails the batch.
+  app.post("/v1/sessions/:id/business-context/import", (req, res) => {
+    const { businessContextScope } = service.getSession(req.params.id, ownerOf(req));
+    const { documents } = BusinessContextImport.parse(req.body);
+    const result = service.businessContext.import(businessContextScope, documents);
+    res.json({ ...result, created: result.created.map(contextSummary), updated: result.updated.map(contextSummary) });
   });
   const selectionBody = z.object({ ids: BusinessContextIds });
   app.put("/v1/sessions/:id/business-context/selection", (req, res) => {

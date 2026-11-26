@@ -11,10 +11,24 @@ const button = (text, className = "ghost") => {
 };
 const tokenCount = (files) => files.reduce((sum, file) => sum + file.estimatedTokens, 0);
 
+const MAX_IMPORT_FILES = 20;
+const MAX_IMPORT_CHARS = 16_000;
+
+/** File name without extension becomes the document name; the library name limit is 100 characters. */
+export function documentName(filename) {
+  const base = filename.replace(/^.*[\\/]/, "").replace(/\.[^.]*$/, "").trim();
+  return (base || filename.trim() || "未命名文档").slice(0, 100);
+}
+
 export function initBusinessContext({ api, state, panel, trigger }) {
   const heading = el("div", undefined, "bc-header");
-  const create = button("新建文档"), refresh = button("刷新");
-  heading.append(el("h3", "业务上下文"), refresh, create);
+  const create = button("新建文档"), refresh = button("刷新"), upload = button("上传文档");
+  const fileInput = el("input");
+  fileInput.type = "file";
+  fileInput.accept = ".md,.markdown,.mdx,.txt,text/markdown,text/plain";
+  fileInput.multiple = true;
+  fileInput.hidden = true;
+  heading.append(el("h3", "业务上下文"), refresh, upload, create, fileInput);
   const notice = el("p", undefined, "muted bc-notice");
   notice.setAttribute("role", "status");
   const activeHeading = el("h3", "当前会话使用");
@@ -67,7 +81,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
 
   function setBusy(value) {
     busy = value;
-    save.disabled = create.disabled = refresh.disabled = value || !connected();
+    save.disabled = create.disabled = refresh.disabled = upload.disabled = value || !connected();
     draftChanged();
   }
 
@@ -82,7 +96,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
       return;
     }
     if (!data) return;
-    notice.textContent = `单篇约 ${data.limits.document_tokens.toLocaleString()} tokens 上限。编辑文档不改变已应用的版本。`;
+    notice.textContent = `单篇约 ${data.limits.document_tokens.toLocaleString()} tokens 上限。上传 .md 文件或新建文档；编辑不改变已应用的版本。`;
     activeHeading.textContent = `当前会话使用 · ${active.length} 篇 · 约 ${tokenCount(active).toLocaleString()} tokens`;
     for (const item of active) {
       const latest = data.files.find((file) => file.id === item.id);
@@ -102,7 +116,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
       row.append(label, edit, remove);
       library.append(row);
     }
-    if (!data.files.length) library.append(el("li", "还没有文档，可新建指标口径、业务规则或事件字段说明。", "muted"));
+    if (!data.files.length) library.append(el("li", "还没有文档，可新建，或拖入 / 上传 .md 文件（指标口径、业务规则、事件字段说明）。", "muted"));
   }
 
   async function load({ report = notice } = {}) {
@@ -177,7 +191,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
       option.append(check, el("span", `${file.name} · 约 ${file.estimatedTokens} tokens${updated ? " · 有新版" : ""}`));
       choices.append(option);
     }
-    if (!data.files.length) choices.append(el("p", "暂无文档。请先在右侧「业务资料」新建。", "muted"));
+    if (!data.files.length) choices.append(el("p", "暂无文档。请先在右侧「业务资料」新建或上传 .md 文件。", "muted"));
     status.textContent = data.active.some((file) => !draft.has(file.id)) ? "部分已选文档已删除，重新应用会将它们从会话移除。" : "";
     setBusy(false);
   };
@@ -228,6 +242,72 @@ export function initBusinessContext({ api, state, panel, trigger }) {
   }
   create.onclick = () => void openEditor();
   refresh.onclick = () => void load();
+
+  async function importFiles(fileList) {
+    if (!connected() || busy) return;
+    const files = [...fileList];
+    if (!files.length) return;
+    if (files.length > MAX_IMPORT_FILES) {
+      notice.textContent = `一次最多上传 ${MAX_IMPORT_FILES} 个文件，请分批上传。`;
+      return;
+    }
+    const stamp = revision, path = route();
+    setBusy(true);
+    notice.textContent = `读取 ${files.length} 个文件…`;
+    const documents = [], rejected = [];
+    for (const file of files) {
+      let content;
+      try { content = await file.text(); }
+      catch { rejected.push(`${file.name}：读取失败`); continue; }
+      if (!content.trim()) { rejected.push(`${file.name}：内容为空`); continue; }
+      if (content.length > MAX_IMPORT_CHARS) { rejected.push(`${file.name}：超过 ${MAX_IMPORT_CHARS.toLocaleString()} 字符上限`); continue; }
+      documents.push({ name: documentName(file.name), content });
+    }
+    try {
+      if (!documents.length) {
+        notice.textContent = rejected.join("\n");
+        return;
+      }
+      notice.textContent = "上传中…";
+      const result = await api(`${path}/import`, { method: "POST", body: { documents } });
+      if (!isCurrent(stamp, path)) return;
+      const summary = [];
+      if (result.created.length) summary.push(`新增 ${result.created.length} 篇：${result.created.map((file) => file.name).join("、")}`);
+      if (result.updated.length) summary.push(`替换同名 ${result.updated.length} 篇：${result.updated.map((file) => file.name).join("、")}`);
+      for (const item of result.failed) summary.push(`${item.name}：${item.message}`);
+      summary.push(...rejected);
+      if (result.created.length || result.updated.length) summary.push("已存入文档库；重新应用「业务上下文」后才会进入本会话。");
+      await load();
+      if (isCurrent(stamp, path)) notice.textContent = summary.join("\n");
+    } catch (error) {
+      if (isCurrent(stamp, path)) notice.textContent = error.message;
+    } finally {
+      if (isCurrent(stamp, path)) setBusy(false);
+    }
+  }
+
+  upload.onclick = () => { if (connected() && !busy) fileInput.click(); };
+  fileInput.onchange = () => {
+    const files = fileInput.files ? [...fileInput.files] : [];
+    fileInput.value = "";
+    void importFiles(files);
+  };
+  // Dropping .md files onto the panel reuses the same import path as the picker.
+  panel.addEventListener("dragover", (event) => {
+    if (!connected() || busy || !event.dataTransfer) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    panel.classList.add("bc-drop");
+  });
+  panel.addEventListener("dragleave", (event) => {
+    if (!panel.contains(event.relatedTarget)) panel.classList.remove("bc-drop");
+  });
+  panel.addEventListener("drop", (event) => {
+    panel.classList.remove("bc-drop");
+    if (!event.dataTransfer?.files?.length) return;
+    event.preventDefault();
+    void importFiles(event.dataTransfer.files);
+  });
   form.onsubmit = async (event) => {
     event.preventDefault();
     if (!connected() || busy) return;

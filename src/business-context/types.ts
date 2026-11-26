@@ -8,6 +8,18 @@ export const BusinessContextDraft = z.object({
 });
 export type BusinessContextDraft = z.infer<typeof BusinessContextDraft>;
 
+/**
+ * Uploaded Markdown files. Loose on purpose: each document is validated as a draft on its own so one
+ * bad file does not fail the whole batch.
+ */
+export const BusinessContextImport = z.object({
+  documents: z.array(z.object({
+    name: z.string().max(400),
+    content: z.string().max(64_000),
+  })).min(1).max(20),
+});
+export type BusinessContextImport = z.infer<typeof BusinessContextImport>;
+
 export interface BusinessContextFile extends BusinessContextDraft {
   id: string;
   revision: string;

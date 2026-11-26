@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { ConnectionConfig } from "../db/types.js";
 import { normalizeHostKeyFingerprint } from "../db/ssh-tunnel.js";
 import { AppError, isAppError } from "../errors.js";
-import { BusinessContextDraft, BusinessContextId, BusinessContextIds, type BusinessContextFile } from "./types.js";
+import { BusinessContextDraft, BusinessContextId, BusinessContextIds, BusinessContextImport, type BusinessContextFile } from "./types.js";
 
 export const DOCUMENT_TOKEN_LIMIT = 2_000;
 export const SELECTION_TOKEN_LIMIT = 8_000;
@@ -117,6 +117,33 @@ export class BusinessContextStore {
 
   update(scope: string, id: string, draft: BusinessContextDraft): BusinessContextFile {
     return this.save(scope, draft, this.get(scope, id));
+  }
+
+  /**
+   * Import uploaded Markdown. A document whose name matches a library entry replaces that entry, so
+   * re-uploading a revised specification does not leave duplicates. Failures stay local to one file.
+   */
+  import(scope: string, documents: BusinessContextImport["documents"]): {
+    created: BusinessContextFile[]; updated: BusinessContextFile[]; failed: { name: string; message: string }[];
+  } {
+    const created: BusinessContextFile[] = [], updated: BusinessContextFile[] = [], failed: { name: string; message: string }[] = [];
+    const existing = new Map(this.list(scope).map((file) => [file.name, file.id]));
+    for (const document of documents) {
+      const draft = BusinessContextDraft.safeParse({ name: document.name.trim(), content: document.content });
+      if (!draft.success) {
+        failed.push({ name: document.name.trim() || "未命名文档", message: draft.error.issues[0]?.message ?? "文档内容无效" });
+        continue;
+      }
+      const previous = existing.get(draft.data.name);
+      try {
+        const file = previous ? this.update(scope, previous, draft.data) : this.create(scope, draft.data);
+        if (previous) updated.push(file);
+        else { created.push(file); existing.set(file.name, file.id); }
+      } catch (error) {
+        failed.push({ name: draft.data.name, message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return { created, updated, failed };
   }
 
   delete(scope: string, id: string): void {

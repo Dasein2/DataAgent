@@ -39,6 +39,17 @@ it("catalog qualifies names using the engine delimiter and escapes embedded deli
   assert.equal(runInContext('qualifiedTableName("doris", "Sales Data", "a`b")', context), "`Sales Data`.`a``b`");
 });
 
+it("uploaded Markdown file names become document names within the library limit", async () => {
+  const source = await readFile(new URL("../web/business-context.js", import.meta.url), "utf8");
+  const context = createContext();
+  runInContext(source.replaceAll("export function", "function"), context);
+  assert.equal(runInContext('documentName("GMV 口径.md")', context), "GMV 口径");
+  assert.equal(runInContext('documentName("C:\\\\docs\\\\events.MARKDOWN")', context), "events");
+  assert.equal(runInContext('documentName("notes.txt")', context), "notes");
+  assert.equal(runInContext('documentName(".md")', context), ".md");
+  assert.equal(runInContext('documentName("x".repeat(300) + ".md").length', context), 100);
+});
+
 it("console and workbench modules parse, and chart downloads retain live authentication state", async () => {
   const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
   const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
