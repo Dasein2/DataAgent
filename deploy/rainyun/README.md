@@ -67,6 +67,13 @@ For public access, first choose a domain and point its DNS here; then separately
 Caddy site addition and graceful reload. Only after that set `DATA_AGENT_TRUST_PROXY=1`.
 Never expose port 8787 to the internet.
 
+## Database session lifetime
+
+Set `DATA_AGENT_SESSION_TTL_MS=7200000` in `.env.prod` for a two-hour idle session lifetime.
+Doris source connections run a lightweight idle heartbeat (default 60 seconds, controlled by
+`DATA_AGENT_DORIS_KEEPALIVE_MS`; `0` disables it). This does not extend the idle TTL or consume
+the analysis query budget. A real disconnect still requires reconnecting; saved analysis is kept.
+
 ## Backup / upgrade / rollback
 
 Stop **only** this Compose project before a filesystem backup of SQLite and its data. Never run

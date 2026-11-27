@@ -43,6 +43,46 @@ it("marks an invalidated database connection unavailable and rejects queued work
   } finally { await cleanup(app); }
 });
 
+it("keeps idle Doris alive without extending expiry, competing with SQL, or spending query budget", async () => {
+  const app = await testConfig();
+  const db = new (DbSession as any)("sess_heartbeat", { engine: "doris" }, app, {}) as DbSession;
+  const internals = db as any;
+  let calls = 0, fail = false, release!: () => void;
+  const work = new Promise<void>(resolve => { release = resolve; });
+  Object.assign(db, { capabilities: {}, engine: { close: async () => {}, keepAlive: async () => {
+    calls++;
+    if (fail) throw Object.assign(new Error("Disconnected"), { code: "PROTOCOL_CONNECTION_LOST" });
+  } } });
+  try {
+    const wasActiveAt = db.snapshot().last_used_at;
+    const expiry = db.expiresAt.getTime();
+    internals.lastSourceAt = Date.now() - 100_000;
+    await internals.keepIdleSourceAlive(60_000);
+    assert.equal(calls, 1);
+    assert.equal(db.snapshot().queries.used, 0);
+    assert.equal(db.snapshot().last_used_at, wasActiveAt);
+    assert.equal(db.expiresAt.getTime(), expiry);
+    assert.equal(db.snapshot().status, "ready");
+    await internals.keepIdleSourceAlive(60_000);
+    assert.equal(calls, 1, "no redundant heartbeat after source activity");
+    internals.lastSourceAt = Date.now() - 100_000;
+    const pending = internals.run(() => work);
+    await internals.keepIdleSourceAlive(60_000);
+    assert.equal(calls, 1, "no heartbeat during or behind a user statement");
+    release(); await pending;
+    internals.lastSourceAt = Date.now() - 100_000;
+    internals.lastUsedAt = new Date(0);
+    await internals.keepIdleSourceAlive(60_000);
+    assert.equal(calls, 1, "expired sessions are not kept alive");
+    db.touch(); fail = true;
+    await internals.keepIdleSourceAlive(60_000);
+    assert.equal(calls, 2);
+    assert.equal(db.snapshot().status, "unavailable");
+    await internals.keepIdleSourceAlive(60_000);
+    assert.equal(calls, 2, "a broken source is not silently reconnected");
+  } finally { release(); await db.close(); await cleanup(app); }
+});
+
 it("cancels only an active statement and accepts another query in the same Doris session", async () => {
   const app = await testConfig();
   app.budgets.queryTimeoutMs = 2_000;

@@ -87,6 +87,9 @@ export class DbSession {
   private defaultCatalogScope = "";
   private readonly datasets = new Map<string, DatasetRecord>();
   private tail: Promise<unknown> = Promise.resolve();
+  private pendingSource = 0;
+  private lastSourceAt = Date.now();
+  private keepaliveTimer?: ReturnType<typeof setInterval>;
   private queryCount = 0;
   private metadataCache!: TtlCache;
   private metadataPool?: MetadataPool<Engine>;
@@ -128,6 +131,7 @@ export class DbSession {
     await mkdir(join(options.app.dataDir, "audit"), { recursive: true });
     await mkdir(join(options.app.dataDir, "sessions"), { recursive: true });
     await session.bootstrap();
+    session.startKeepalive();
     return session;
   }
 
@@ -297,8 +301,27 @@ export class DbSession {
     }
   }
 
+  private startKeepalive() {
+    const interval = this.app.dorisKeepaliveMs ?? 60_000;
+    if (this.config.engine !== "doris" || !this.engine.keepAlive || interval <= 0) return;
+    this.lastSourceAt = Date.now();
+    // Poll at a fraction of the interval so recent SQL cannot defer the next heartbeat by a full interval.
+    this.keepaliveTimer = setInterval(() => void this.keepIdleSourceAlive(interval), Math.max(1, Math.floor(interval / 3)));
+    this.keepaliveTimer.unref();
+  }
+
+  private async keepIdleSourceAlive(interval: number) {
+    const now = Date.now();
+    if (this.closed || this.unavailableReason || this.pendingSource || this.expiresAt.getTime() <= now ||
+        now - this.lastSourceAt < interval) return;
+    // Never reconnect or replay a business query here. Keep a diagnostic for failures without
+    // treating background traffic as user activity or consuming the analysis query budget.
+    await this.run(() => this.engine.keepAlive!(), false).catch((error: unknown) =>
+      this.audit({ action: "source_keepalive", outcome: "error", code: sourceError(error).code }));
+  }
+
   /** Serialises every database operation for this pinned connection. */
-  private run<T>(operation: () => Promise<T>): Promise<T> {
+  private run<T>(operation: () => Promise<T>, touch = true): Promise<T> {
     if (this.closed) return Promise.reject(new AppError("SESSION_CLOSED", "Session is closed"));
     const guarded = () => {
       this.assertSourceAvailable();
@@ -308,12 +331,13 @@ export class DbSession {
         throw error;
       });
     };
-    const next = this.tail.then(guarded, guarded);
-    this.tail = next.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.touch();
+    this.pendingSource++;
+    const next = this.tail.then(guarded, guarded).finally(() => {
+      this.pendingSource--;
+      this.lastSourceAt = Date.now();
+    });
+    this.tail = next.then(() => undefined, () => undefined);
+    if (touch) this.touch();
     return next;
   }
 
@@ -590,9 +614,10 @@ export class DbSession {
     return analysisOptions(this.app).masking.some(r => r.column.toLowerCase() === field.toLowerCase());
   }
 
-  async catalogScopes(refresh = false) {
+  async catalogScopes(refresh = false, counts = true) {
     if (this.closed) throw new AppError("SESSION_CLOSED", "Session is closed");
     const scopes = this.catalogScopeNames();
+    if (!counts) return { scopes, default_scope: this.defaultCatalogScope, table_counts: null };
     // Counts are advisory UI metadata: an engine error must not make the tree inaccessible
     // or turn an unknown count into zero. Cache only successful counts.
     const table_counts = await this.metadataCache.get("catalog-table-counts", () =>
@@ -951,6 +976,7 @@ export class DbSession {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    clearInterval(this.keepaliveTimer);
     await this.tail.catch(() => undefined);
     await this.metadataPool?.close();
     this.metadataCache?.clear();

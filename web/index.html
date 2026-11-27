@@ -890,6 +890,7 @@ const assets = initAssets({
   list: $("assetList"),
   search: $("assetSearch"),
   toggle: $("btnToggleAssets"),
+  onCreateSession: createSessionFromProfile,
   onEdit: openConnectionEditor,
   onOpen: (session) => void openSession(session.session_id),
   onDelete: deleteHistorySession,
@@ -917,11 +918,19 @@ setInterval(() => {
   state.progress?.tick();
 }, 1000);
 
-// 定时轮询所有会话状态，只有真正变化时才重新渲染（否则重建列表会重置滚动位置、闪滚动条）
+// 定时轮询会话状态；慢请求不会重叠，也不延长数据库会话的空闲 TTL。
+let pollingSessions = false;
 setInterval(async () => {
-  if (!state.account && !state.token) return;
+  if ((!state.account && !state.token) || pollingSessions) return;
+  pollingSessions = true;
+  const active = state.session;
   try {
     const { sessions } = await api("/v1/sessions");
+    const current = sessions.find((session) => session.session_id === active?.session_id);
+    if (active?.status === "ready" && active === state.session && !pendingSessionId &&
+        current && current.created_at === active.created_at && ["unavailable", "closed"].includes(current.status)) {
+      applySession({ ...active, status: current.status, unavailable_reason: current.unavailable_reason });
+    }
     // 检测任务完成：从有 current_task_id 变为无，且不是当前会话
     for (const next of sessions) {
       const prev = state.sessions.find((s) => s.session_id === next.session_id);
@@ -939,7 +948,7 @@ setInterval(async () => {
     renderAssets();
   } catch (error) {
     // 静默失败，不打断用户
-  }
+  } finally { pollingSessions = false; }
 }, 3000);
 function loadConsole() {
   void initProfiles();
@@ -1179,11 +1188,40 @@ function renderAssets() {
   });
 }
 
-function openConnectionEditor(profile = null, newSession = false, resumeId = null) {
+let creatingProfileSession = false;
+async function createSessionFromProfile(profile) {
+  if (creatingProfileSession) return;
+  creatingProfileSession = true;
+  const version = sessionViewVersion;
+  setAnalysisStatus("正在为「" + profile.name + "」新建会话…");
+  try {
+    // Server profiles resolve credentials, SSH pins and connection policy server-side.
+    // A legacy browser profile still needs to send its own connection fields.
+    const body = profile.localOnly ? { connection: {
+      ...profile, password: profile.password ?? "",
+      port: Number(profile.port || [...$("engine").options].find(option => option.value === profile.engine)?.dataset.port || 5432),
+    } } : { profile: profile.name };
+    const { session } = await api("/v1/sessions", { method: "POST", body });
+    // A slow connection should not pull the user away from another session they have opened.
+    if (version === sessionViewVersion && !pendingSessionId) {
+      const entry = profile.id && !profile.localOnly ? { ...session, connection_profile_id: profile.id } : session;
+      if (!state.sessions.some((item) => item.session_id === entry.session_id)) state.sessions.unshift(entry);
+      showSession(entry, []);
+      $("goal").focus();
+    }
+    void loadHistory();
+  } catch (error) {
+    if (version === sessionViewVersion) {
+      setAnalysisStatus("新建会话失败：" + error.message + "。如需补充凭据或确认 SSH 指纹，请打开「连接设置」。", true);
+    }
+  } finally { creatingProfileSession = false; }
+}
+
+function openConnectionEditor(profile = null, resumeId = null) {
   const dialog = $("connectionDialog");
   if (dialog.open) return;
   dialog.dataset.resumeId = resumeId || "";
-  $("connectionTitle").textContent = resumeId ? "填写原连接以恢复分析" : newSession ? "新建分析会话" : profile ? "连接设置" : "添加数据库连接";
+  $("connectionTitle").textContent = resumeId ? "填写原连接以恢复分析" : profile ? "连接设置" : "添加数据库连接";
   $("profileName").value = profile?.name || "";
   $("profileName").readOnly = Boolean(profile);
   $("profileGroup").value = profile?.group || "";
@@ -3077,7 +3115,7 @@ $("btnReconnect").onclick = async () => {
     if (state.sessionId !== id || pendingSessionId) return;
     setAnalysisStatus(error.message, true);
     if (["RECONNECT_PROFILE_REQUIRED", "PROFILE_SECRET_STORAGE_DISABLED", "CONNECTION_FAILED", "SSH_HOST_KEY_UNPINNED", "SSH_HOST_KEY_MISMATCH"].includes(error.code)) {
-      openConnectionEditor(profile, false, id);
+      openConnectionEditor(profile, id);
       setStatus("connStatus", "请确认是原数据库连接，并补填所需凭据。", "info");
     }
   } finally { button.disabled = false; }

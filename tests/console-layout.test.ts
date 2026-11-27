@@ -159,6 +159,54 @@ test("initial history scrolling does not override reading up or a newer session"
   assert.equal(h.messages.scrollTop, 300);
 });
 
+test("the asset menu creates an empty session with the saved profile without opening connection settings", async () => {
+  const assets = await readFile(new URL("../web/assets.js", import.meta.url), "utf8");
+  assert.match(assets, /label: "新建会话", run: \(\) => onCreateSession\(asset.profile\)/);
+  assert.match(assets, /label: "连接设置", run: \(\) => onEdit\(asset.profile\)/);
+  assert.match(script!, /onCreateSession: createSessionFromProfile/);
+  const requests: Array<{ path: string; options: unknown; resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
+  const shown: unknown[][] = [], notices: unknown[][] = [];
+  const state = { sessions: [] as Array<{ session_id: string; connection_profile_id: string }> };
+  let historyLoads = 0, focused = 0;
+  const context = createContext({
+    state, sessionViewVersion: 0, pendingSessionId: null,
+    profile: { name: "Doris", id: "profile-id", queryTimeoutMs: 180_000 },
+    api: (path: string, options: unknown) => new Promise((resolve, reject) => requests.push({ path, options, resolve, reject })),
+    $: (id: string) => { assert.equal(id, "goal", "the connection form is never opened or read"); return { focus() { focused++; } }; },
+    setAnalysisStatus: (...args: unknown[]) => notices.push(args),
+    showSession: (...args: unknown[]) => { shown.push(args); return ++context.sessionViewVersion; },
+    loadHistory: () => { historyLoads++; },
+  });
+  runInContext(sourceBetween("let creatingProfileSession =", "function openConnectionEditor("), context);
+  const click = () => runInContext("createSessionFromProfile(profile)", context);
+  const first = click();
+  await click();
+  assert.equal(requests.length, 1, "ignore repeat clicks while connecting");
+  assert.equal(requests[0]!.path, "/v1/sessions");
+  assert.equal(JSON.stringify(requests[0]!.options), '{"method":"POST","body":{"profile":"Doris"}}');
+  requests[0]!.resolve({ session: { session_id: "sess_created", status: "ready" } });
+  await first;
+  assert.equal(state.sessions[0]?.connection_profile_id, "profile-id");
+  assert.equal(shown[0]?.[0], state.sessions[0]);
+  assert.equal((shown[0]?.[1] as unknown[]).length, 0);
+  assert.equal(focused, 1);
+  assert.equal(historyLoads, 1);
+
+  const failure = click();
+  requests[1]!.reject(new Error("连接被拒绝"));
+  await failure;
+  assert.match(String(notices.at(-1)?.[0]), /新建会话失败.*连接设置/);
+  assert.equal(notices.at(-1)?.[1], true);
+  assert.equal(shown.length, 1, "failure does not clear or change the open session");
+
+  const retry = click();
+  context.sessionViewVersion++;
+  requests[2]!.resolve({ session: { session_id: "sess_after_navigation", status: "ready" } });
+  await retry;
+  assert.equal(shown.length, 1, "a late result cannot switch away from a newer session");
+  assert.equal(historyLoads, 2, "a late creation still refreshes the sidebar");
+});
+
 test("opening a session no longer fetches result shortcuts for the transcript", async () => {
   const paths: string[] = [], shown: unknown[][] = [];
   const context = createContext({

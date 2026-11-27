@@ -57,6 +57,48 @@ it("retention purges only old non-live evidence and skips invalid timestamps", a
   }
 });
 
+it("catalog HTTP search modes keep legacy field search and offer lightweight interactive paths", async () => {
+  const config = await testConfig();
+  const service = await AnalysisService.create(config);
+  const seen: Array<{ namesOnly?: boolean; searchColumns?: boolean; schema?: string }> = [];
+  const scopes: boolean[] = [];
+  const db = {
+    catalogPage: async (filter: typeof seen[number]) => { seen.push(filter); return { objects: [], nextOffset: null }; },
+    catalogScopes: async (_refresh: boolean, counts: boolean) => { scopes.push(counts); return { scopes: ["analytics"] }; },
+  };
+  const sessions = (service as any).sessions;
+  sessions.set("sess_catalog", { ownerKey: "alice", db, touch() {} });
+  const app = await createHttpApp(service);
+  const server = await new Promise<Server>(resolve => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  const port = (server.address() as { port: number }).port;
+  const call = async (suffix: string, caller = "alice") => {
+    const result = await fetch("http://127.0.0.1:" + port + "/v1/sessions/sess_catalog/catalog/" + suffix, {
+      headers: { authorization: "Bearer test-token", "x-caller-id": caller },
+    });
+    await result.text();
+    return result.status;
+  };
+  try {
+    assert.equal(await call("objects?search=users&schema=analytics&match=names"), 200);
+    assert.equal(await call("objects?search=users&match=objects"), 200);
+    assert.equal(await call("objects?search=users"), 200);
+    assert.equal(await call("objects?search=users&match=invalid"), 400);
+    assert.equal(await call("objects?search=users&match=names", "bob"), 404);
+    assert.deepEqual(seen.map(f => [f.namesOnly, f.searchColumns, f.schema]), [
+      [true, false, "analytics"], [false, false, undefined], [false, true, undefined],
+    ]);
+    assert.equal(await call("scopes?counts=false"), 200);
+    assert.equal(await call("scopes"), 200);
+    assert.deepEqual(scopes, [false, true]);
+  } finally {
+    sessions.clear();
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await service.shutdown();
+    await cleanup(config);
+  }
+});
+
 it(
   "analysis HTTP APIs preserve ownership, pagination, lineage, archive refs and export audit",
   { timeout: 30000 },

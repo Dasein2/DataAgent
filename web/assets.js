@@ -233,7 +233,7 @@ function createRenameDialog() {
   };
 }
 
-export function initAssets({ list, search, toggle, onEdit, onOpen, onDelete, onDeleteAsset, onRenameSession, onRenameGroup }) {
+export function initAssets({ list, search, toggle, onCreateSession, onEdit, onOpen, onDelete, onDeleteAsset, onRenameSession, onRenameGroup }) {
   const layout = list.closest("main");
   const collapseKey = "data-agent-assets-collapsed";
   const menu = createActionMenu();
@@ -353,7 +353,7 @@ export function initAssets({ list, search, toggle, onEdit, onOpen, onDelete, onD
       for (const asset of assets) {
         const active = asset.sessions.some((session) => session.session_id === selected);
         const items = asset.profile ? [
-          { glyph: "add", label: "新建会话", run: () => onEdit(asset.profile, true) },
+          { glyph: "add", label: "新建会话", run: () => onCreateSession(asset.profile) },
           { glyph: "settings", label: "连接设置", run: () => onEdit(asset.profile) },
           { glyph: "remove", label: "删除连接…", run: () => onDeleteAsset(asset.profile), danger: true },
         ] : [{ glyph: "open", label: "打开最近会话", run: () => onOpen(asset.sessions[0]) }];

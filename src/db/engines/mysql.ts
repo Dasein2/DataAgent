@@ -274,6 +274,20 @@ export class MysqlEngine implements Engine {
     return this.connection;
   }
 
+  protected async heartbeat(): Promise<void> {
+    const connection = this.assertOpen();
+    // A driver timeout does not cancel the command on the wire. A wedged heartbeat must
+    // not leave user queries queued behind it on this pinned connection.
+    try {
+      await this.buffered("SELECT 1", 3_000);
+    } catch (error) {
+      if (sourceError(error).code !== "QUERY_TIMEOUT") throw error;
+      this.unavailableReason = "Doris source stopped responding to its idle heartbeat. Reconnect before querying again.";
+      connection.destroy();
+      throw sourceError(error, this.unavailableReason);
+    }
+  }
+
   protected async buffered(sql: string, timeoutMs: number): Promise<{ fields: ColumnMeta[]; rows: unknown[][] }> {
     const connection = this.assertOpen();
     const [rows, fields] = (await sourceRequest(/^(?:SET|START|ROLLBACK|COMMIT|CREATE|DROP|ALTER)\b/i.test(sql) ? "control" : "metadata", () => connection.promise().query({
@@ -498,7 +512,7 @@ export class MysqlEngine implements Engine {
     const contains = (field: string) => `LOCATE(LOWER(${this.literal(filter.search ?? null)}), LOWER(${field})) > 0`;
     const scopeWhere = (field: string) => this.catalogScopeWhere(field, scopes, filter.schema);
     const estimateExpr = this.profile.rowEstimate === "table_rows" ? "t.TABLE_ROWS" : "NULL";
-    const searchColumns = Boolean(filter.search && filter.searchColumns);
+    const searchColumns = Boolean(filter.search && filter.searchColumns && !filter.namesOnly);
     // Group matching columns once. This also avoids a correlated subquery inside an OR,
     // which is not supported consistently by MySQL-compatible analytical engines.
     const columnJoin = searchColumns ? `LEFT JOIN (
@@ -811,6 +825,11 @@ export class DorisEngine extends MysqlEngine {
   override readonly kind: EngineKind = "doris";
   protected override readonly viewSecurity = "";
   protected override readonly tableMarkerComment = false;
+
+  async keepAlive(): Promise<void> {
+    // Constant expression: no table scan or data mutation; works through the SSH stream too.
+    await this.heartbeat();
+  }
 
   /** Doris exposes __internal_schema for its own bookkeeping. */
   protected override hiddenScope(name: string): boolean {

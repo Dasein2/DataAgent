@@ -32,7 +32,7 @@ export function initCatalog({ api, state, panel, reveal }) {
   const tools = make("div", "catalog-toolbar");
   const search = make("input", "catalog-search");
   search.type = "search";
-  search.placeholder = "搜索库、表、字段或注释";
+  search.placeholder = "搜索库、表名或表注释";
   search.setAttribute("aria-label", "搜索数据目录");
   search.maxLength = 120;
   const filter = make("select", "catalog-kind");
@@ -43,13 +43,16 @@ export function initCatalog({ api, state, panel, reveal }) {
     filter.append(option);
   }
   tools.append(search, filter);
+  const fieldToggle = button("搜主库字段", "ghost catalog-fields");
+  fieldToggle.title = "按主库的字段名或字段注释搜索；较慢，不影响默认的表名搜索";
+  fieldToggle.setAttribute("aria-pressed", "false");
   const status = make("p", "catalog-status");
   status.setAttribute("role", "status");
   const body = make("div", "catalog-scroll");
   const tree = make("div", "catalog-tree"), results = make("div", "catalog-results");
   results.hidden = true;
   body.append(tree, results);
-  panel.append(heading, source, tools, status, body);
+  panel.append(heading, source, tools, fieldToggle, status, body);
 
   const drawer = make("dialog", "catalog-drawer");
   drawer.setAttribute("aria-labelledby", "catalog-object-title");
@@ -74,10 +77,13 @@ export function initCatalog({ api, state, panel, reveal }) {
   // Bounded, in-memory snapshots only. A historical session never inherits another session's data.
   const snapshots = new Map();
   let identity, key, ready = false, view, connection, run = new AbortController();
-  let selected, detailRun, detailReturn, debounce, query = "", found = pageState(), treeScroll = 0;
+  let selected, detailRun, detailReturn, debounce, query = "", found = pageState(), treeScroll = 0, deep = false;
   let loadingScopes = false, scopeError = "", refreshPages = false;
   const groups = new Map();
+  const searchKey = (offset) => JSON.stringify([deep ? primaryScope() : null, view.type, query, offset]);
   const canBrowse = () => ready || Boolean(view?.loadedAt);
+  const primaryScope = () => view?.primary || state.session?.default_scope || "";
+  const searchMessage = () => deep ? `正在搜索 ${primaryScope()} 的字段…` : "正在搜索可访问的库、表名和表注释…";
   const scopeLabel = () => state.session?.engine === "postgres" ? "Schema" : "数据库";
   const url = (suffix, params) => `/v1/sessions/${encodeURIComponent(state.sessionId)}/${suffix}${params ? "?" + new URLSearchParams(params) : ""}`;
   const persistScroll = () => { if (view && !query) view.scroll = body.scrollTop; };
@@ -87,6 +93,7 @@ export function initCatalog({ api, state, panel, reveal }) {
     refresh.disabled = !ready || loadingScopes;
     search.disabled = !ready;
     filter.disabled = !ready;
+    fieldToggle.disabled = !ready || !primaryScope();
     const session = state.session;
     source.textContent = session ? `${session.capabilities?.engineLabel || session.engine} · ${session.database}` : "未连接数据库";
     source.title = session ? [session.database, session.host].filter(Boolean).join(" @ ") : "";
@@ -97,7 +104,7 @@ export function initCatalog({ api, state, panel, reveal }) {
     else if (scopeError && !query) text = `无法读取目录：${scopeError}`;
     else if (query) {
       if (found.error) text = `搜索失败：${found.error}`;
-      else if (found.loading && !found.objects.length) text = "正在搜索可访问范围…";
+      else if (found.loading && !found.objects.length) text = searchMessage();
       else if (!found.objects.length) text = "没有匹配的对象。";
       else text = `${found.nextOffset !== null ? "已显示" : "找到"} ${found.objects.length} 个匹配对象`;
     } else if (loadingScopes) text = "读取目录…";
@@ -154,7 +161,7 @@ export function initCatalog({ api, state, panel, reveal }) {
     }
   }
 
-  async function loadPage(page, params, render, { refresh: force = false, mode = run.signal } = {}) {
+  async function loadPage(page, params, render, { refresh: force = false, mode = run.signal, cacheKey } = {}) {
     if (!ready || page.loading || page.nextOffset === null || mode.aborted) return;
     page.loading = true;
     page.error = "";
@@ -165,8 +172,16 @@ export function initCatalog({ api, state, panel, reveal }) {
     if (!clicked || !page.objects.length) render();
     const offset = page.nextOffset;
     try {
-      const reply = await api(url("catalog/objects", { ...params, offset, ...(force ? { refresh: "true" } : {}) }), { signal: mode });
+      const cache = view.searchPages;
+      const cached = !force && cacheKey && cache.get(cacheKey);
+      const hit = cached && cached.until > Date.now();
+      const reply = hit ? cached.reply : await api(url("catalog/objects", { ...params, offset, ...(force ? { refresh: "true" } : {}) }), { signal: mode });
       if (mode.aborted) return;
+      if (cacheKey && !hit) {
+        cache.delete(cacheKey);
+        cache.set(cacheKey, { reply, until: Date.now() + 60_000 });
+        if (cache.size > 16) cache.delete(cache.keys().next().value);
+      }
       const existing = new Set(page.objects.map(objectKey));
       page.objects.push(...reply.objects.filter((object) => !existing.has(objectKey(object))));
       page.nextOffset = reply.nextOffset;
@@ -231,7 +246,7 @@ export function initCatalog({ api, state, panel, reveal }) {
       body.scrollTop = y;
       view.scroll = y;
     }
-    if (load && ready) for (const name of view.open) if (!view.pages.has(name)) void loadScope(name, refreshPages);
+    if (load && ready && !query) for (const name of view.open) if (!view.pages.has(name)) void loadScope(name, refreshPages);
   }
 
   async function loadScopes(force = false) {
@@ -262,10 +277,13 @@ export function initCatalog({ api, state, panel, reveal }) {
 
   function loadSearch(force = false) {
     const page = found;
-    const params = { search: query, ...(view.type ? { type: view.type } : {}) };
+    const schema = deep ? primaryScope() : null;
+    if (deep && !schema) return; // Never turn a scoped field search into a cross-database scan.
+    const params = { search: query, match: deep ? "all" : "objects",
+      ...(schema ? { schema } : {}), ...(view.type ? { type: view.type } : {}) };
     return loadPage(page, params, () => {
       if (page === found) renderPage(results, page, () => void loadSearch(), true);
-    }, { refresh: force || refreshPages, mode: searchRun.signal });
+    }, { refresh: force, mode: searchRun.signal, cacheKey: searchKey(page.nextOffset) });
   }
 
   let searchRun = new AbortController();
@@ -281,14 +299,17 @@ export function initCatalog({ api, state, panel, reveal }) {
     results.hidden = !query;
     tree.hidden = Boolean(query);
     if (!query) {
-      if (previous) body.scrollTop = treeScroll;
+      if (previous) {
+        body.scrollTop = treeScroll;
+        if (!loadingScopes) for (const name of view.open) if (!view.pages.has(name)) void loadScope(name, refreshPages);
+      }
       updateStatus();
       return;
     }
     body.scrollTop = 0;
-    status.textContent = "正在搜索可访问范围…";
-    if (force) void loadSearch(true);
-    else debounce = setTimeout(() => void loadSearch(), 275);
+    status.textContent = searchMessage();
+    if (force || view.searchPages.get(searchKey(0))?.until > Date.now()) void loadSearch(force);
+    else debounce = setTimeout(() => void loadSearch(), deep ? 360 : 180);
   }
 
   function interrupt() {
@@ -319,7 +340,7 @@ export function initCatalog({ api, state, panel, reveal }) {
     connection = nextConnection;
     view = key ? snapshots.get(key) : null;
     if (key && !view) {
-      view = { type: "", scopes: [], tableCounts: null, primary: "", open: new Set(), pages: new Map(), details: new Map(), scroll: 0, loadedAt: 0, connectedAt: nextConnection };
+      view = { type: "", scopes: [], tableCounts: null, primary: "", open: new Set(), pages: new Map(), searchPages: new Map(), details: new Map(), scroll: 0, loadedAt: 0, connectedAt: nextConnection };
       snapshots.set(key, view);
       if (snapshots.size > 8) snapshots.delete(snapshots.keys().next().value);
     }
@@ -327,10 +348,14 @@ export function initCatalog({ api, state, panel, reveal }) {
       view.connectedAt = nextConnection;
       view.tableCounts = null;
       view.pages.clear();
+      view.searchPages.clear();
       view.details.clear();
     }
     query = "";
     search.value = "";
+    deep = false;
+    fieldToggle.setAttribute("aria-pressed", "false");
+    search.placeholder = "搜索库、表名或表注释";
     filter.value = view?.type ?? "";
     results.replaceChildren();
     results.hidden = true;
@@ -352,6 +377,7 @@ export function initCatalog({ api, state, panel, reveal }) {
     interrupt();
     closeObject(false);
     view.pages.clear();
+    view.searchPages.clear();
     view.details.clear();
     view.scroll = y;
     refreshPages = true;
@@ -360,6 +386,14 @@ export function initCatalog({ api, state, panel, reveal }) {
     if (query) setQuery(query, true);
   };
   search.oninput = () => setQuery(search.value.trim());
+  fieldToggle.onclick = () => {
+    if (!ready || !primaryScope()) return;
+    deep = !deep;
+    fieldToggle.setAttribute("aria-pressed", String(deep));
+    search.placeholder = deep ? "搜索主库的表、字段或注释" : "搜索库、表名或表注释";
+    setQuery(search.value.trim());
+    search.focus();
+  };
   filter.onchange = () => {
     if (!ready || view.type === filter.value) return;
     const reloadScopes = loadingScopes || !view.loadedAt;

@@ -66,6 +66,8 @@ export interface AppConfig {
   apiToken: string;
   dataDir: string;
   sessionTtlMs: number;
+  /** Idle Doris source heartbeat; zero disables it. Does not renew the application session. */
+  dorisKeepaliveMs?: number;
   maxSessions: number;
   /** Allow connecting to loopback / RFC1918 targets. Self-hosted deployments usually need this on. */
   allowPrivateNetwork: boolean;
@@ -213,7 +215,8 @@ export function loadConfig(): AppConfig {
     port: num("DATA_AGENT_PORT", 8787),
     apiToken,
     dataDir,
-    sessionTtlMs: num("DATA_AGENT_SESSION_TTL_MS", 60 * 60 * 1000),
+    sessionTtlMs: num("DATA_AGENT_SESSION_TTL_MS", 2 * 60 * 60 * 1000),
+    dorisKeepaliveMs: nonnegative("DATA_AGENT_DORIS_KEEPALIVE_MS", 60_000),
     maxSessions: num("DATA_AGENT_MAX_SESSIONS", 20),
     allowPrivateNetwork: bool("DATA_AGENT_ALLOW_PRIVATE_NETWORK", true),
     env,

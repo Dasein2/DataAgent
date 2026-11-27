@@ -49,6 +49,29 @@ it("rebuilds a failed Doris metadata lane once; counts driver dispatches and nev
   } finally { await pool.close(); }
 });
 
+it("Doris heartbeat uses a bounded constant SELECT and invalidates a timed-out socket", async () => {
+  const { instance } = engineFixture("doris", []);
+  let destroyed = false, timedOut = false;
+  const attempts: Array<{ sql: string; timeout: number }> = [];
+  Object.assign(instance, { connection: {
+    destroy: () => { destroyed = true; },
+    promise: () => ({ query: async ({ sql, timeout }: { sql: string; timeout: number }) => {
+      attempts.push({ sql, timeout });
+      if (timedOut) throw Object.assign(new Error("Query inactivity timeout"), { code: "PROTOCOL_SEQUENCE_TIMEOUT" });
+      return [[[1]], []];
+    } }),
+  } });
+  const doris = instance as DorisEngine;
+  await doris.keepAlive();
+  assert.deepEqual(attempts, [{ sql: "SELECT 1", timeout: 3000 }]);
+  assert.equal(destroyed, false);
+  timedOut = true;
+  await assert.rejects(doris.keepAlive(), { code: "SESSION_UNAVAILABLE" });
+  assert.equal(destroyed, true);
+  await assert.rejects(doris.keepAlive(), { code: "SESSION_UNAVAILABLE" });
+  assert.equal(attempts.length, 2);
+});
+
 for (const engine of ["mysql", "doris", "starrocks"] as const) {
   it(`${engine}: counts visible tables by scope in one unpaged query`, async () => {
     const { instance } = engineFixture(engine, []);
@@ -81,6 +104,12 @@ for (const engine of ["mysql", "doris", "starrocks"] as const) {
     assert.match(queries[0]!, /WHERE object_kind IN \('table'\)[\s\S]*LIMIT 51 OFFSET 50/);
     await instance.listObjects({ schema: "analytics", limit: 50 });
     assert.doesNotMatch(queries[1]!, /information_schema.COLUMNS/);
+    await instance.listObjects({ schema: "analytics", search: "users", limit: 30 });
+    assert.doesNotMatch(queries[2]!, /information_schema.COLUMNS/);
+    assert.match(queries[2]!, /LOWER\(t\.TABLE_COMMENT\)/);
+    await instance.listObjects({ schema: "analytics", search: "users", namesOnly: true, limit: 30 });
+    assert.match(queries[3]!, /LOWER\(t\.TABLE_NAME\)/);
+    assert.doesNotMatch(queries[3]!, /information_schema.COLUMNS|LOWER\(t\.TABLE_(?:SCHEMA|COMMENT)\)/);
   });
   it(`${engine}: propagates a missing-table error instead of returning zero rows`, async () => {
     const error = new Error("Table analytics.missing does not exist");

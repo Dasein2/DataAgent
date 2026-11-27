@@ -40,6 +40,8 @@ export interface QueryStats {
 export interface ObjectFilter {
   search?: string;
   searchColumns?: boolean;
+  /** Match only the object name, e.g. table mentions. */
+  namesOnly?: boolean;
   schema?: string;
   /** Apply the session allowlist before sorting and paginating. */
   scopes?: string[];
@@ -75,6 +77,7 @@ export function tableCountsByScope(scopes: string[], rows: unknown[][]): Record<
 // Rank text matches before column-only matches. Put the engine-specific column
 // predicate in WHERE so the rank expression does not have to evaluate a subquery.
 export function catalogMatch(filter: ObjectFilter, name: string, schema: string, comment: string, column: string) {
+  if (filter.search && filter.namesOnly) return { rank: "1", where: `AND (${name})` };
   return filter.search ? {
     rank: `CASE WHEN ${name} THEN 1 WHEN ${schema} THEN 2 WHEN ${comment} THEN 3 ELSE 4 END`,
     where: `AND (${name} OR ${schema} OR ${comment}${filter.searchColumns ? " OR " + column : ""})`,
@@ -160,6 +163,8 @@ export interface Engine {
   queryTimeoutStatus?(): ServerQueryTimeout;
   businessPermissionKey?(): Promise<string>;
   connect(): Promise<void>;
+  /** Lightweight source heartbeat, serialized by DbSession alongside normal source SQL. */
+  keepAlive?(): Promise<void>;
   close(): Promise<void>;
   /** Runs one guarded statement inside the pinned read-only transaction. */
   query(sql: string, limits: QueryLimits, sink: RowSink): Promise<QueryStats>;

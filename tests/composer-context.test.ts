@@ -93,6 +93,7 @@ test("@ table picker appends all pages on scroll and can select a table past the
   const ui = setup();
   ui.type("查询 @");
   assert.equal(ui.requests[0]!.url.searchParams.get("limit"), "30");
+  assert.equal(ui.requests[0]!.url.searchParams.get("match"), "names");
   assert.equal(ui.requests[0]!.url.searchParams.get("offset"), "0");
   ui.requests[0]!.resolve({ objects: objects("analytics", 0, 30), nextOffset: 30 });
   await ui.flush();
@@ -142,6 +143,20 @@ test("@ load-more and retry work by click and keyboard without losing the curren
   assert.equal(ui.goal.value, '@`analytics`.`table_31` ');
 });
 
+test("@ reuses a recent page without a request and drops it after reconnecting", async () => {
+  const ui = setup();
+  ui.type("@users");
+  ui.requests[0]!.resolve({ objects: [{ schema: "analytics", name: "users" }], nextOffset: null });
+  await ui.flush();
+  ui.type(""); ui.type("@users");
+  assert.deepEqual(ui.mention.children.map(child => child.textContent), ["users"]);
+  assert.equal(ui.requests.length, 1);
+  Object.assign(ui.state.session, { created_at: "reconnected" });
+  ui.picker.update(false);
+  ui.type("@users");
+  assert.equal(ui.requests.length, 2);
+});
+
 test("@ discards pending pages when the search or selected database changes", async () => {
   const ui = setup();
   ui.type("@");
@@ -157,6 +172,7 @@ test("@ discards pending pages when the search or selected database changes", as
 
   const opening = ui.elements.scopeToggle!.onclick!();
   assert.equal(ui.requests[2]!.signal?.aborted, true);
+  assert.equal(ui.requests[3]!.url.searchParams.get("counts"), "false");
   ui.requests[3]!.resolve({ scopes: ["analytics", "warehouse"], default_scope: "analytics" });
   await opening;
   ui.elements.scopeChoices!.children[1]!.onclick!();

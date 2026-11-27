@@ -513,7 +513,7 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
   });
   app.get("/v1/sessions/:id/catalog/scopes", async (req, res) => {
     const session = service.getSession(req.params.id, ownerOf(req));
-    res.json(await session.db.catalogScopes(req.query.refresh === "true"));
+    res.json(await session.db.catalogScopes(req.query.refresh === "true", req.query.counts !== "false"));
   });
   app.get("/v1/sessions/:id/catalog/objects", async (req, res) => {
     const session = service.getSession(req.params.id, ownerOf(req));
@@ -521,11 +521,13 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       schema: z.string().min(1).max(256).optional(),
       search: z.string().trim().max(120).optional(),
       type: z.enum(["table", "view"]).optional(),
+      match: z.enum(["names", "objects", "all"]).default("all"),
     }).parse(req.query);
     const limit = intParam(req.query.limit, q.search ? 100 : 50, 1, 100, "limit");
     const offset = intParam(req.query.offset, 0, 0, 1_000_000, "offset");
     res.json(await session.db.catalogPage({
-      schema: q.schema, search: q.search, searchColumns: Boolean(q.search), limit, offset,
+      schema: q.schema, search: q.search, searchColumns: Boolean(q.search && q.match === "all"),
+      namesOnly: q.match === "names" && Boolean(q.search), limit, offset,
       kinds: q.type === "table" ? [...CATALOG_TABLE_KINDS] : q.type === "view" ? ["view", "materialized_view"] : undefined,
       refresh: req.query.refresh === "true",
     }));
