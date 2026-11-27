@@ -51,6 +51,15 @@ export interface BudgetConfig {
   maxArtifactsPerTask: number;
 }
 
+export interface BusinessContextConfig {
+  /** Estimated tokens one document may consume; larger documents are refused. */
+  documentTokens: number;
+  /** Estimated tokens one session may select in total. */
+  selectionTokens: number;
+  /** Character ceiling per document, so a huge ASCII file cannot arrive before the token check. */
+  documentChars: number;
+}
+
 export interface AppConfig {
   host: string;
   port: number;
@@ -62,6 +71,8 @@ export interface AppConfig {
   allowPrivateNetwork: boolean;
   model: ModelConfig;
   budgets: BudgetConfig;
+  /** Business context budgets; omitted keeps the store defaults (10k per document, 30k per selection). */
+  businessContext?: BusinessContextConfig;
   analysis?: Partial<AnalysisOptions>;
   env: "development" | "production";
   profileSecretKey?: string;
@@ -268,6 +279,13 @@ export function loadConfig(): AppConfig {
       maxChartRows: num("DATA_AGENT_MAX_CHART_ROWS", 20_000),
       maxChartCells: num("DATA_AGENT_MAX_CHART_CELLS", 3_600),
       maxArtifactsPerTask: num("DATA_AGENT_MAX_ARTIFACTS_PER_TASK", 12),
+    },
+    // Business context is injected into the system prompt on every turn, so the per-document budget
+    // bounds both one analysis request and the whole conversation. Raise these deliberately.
+    businessContext: {
+      documentTokens: num("DATA_AGENT_BUSINESS_DOCUMENT_TOKENS", 10_000),
+      selectionTokens: num("DATA_AGENT_BUSINESS_SELECTION_TOKENS", 30_000),
+      documentChars: num("DATA_AGENT_BUSINESS_DOCUMENT_CHARS", 40_000),
     },
   };
 }

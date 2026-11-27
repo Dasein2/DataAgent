@@ -6,8 +6,24 @@ import { normalizeHostKeyFingerprint } from "../db/ssh-tunnel.js";
 import { AppError, isAppError } from "../errors.js";
 import { BusinessContextDraft, BusinessContextId, BusinessContextIds, BusinessContextImport, type BusinessContextFile } from "./types.js";
 
-export const DOCUMENT_TOKEN_LIMIT = 2_000;
-export const SELECTION_TOKEN_LIMIT = 8_000;
+export interface BusinessContextLimits {
+  /** Estimated tokens one document may consume. */
+  documentTokens: number;
+  /** Estimated tokens one session may select in total. */
+  selectionTokens: number;
+  /** Character ceiling per document, checked before the token estimate. */
+  documentChars: number;
+}
+
+/**
+ * Business context is appended to the system prompt on every model turn, and one task may run many
+ * turns. These defaults keep one document inside a single request's budget while still leaving room
+ * for tool results and conversation; override with DATA_AGENT_BUSINESS_* when the operator accepts
+ * the extra per-turn cost.
+ */
+export const DEFAULT_BUSINESS_CONTEXT_LIMITS: BusinessContextLimits = {
+  documentTokens: 10_000, selectionTokens: 30_000, documentChars: 40_000,
+};
 
 /** Scope includes the DB account and the pinned route to it (e.g. two SSH tunnels to localhost). */
 export function businessContextScope(owner: string, config: ConnectionConfig): string {
@@ -21,15 +37,22 @@ export function businessContextScope(owner: string, config: ConnectionConfig): s
 const reference = ({ name, content }: BusinessContextDraft) => ({ name, markdown: content });
 const asPromptJson = (value: unknown) => JSON.stringify(value).replace(/</g, "\\u003c");
 
-// Rough estimate only. Count UTF-8 bytes rather than JS code units to account for Chinese text.
+/**
+ * Deliberately rough, but language-aware: CJK text is close to one token per character while Latin
+ * text averages about four characters per token. Counting raw UTF-8 bytes / 4 under-reported Chinese
+ * documents by roughly 25%, which made the number shown in the console disagree with the bill.
+ */
+const CJK_TEXT = /[\u2e80-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef\uac00-\ud7af]/gu;
 function estimateTokens(file: BusinessContextDraft): number {
-  return Math.ceil(Buffer.byteLength(asPromptJson(reference(file)), "utf8") / 4);
+  const text = asPromptJson(reference(file));
+  const cjk = text.match(CJK_TEXT)?.length ?? 0;
+  return Math.ceil(cjk + (Buffer.byteLength(text, "utf8") - cjk * 3) / 4);
 }
 
-function assertSelectionBudget(files: BusinessContextFile[]): void {
+function assertSelectionBudget(files: BusinessContextFile[], limit: number): void {
   const tokens = files.reduce((sum, file) => sum + estimateTokens(file), 0);
-  if (tokens > SELECTION_TOKEN_LIMIT) {
-    throw new AppError("INVALID_INPUT", `选用文档合计约 ${tokens} tokens，超过 ${SELECTION_TOKEN_LIMIT} 上限。请选择更少的文档。`);
+  if (tokens > limit) {
+    throw new AppError("INVALID_INPUT", `选用文档合计约 ${tokens} tokens，超过 ${limit} 上限。请选择更少的文档。`);
   }
 }
 
@@ -39,7 +62,7 @@ export function contextSummary({ content, ...file }: BusinessContextFile) {
 
 /** Markdown is stored verbatim in atomic JSON records (one file per document). */
 export class BusinessContextStore {
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string, readonly limits: BusinessContextLimits = DEFAULT_BUSINESS_CONTEXT_LIMITS) {}
 
   private dir(scope: string): string {
     if (!/^[a-f0-9]{64}$/.test(scope)) throw new AppError("INVALID_INPUT", "Invalid business context scope");
@@ -90,9 +113,12 @@ export class BusinessContextStore {
 
   private save(scope: string, draft: BusinessContextDraft, previous?: BusinessContextFile): BusinessContextFile {
     const value = BusinessContextDraft.parse(draft);
+    if (value.content.length > this.limits.documentChars) {
+      throw new AppError("INVALID_INPUT", `文档正文 ${value.content.length.toLocaleString()} 字符，超过 ${this.limits.documentChars.toLocaleString()} 字符上限。请精简或拆成多篇。`);
+    }
     const tokens = estimateTokens(value);
-    if (tokens > DOCUMENT_TOKEN_LIMIT) {
-      throw new AppError("INVALID_INPUT", `单篇文档约 ${tokens} tokens，超过 ${DOCUMENT_TOKEN_LIMIT} 上限。请缩短内容。`);
+    if (tokens > this.limits.documentTokens) {
+      throw new AppError("INVALID_INPUT", `单篇文档约 ${tokens} tokens，超过 ${this.limits.documentTokens} 上限。请精简或拆成多篇。`);
     }
     if (previous?.name === value.name && previous.content === value.content) return previous;
     const now = new Date().toISOString();
@@ -104,7 +130,7 @@ export class BusinessContextStore {
     if (previous) {
       const defaults = this.getDefaults(scope);
       if (defaults.includes(file.id)) {
-        assertSelectionBudget(defaults.map((id) => id === file.id ? file : this.get(scope, id)));
+        assertSelectionBudget(defaults.map((id) => id === file.id ? file : this.get(scope, id)), this.limits.selectionTokens);
       }
     }
     this.write(scope, this.path(scope, file.id), file);
@@ -155,7 +181,7 @@ export class BusinessContextStore {
     const parsed = BusinessContextIds.safeParse(ids);
     if (!parsed.success) throw new AppError("INVALID_INPUT", "Invalid business context selection");
     const files = parsed.data.map((id) => this.get(scope, id));
-    assertSelectionBudget(files);
+    assertSelectionBudget(files, this.limits.selectionTokens);
     return files;
   }
 

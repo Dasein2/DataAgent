@@ -741,7 +741,10 @@
         <button type="button" class="ghost" id="btnSteer" disabled hidden>插入指令</button>
         <span class="composer-spacer"></span>
         <span class="composer-meta" id="modelThinking"></span>
-        <span class="composer-meta" id="modelContext"></span>
+        <div class="context-meter" id="modelContext" hidden>
+          <span>上下文</span><progress aria-label="模型上下文用量" hidden></progress>
+          <span class="context-meter-value"></span><span class="context-meter-status" role="status"></span>
+        </div>
         <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
       </div>
       <dialog class="model-confirm" id="modelConfirm" aria-labelledby="modelConfirmTitle"><h3 id="modelConfirmTitle">确认切换模型</h3><p id="modelConfirmText"></p><div class="buttons"><button type="button" class="ghost" id="btnModelConfirmCancel">取消</button><button type="button" class="primary" id="btnModelConfirm">仍然切换</button></div></dialog>
@@ -2234,6 +2237,14 @@ function showAnswer(source, status = "succeeded") {
   composer.setSource(state.assistantEl, source);
 }
 
+function updateModelContext(data, compacting) {
+  const agent = state.session?.agent;
+  if (!agent) return;
+  if (Object.hasOwn(data, "context_usage")) agent.context_usage = data.context_usage;
+  if (compacting !== undefined) agent.context_compacting = compacting;
+  composer.update();
+}
+
 function handleEvent(event) {
   const data = event.data || {};
   if (event.task_id && (state.finishedTaskId === event.task_id || event.task_id !== state.taskId)) return;
@@ -2254,6 +2265,7 @@ function handleEvent(event) {
     case "turn_started":
       closeSegment();
       $("turnInfo").textContent = "turn " + data.turn;
+      updateModelContext(data);
       break;
     case "message_delta":
       ensureAssistantText();
@@ -2295,11 +2307,15 @@ function handleEvent(event) {
     case "usage":
       closeSegment();
       workbench.updateUsage(data);
-      if (state.session?.agent && data.context_usage) state.session.agent.context_usage = data.context_usage;
-      composer.update();
+      updateModelContext(data);
+      break;
+    case "context_compacting":
+    case "context_compacted":
+      updateModelContext(data, event.type === "context_compacting");
       break;
     case "task_finished": {
       const follow = isNearBottom();
+      updateModelContext(data, false);
       if (data.usage) workbench.updateUsage(data.usage);
       $("taskActivity").textContent = "";
       delete $("taskActivity").dataset.since;

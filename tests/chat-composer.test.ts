@@ -23,6 +23,37 @@ test("context switch compares current occupancy, handles unknown usage and warns
   assert.equal(warning({ context_window: 128000, context_usage: null }, {}), null);
 });
 
+test("context meter shows Pi occupancy and treats post-compaction usage as unknown, not zero", () => {
+  const progress = { hidden: false, value: 0, max: 0, setAttribute() {} };
+  const label = { textContent: "" }, status = { textContent: "" };
+  const root = { hidden: false, title: "", dataset: { nearLimit: "" }, querySelector: (selector: string) => ({
+    progress, ".context-meter-value": label, ".context-meter-status": status,
+  })[selector] };
+  const render = (agent: unknown) => {
+    composer.meter = root; composer.agent = agent;
+    runInContext("renderContextMeter(meter, agent)", composer);
+  };
+  render(null);
+  assert.equal(root.hidden, true);
+  render({ context_window: 1_000_000, context_usage: { tokens: 148_000 } });
+  assert.equal(root.hidden, false);
+  assert.equal(label.textContent, "148K / 1M");
+  assert.equal(progress.value, 148_000);
+  assert.equal(progress.max, 1_000_000);
+  render({ context_window: 64_000, context_compacting: true, context_usage: { tokens: 65_000 } });
+  assert.equal(root.dataset.nearLimit, "true");
+  assert.equal(progress.value, 64_000);
+  assert.equal(status.textContent, "压缩中…");
+  render({ context_usage: { tokens: null, contextWindow: 64_000 } });
+  assert.equal(progress.hidden, true);
+  assert.equal(label.textContent, "— / 64K");
+  assert.equal(status.textContent, "");
+  render({ context_usage: { tokens: 9_000, contextWindow: 64_000 } });
+  assert.equal(progress.hidden, false);
+  assert.equal(label.textContent, "9K / 64K");
+  assert.equal(root.dataset.nearLimit, "false");
+});
+
 function markdownHarness() {
   const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
   const context = createContext({ escapeHtml, document: { addEventListener() {} }, $: () => ({ addEventListener() {} }) });

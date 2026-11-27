@@ -33,7 +33,7 @@ import { taskActivity } from "./task-activity.js";
 import { readBusinessView } from "../business/view.js";
 import { parseResultValueRef } from "../business/types.js";
 import { compileResultOperation, type ResultOperation } from "../analysis/operations.js";
-import { BusinessContextStore, businessContextScope } from "../business-context/store.js";
+import { BusinessContextStore, businessContextScope, DEFAULT_BUSINESS_CONTEXT_LIMITS } from "../business-context/store.js";
 import type { BusinessContextFile } from "../business-context/types.js";
 import { ProfileStore } from "../db/profiles-store.js";
 import { AccountStore } from "../auth/accounts.js";
@@ -188,7 +188,7 @@ export class AnalysisService {
     this.history = new HistoryStore(join(app.dataDir, "history"));
     this.broker = new EventBroker(5_000, this.history);
     this.profiles = new ProfileStore(join(app.dataDir, "connections.json"), app.profileSecretKey);
-    this.businessContext = new BusinessContextStore(join(app.dataDir, "business-context"));
+    this.businessContext = new BusinessContextStore(join(app.dataDir, "business-context"), app.businessContext ?? DEFAULT_BUSINESS_CONTEXT_LIMITS);
   }
 
   static async create(app: AppConfig): Promise<AnalysisService> {

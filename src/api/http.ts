@@ -18,7 +18,7 @@ import { ClarificationAnswer } from "../agent/clarification.js";
 import { z } from "zod";
 import { ResultOperation } from "../analysis/operations.js";
 import { BusinessContextDraft, BusinessContextIds, BusinessContextImport } from "../business-context/types.js";
-import { DOCUMENT_TOKEN_LIMIT, SELECTION_TOKEN_LIMIT, contextSummary } from "../business-context/store.js";
+import { contextSummary } from "../business-context/store.js";
 import { ProviderWrite, ProviderId } from "../agent/provider-store.js";
 import { accountAuth } from "./account-auth.js";
 
@@ -624,7 +624,11 @@ export async function createHttpApp(service: AnalysisService): Promise<express.E
       files: service.businessContext.list(scope),
       active: session.businessContextSelection(),
       default_ids: service.businessContext.getDefaults(scope),
-      limits: { document_tokens: DOCUMENT_TOKEN_LIMIT, selection_tokens: SELECTION_TOKEN_LIMIT },
+      limits: {
+        document_tokens: service.businessContext.limits.documentTokens,
+        selection_tokens: service.businessContext.limits.selectionTokens,
+        document_chars: service.businessContext.limits.documentChars,
+      },
     });
   });
   app.post("/v1/sessions/:id/business-context", (req, res) => {

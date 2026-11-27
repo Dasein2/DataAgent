@@ -12,7 +12,8 @@ const button = (text, className = "ghost") => {
 const tokenCount = (files) => files.reduce((sum, file) => sum + file.estimatedTokens, 0);
 
 const MAX_IMPORT_FILES = 20;
-const MAX_IMPORT_CHARS = 16_000;
+/** Fallback only: once the library loads, the server's limits.document_chars wins. */
+const MAX_IMPORT_CHARS = 40_000;
 
 /** File name without extension becomes the document name; the library name limit is 100 characters. */
 export function documentName(filename) {
@@ -61,7 +62,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
   const form = el("form");
   const name = el("input"), markdown = el("textarea");
   name.id = "bcName"; name.required = true; name.maxLength = 100;
-  markdown.id = "bcMarkdown"; markdown.required = true; markdown.maxLength = 16000; markdown.rows = 12;
+  markdown.id = "bcMarkdown"; markdown.required = true; markdown.maxLength = MAX_IMPORT_CHARS; markdown.rows = 12;
   markdown.placeholder = "## 指标定义\n例如：GMV = 已支付且未退款订单金额之和。";
   const nameLabel = el("label", "文档名称"), markdownLabel = el("label", "Markdown 正文");
   nameLabel.htmlFor = name.id; markdownLabel.htmlFor = markdown.id;
@@ -75,6 +76,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
 
   let data = null, revision = 0, loadId = 0, viewKey = null;
   let busy = false, editingId = null, draft = new Set();
+  const charLimit = () => data?.limits?.document_chars ?? MAX_IMPORT_CHARS;
   const route = () => `/v1/sessions/${encodeURIComponent(state.sessionId)}/business-context`;
   const connected = () => Boolean(state.sessionId && state.sessionReady);
   const isCurrent = (stamp, path) => stamp === revision && connected() && route() === path;
@@ -96,6 +98,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
       return;
     }
     if (!data) return;
+    markdown.maxLength = charLimit();
     notice.textContent = `单篇约 ${data.limits.document_tokens.toLocaleString()} tokens 上限。上传 .md 文件或新建文档；编辑不改变已应用的版本。`;
     activeHeading.textContent = `当前会话使用 · ${active.length} 篇 · 约 ${tokenCount(active).toLocaleString()} tokens`;
     for (const item of active) {
@@ -231,6 +234,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
       editingId = id;
       editorStatus.textContent = "";
       name.value = file.name;
+      markdown.maxLength = charLimit();
       markdown.value = file.content;
       editor.showModal();
       name.focus();
@@ -260,7 +264,7 @@ export function initBusinessContext({ api, state, panel, trigger }) {
       try { content = await file.text(); }
       catch { rejected.push(`${file.name}：读取失败`); continue; }
       if (!content.trim()) { rejected.push(`${file.name}：内容为空`); continue; }
-      if (content.length > MAX_IMPORT_CHARS) { rejected.push(`${file.name}：超过 ${MAX_IMPORT_CHARS.toLocaleString()} 字符上限`); continue; }
+      if (content.length > charLimit()) { rejected.push(`${file.name}：超过 ${charLimit().toLocaleString()} 字符上限`); continue; }
       documents.push({ name: documentName(file.name), content });
     }
     try {

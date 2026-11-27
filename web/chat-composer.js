@@ -23,6 +23,31 @@ export function contextSwitchWarning(agent = {}, target = {}) {
     "\n用量为最近的上下文估算，不是累计 Tokens；切换不会删除原始对话。";
 }
 
+const compactTokens = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+
+export function renderContextMeter(root, agent) {
+  root.hidden = !agent;
+  if (!agent) return;
+  const bar = root.querySelector("progress");
+  const label = root.querySelector(".context-meter-value");
+  const status = root.querySelector(".context-meter-status");
+  const usage = agent.context_usage;
+  const tokens = Number.isFinite(usage?.tokens) && usage.tokens >= 0 ? usage.tokens : null;
+  const limit = [usage?.contextWindow, agent.context_window].find((n) => Number.isFinite(n) && n > 0);
+  const ratio = tokens !== null && limit ? tokens / limit : null;
+  root.dataset.nearLimit = String(ratio !== null && ratio >= 0.8);
+  bar.hidden = ratio === null;
+  if (ratio !== null) {
+    bar.max = limit;
+    bar.value = Math.min(tokens, limit);
+    bar.setAttribute("aria-valuetext", `${tokens.toLocaleString()} / ${limit.toLocaleString()} tokens`);
+  }
+  label.textContent = limit ? `${tokens === null ? "—" : compactTokens.format(tokens)} / ${compactTokens.format(limit)}` : "用量待更新";
+  root.title = (ratio === null ? "上下文用量待更新" : `${tokens.toLocaleString()} / ${limit.toLocaleString()} tokens（${(ratio * 100).toFixed(1)}%）`) +
+    "。Pi 估算的当前模型上下文，不是累计用量；旧对话会自动摘要，原始记录不变。";
+  status.textContent = agent.context_compacting ? "压缩中…" : "";
+}
+
 export async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return; } catch { /* HTTP / denied clipboard */ }
   const previous = document.activeElement;
@@ -94,8 +119,7 @@ export function initChatComposer({ api, state, context, applySession, onError, i
     $("modelChipName").textContent = switching ? "切换中…" : agent?.model || "选择模型";
     $("modelChipProvider").textContent = agent?.provider || "";
     $("modelThinking").textContent = agent?.thinking_level ? "思考 · " + agent.thinking_level : "";
-    const usage = agent?.context_usage;
-    $("modelContext").textContent = typeof usage?.tokens === "number" ? `上下文 ${usage.tokens.toLocaleString()} / ${(agent.context_window || usage.contextWindow || 0).toLocaleString()}` : "上下文用量待更新";
+    renderContextMeter($("modelContext"), agent);
     messages.classList.toggle("task-running", Boolean(state.taskId));
     $("btnSend").hidden = Boolean(state.taskId) && !replying;
     $("btnSend").disabled = switching || submitting || isOpening() || (replying

@@ -246,8 +246,13 @@ SSE frame shape (`event:` mirrors `data.type`):
 ```
 
 Event types: `task_queued`, `task_started`, `turn_started`, `message_delta`, `reasoning_delta`,
-`tool_started`, `tool_finished`, `usage`, `retry`, `context_compacted`, `notice`, `question_asked`,
-`question_answered`, `answer_ready`, `task_finished`.
+`tool_started`, `tool_finished`, `usage`, `retry`, `context_compacting`, `context_compacted`,
+`notice`, `question_asked`, `question_answered`, `answer_ready`, `task_finished`.
+
+`context_usage` is Pi’s estimate of the current model context, not cumulative token usage.
+Automatic compaction summarizes older messages without deleting the transcript. `context_compacted`
+reports whether compaction completed or was aborted; its token estimate may be unknown until the
+next model response reports usage.
 
 `answer_ready` carries a completed, non-tool assistant response (`{answer}`), before final evidence
 bookkeeping. It is not emitted for intermediate query previews and is not a terminal task state;

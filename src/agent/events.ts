@@ -14,6 +14,7 @@ export type TaskEventType =
   | "turn_started"
   | "usage"
   | "retry"
+  | "context_compacting"
   | "context_compacted"
   | "notice";
 

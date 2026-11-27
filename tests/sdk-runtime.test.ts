@@ -7,6 +7,7 @@ import { DbSession } from "../src/db/session.js";
 import { ConnectionConfig, type SessionCapabilities } from "../src/db/types.js";
 import { getProfile, describeEngine } from "../src/db/engines/profiles.js";
 import { AnalysisService } from "../src/agent/service.js";
+import type { TaskEvent } from "../src/agent/events.js";
 import { createHttpApp } from "../src/api/http.js";
 import { DorisEngine } from "../src/db/engines/mysql.js";
 import { TtlCache } from "../src/analysis/cache.js";
@@ -95,6 +96,77 @@ it("delivers the selected older answer and qualified table to the model and pers
     for (const server of [http, model]) if (server?.listening) {
       server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
     }
+    await service?.shutdown(); await cleanup(config);
+  }
+});
+
+it("uses Pi automatic compaction and streams context occupancy independently of task usage", async () => {
+  const config = await testConfig();
+  config.budgets.taskTimeoutMs = 10_000;
+  const restore = stubDatabase();
+  let service: AnalysisService | undefined;
+  const requests: { summary: boolean; text: string }[] = [];
+  let analysisRequests = 0;
+  const original = "original_turn_only: May revenue was 120.";
+  const reference = "business_definition_stays_verbatim";
+  const server = createServer(async (req, res) => {
+    let raw = ""; for await (const chunk of req) raw += chunk;
+    const { messages, tools } = JSON.parse(raw);
+    const summary = !tools?.length;
+    requests.push({ summary, text: messages.map(textContent).join("\n") });
+    const turn = summary ? 0 : ++analysisRequests;
+    // Simulate a long recent response so Pi has a retained tail and an older turn to summarize.
+    const content = summary ? "Prior conversation summarized." : turn === 1 ? original : turn === 2 ? "recent details ".repeat(7_000).trimEnd() : "Analysis answer 3";
+    const [input, output] = summary ? [200, 10] : turn === 1 ? [8_500, 10] : turn === 2 ? [31_000, 24_000] : [9_000, 10];
+    const frame = { id: "fixture", model: "compact-fixture" };
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const send = (payload: object) => res.write(`data: ${JSON.stringify({ ...frame, ...payload })}\n\n`);
+    send({ choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }] });
+    send({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: input, completion_tokens: output, total_tokens: input + output } });
+    res.end("data: [DONE]\n\n");
+  });
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    config.model = { provider: "compact-fixture", modelId: "compact-fixture", api: "openai-completions", apiKey: "test",
+      thinkingLevel: "off", contextWindow: 64_000, maxTokens: 24_576, baseUrl: "http://127.0.0.1:" + (server.address() as { port: number }).port + "/v1" };
+    service = await AnalysisService.create(config);
+    const session = await service.createSession(connection, "alice");
+    session.setBusinessContext([service.businessContext.create(session.businessContextScope, { name: "Rules", content: reference })]);
+    const run = async (goal: string) => {
+      const task = session.submit(goal);
+      const events: TaskEvent[] = [];
+      const stop = service!.watchTask(task.id, "alice", event => events.push(event));
+      try { await until(() => !!task.finished_at); }
+      finally { stop(); }
+      assert.equal(task.status, "succeeded", JSON.stringify(task.error));
+      return { task, events };
+    };
+    const first = await run("Start the long analysis");
+    const second = await run("Continue the analysis");
+    const start = second.events.find(event => event.type === "context_compacting");
+    const end = second.events.find(event => event.type === "context_compacted");
+    assert.ok(start && end && start.seq < end.seq);
+    assert.equal(start.data.reason, "threshold");
+    assert.deepEqual(start.data.context_usage, { tokens: 55_000, contextWindow: 64_000, percent: 55_000 / 64_000 * 100 });
+    assert.equal(end.data.completed, true);
+    assert.deepEqual(end.data.context_usage, { tokens: null, contextWindow: 64_000, percent: null });
+    const after = await run("Ask a follow-up after compaction");
+    // Pi may summarize the older turns and the prefix of the current turn separately.
+    assert.deepEqual(requests.slice(0, 2).map(request => request.summary), [false, false]);
+    const summaries = requests.slice(2, -1);
+    assert.ok(summaries.length > 0 && summaries.every(request => request.summary));
+    assert.ok(summaries.some(request => request.text.includes("original_turn_only")));
+    const followUp = requests.at(-1)!;
+    assert.equal(followUp.summary, false);
+    assert.match(followUp.text, /Prior conversation summarized\./);
+    assert.ok(!followUp.text.includes("original_turn_only"));
+    assert.ok(followUp.text.includes(reference), "selected business documents are not summarized");
+    assert.equal(session.getTask(first.task.id).answer, original, "compaction does not change the persisted answer");
+    assert.deepEqual(after.events.find(event => event.type === "usage")?.data.context_usage,
+      { tokens: 9_010, contextWindow: 64_000, percent: 9_010 / 64_000 * 100 });
+  } finally {
+    restore();
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
     await service?.shutdown(); await cleanup(config);
   }
 });
@@ -269,11 +341,17 @@ it("serves scoped business documents and projects only the active revision into 
     const listing = await request(route, 200);
     assert.equal(listing.files[0].content, undefined);
     assert.deepEqual(listing.active, []);
+    assert.deepEqual(listing.limits, { document_tokens: 10_000, selection_tokens: 30_000, document_chars: 40_000 });
     await request(route, 404, "GET", undefined, "bob");
     assert.deepEqual((await request(prefix(bob.id), 200, "GET", undefined, "bob")).files, []);
     await request(`${prefix(other.id)}/${file.id}`, 404);
     await request(`${route}/..%2Fdefaults`, 400);
-    await request(route, 400, "POST", { name: "过长", content: "字".repeat(3_000) });
+    // The per-document budget is 10k tokens, counted as roughly one token per CJK character.
+    const longDoc = (await request(route, 201, "POST", { name: "长文档", content: "字".repeat(6_000) })).file;
+    assert.ok(longDoc !== undefined);
+    await request(`${route}/${longDoc.id}`, 204, "DELETE");
+    await request(route, 400, "POST", { name: "过长", content: "字".repeat(11_000) });
+    await request(route, 400, "POST", { name: "字符超限", content: "x".repeat(40_001) });
     // Uploaded .md files: new names are created, a repeated name replaces in place, one bad file is reported.
     const uploaded = await request(`${route}/import`, 200, "POST", {
       documents: [
@@ -296,8 +374,9 @@ it("serves scoped business documents and projects only the active revision into 
     const bobImported = await request(`${prefix(bob.id)}/import`, 200, "POST", { documents: [{ name: "bob 的口径", content: "b" }] }, "bob");
     assert.deepEqual(bobImported.created.map((file: any) => file.name), ["bob 的口径"]);
     await request(`${route}/selection`, 404, "PUT", { ids: ["ctx_00000000000000000000"] });
+    // Four documents near the per-document cap exceed the 30k selection budget.
     const heavy = [];
-    for (let i = 0; i < 5; i++) heavy.push((await request(route, 201, "POST", { name: `大文档 ${i}`, content: "x".repeat(7_000) })).file.id);
+    for (let i = 0; i < 4; i++) heavy.push((await request(route, 201, "POST", { name: `大文档 ${i}`, content: "x".repeat(39_000) })).file.id);
     await request(`${route}/selection`, 400, "PUT", { ids: heavy });
     await request(`${route}/defaults`, 400, "PUT", { ids: heavy });
     assert.equal((await request(`${route}/selection`, 200, "PUT", { ids: [file.id, file.id] })).active.length, 1);

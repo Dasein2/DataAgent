@@ -168,7 +168,7 @@ export class AnalysisSession {
       const caps = db.capabilitiesView;
       const customTools = selectTools(createDatabaseTools(toolRuntime), caps);
       tools = toolCatalog(customTools);
-      const settingsManager = SettingsManager.inMemory();
+      const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true } });
       const resourceLoader = new DefaultResourceLoader({
         cwd,
         agentDir: join(app.dataDir, "pi", "agent"),
@@ -365,6 +365,7 @@ export class AnalysisSession {
         selection: this.modelSelection ?? null,
         turns: this.turns,
         context_usage: safeContextUsage(this.agent),
+        context_compacting: this.agent.isCompacting,
       },
     };
   }
@@ -702,6 +703,7 @@ export class AnalysisSession {
       activity: task.activity,
       turns: task.turns,
       usage: task.usage,
+      context_usage: safeContextUsage(this.agent),
       results: task.results,
       business_results: task.business_results,
       operations: task.operations,
@@ -794,7 +796,7 @@ export class AnalysisSession {
           this.broker.publish(task.id, "notice", { code: "TURN_BUDGET_EXCEEDED", max_turns: this.maxTurns });
           void this.agent.abort();
         }
-        this.broker.publish(task.id, "turn_started", { turn: this.turns });
+        this.broker.publish(task.id, "turn_started", { turn: this.turns, context_usage: safeContextUsage(this.agent) });
         break;
       }
       case "turn_end": {
@@ -804,6 +806,10 @@ export class AnalysisSession {
           this.broker.publish(task.id, "notice", { code: "TURN_BUDGET_EXCEEDED", max_turns: this.maxTurns });
           void this.agent.abort();
         }
+        // Pi publishes message_end before persisting the message. At turn_end the
+        // assistant response and tool results are in the projection used for context usage.
+        const stats = this.agent.getSessionStats();
+        this.broker.publish(task.id, "usage", { ...stats.tokens, context_usage: stats.contextUsage ?? null });
         break;
       }
       case "message_update": {
@@ -862,8 +868,15 @@ export class AnalysisSession {
         this.broker.publish(task.id, "retry", { attempt: event.attempt, max_attempts: event.maxAttempts, error: event.errorMessage });
         break;
       }
+      case "compaction_start": {
+        this.broker.publish(task.id, "context_compacting", { reason: event.reason, context_usage: safeContextUsage(this.agent) });
+        break;
+      }
       case "compaction_end": {
-        this.broker.publish(task.id, "context_compacted", { reason: event.reason, aborted: event.aborted });
+        this.broker.publish(task.id, "context_compacted", {
+          reason: event.reason, aborted: event.aborted, completed: Boolean(event.result),
+          context_usage: safeContextUsage(this.agent),
+        });
         break;
       }
       case "message_end": {
@@ -888,7 +901,6 @@ export class AnalysisSession {
             hasTools,
           };
           this.saveTask(task);
-          this.broker.publish(task.id, "usage", { ...this.agent.getSessionStats().tokens, context_usage: safeContextUsage(this.agent) });
         }
         break;
       }
@@ -918,9 +930,9 @@ function diffUsage(a: ReturnType<AgentSession["getSessionStats"]>, b: ReturnType
   };
 }
 
-function safeContextUsage(agent: AgentSession): unknown {
+function safeContextUsage(agent: AgentSession) {
   try {
-    return agent.getSessionStats().contextUsage ?? null;
+    return agent.getContextUsage() ?? null;
   } catch {
     return null;
   }
